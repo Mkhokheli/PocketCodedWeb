@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- The workspace may contain SSH private keys and Git credentials. -->
+    <exclude domain="file" path="workspace" />
+    <exclude domain="file" path="projects" />
+    <exclude domain="file" path=".runtime" />
+</full-backup-content>

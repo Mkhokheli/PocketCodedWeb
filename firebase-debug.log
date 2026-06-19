@@ -1,0 +1,303 @@
+[debug] [2026-06-15T10:11:00.103Z] ----------------------------------------------------------------------
+[debug] [2026-06-15T10:11:00.107Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\bin\firebase.js deploy --only hosting --project pocketcodedpy --non-interactive
+[debug] [2026-06-15T10:11:00.108Z] CLI Version:   15.20.0
+[debug] [2026-06-15T10:11:00.108Z] Platform:      win32
+[debug] [2026-06-15T10:11:00.108Z] Node Version:  v24.14.1
+[debug] [2026-06-15T10:11:00.108Z] Time:          Mon Jun 15 2026 12:11:00 GMT+0200 (South Africa Standard Time)
+[debug] [2026-06-15T10:11:00.108Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-06-15T10:11:00.110Z] >>> [apiv2][query] GET https://firebase-public.firebaseio.com/cli.json [none]
+[debug] [2026-06-15T10:11:01.538Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-06-15T10:11:01.553Z] Error: Could not load the default credentials. Browse to https://cloud.google.com/docs/authentication/getting-started for more information.
+    at GoogleAuth.getApplicationDefaultAsync (C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\google-auth-library\build\src\auth\googleauth.js:287:15)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async GoogleAuth._GoogleAuth_determineClient (C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\google-auth-library\build\src\auth\googleauth.js:834:32)
+    at async GoogleAuth.getClient (C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\google-auth-library\build\src\auth\googleauth.js:698:20)
+    at async GoogleAuth.getAccessToken (C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\google-auth-library\build\src\auth\googleauth.js:722:24)
+    at async autoAuth (C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\requireAuth.js:28:19)
+    at async requireAuth (C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\requireAuth.js:90:20)
+    at async requirePermissions (C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\requirePermissions.js:17:5)
+    at async C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\command.js:278:17
+[error] 
+[error] Error: Failed to authenticate, have you run firebase login?
+[debug] [2026-06-15T10:18:27.943Z] ----------------------------------------------------------------------
+[debug] [2026-06-15T10:18:27.946Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\bin\firebase.js login --reauth
+[debug] [2026-06-15T10:18:27.946Z] CLI Version:   15.20.0
+[debug] [2026-06-15T10:18:27.946Z] Platform:      win32
+[debug] [2026-06-15T10:18:27.946Z] Node Version:  v24.14.1
+[debug] [2026-06-15T10:18:27.946Z] Time:          Mon Jun 15 2026 12:18:27 GMT+0200 (South Africa Standard Time)
+[debug] [2026-06-15T10:18:27.946Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-06-15T10:18:27.948Z] >>> [apiv2][query] GET https://firebase-public.firebaseio.com/cli.json [none]
+[error] 
+[error] Error: Cannot run login in non-interactive mode. See login:ci to generate a token for use in non-interactive environments.
+[debug] [2026-06-15T10:29:47.469Z] ----------------------------------------------------------------------
+[debug] [2026-06-15T10:29:47.472Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\bin\firebase.js login --reauth
+[debug] [2026-06-15T10:29:47.472Z] CLI Version:   15.20.0
+[debug] [2026-06-15T10:29:47.472Z] Platform:      win32
+[debug] [2026-06-15T10:29:47.472Z] Node Version:  v24.14.1
+[debug] [2026-06-15T10:29:47.473Z] Time:          Mon Jun 15 2026 12:29:47 GMT+0200 (South Africa Standard Time)
+[debug] [2026-06-15T10:29:47.473Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-06-15T10:29:47.475Z] >>> [apiv2][query] GET https://firebase-public.firebaseio.com/cli.json [none]
+[info] 
+[info] Visit this URL on this device to log in:
+[info] https://accounts.google.com/o/oauth2/auth?client_id=563584335869-fgrhgmd47bqnekij5i8b5pr03ho849e6.apps.googleusercontent.com&scope=email%20openid%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloudplatformprojects.readonly%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Ffirebase%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcloud-platform&response_type=code&state=113210639&redirect_uri=http%3A%2F%2Flocalhost%3A9005
+[info] 
+[info] Waiting for authentication...
+[debug] [2026-06-15T10:29:48.293Z] <<< [apiv2][status] GET https://firebase-public.firebaseio.com/cli.json 200
+[debug] [2026-06-15T10:29:48.294Z] <<< [apiv2][body] GET https://firebase-public.firebaseio.com/cli.json {"cloudBuildErrorAfter":1594252800000,"cloudBuildWarnAfter":1590019200000,"defaultNode10After":1594252800000,"minVersion":"3.0.5","node8DeploysDisabledAfter":1613390400000,"node8RuntimeDisabledAfter":1615809600000,"node8WarnAfter":1600128000000}
+[debug] [2026-06-15T10:30:04.600Z] >>> [apiv2][query] POST https://accounts.google.com/o/oauth2/token [none]
+[debug] [2026-06-15T10:30:04.601Z] >>> [apiv2][body] POST https://accounts.google.com/o/oauth2/token [omitted]
+[debug] [2026-06-15T10:30:05.556Z] <<< [apiv2][status] POST https://accounts.google.com/o/oauth2/token 200
+[debug] [2026-06-15T10:30:08.007Z] ----------------------------------------------------------------------
+[debug] [2026-06-15T10:30:08.011Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\bin\firebase.js deploy --only hosting --project pocketcodedpy
+[debug] [2026-06-15T10:30:08.012Z] CLI Version:   15.20.0
+[debug] [2026-06-15T10:30:08.012Z] Platform:      win32
+[debug] [2026-06-15T10:30:08.012Z] Node Version:  v24.14.1
+[debug] [2026-06-15T10:30:08.012Z] Time:          Mon Jun 15 2026 12:30:08 GMT+0200 (South Africa Standard Time)
+[debug] [2026-06-15T10:30:08.012Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-06-15T10:30:09.628Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-06-15T10:30:09.630Z] > authorizing via signed-in user (slimkheli2@gmail.com)
+[debug] [2026-06-15T10:30:09.630Z] [iam] checking project pocketcodedpy for permissions ["firebase.projects.get","firebasehosting.sites.update"]
+[debug] [2026-06-15T10:30:09.632Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:09.633Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:09.634Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions [none]
+[debug] [2026-06-15T10:30:09.635Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions  x-goog-user-project=pocketcodedpy
+[debug] [2026-06-15T10:30:09.635Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-06-15T10:30:11.610Z] <<< [apiv2][status] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions 200
+[debug] [2026-06-15T10:30:11.612Z] <<< [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions {"permissions":["firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-06-15T10:30:11.616Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:11.616Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:11.618Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects/pocketcodedpy [none]
+[debug] [2026-06-15T10:30:12.617Z] <<< [apiv2][status] GET https://firebase.googleapis.com/v1beta1/projects/pocketcodedpy 200
+[debug] [2026-06-15T10:30:12.618Z] <<< [apiv2][body] GET https://firebase.googleapis.com/v1beta1/projects/pocketcodedpy {"projectId":"pocketcodedpy","projectNumber":"360292021566","displayName":"PocketCodedPy","name":"projects/pocketcodedpy","resources":{"hostingSite":"pocketcodedpy"},"state":"ACTIVE","etag":"1_50aa9b71-ebd9-446c-bc9b-dea01b7068ef"}
+[info] 
+[info] === Deploying to 'pocketcodedpy'...
+[info] 
+[info] i  deploying hosting 
+[debug] [2026-06-15T10:30:12.637Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:12.638Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:12.639Z] >>> [apiv2][query] GET https://firebasehosting.googleapis.com/v1beta1/projects/pocketcodedpy/sites/pocketcodedpy [none]
+[debug] [2026-06-15T10:30:15.168Z] <<< [apiv2][status] GET https://firebasehosting.googleapis.com/v1beta1/projects/pocketcodedpy/sites/pocketcodedpy 200
+[debug] [2026-06-15T10:30:15.168Z] <<< [apiv2][body] GET https://firebasehosting.googleapis.com/v1beta1/projects/pocketcodedpy/sites/pocketcodedpy {"name":"projects/pocketcodedpy/sites/pocketcodedpy","defaultUrl":"https://pocketcodedpy.web.app","type":"DEFAULT_SITE"}
+[debug] [2026-06-15T10:30:15.171Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:15.172Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:15.172Z] >>> [apiv2][query] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions [none]
+[debug] [2026-06-15T10:30:15.173Z] >>> [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions {"status":"CREATED","labels":{"deployment-tool":"cli-firebase"}}
+[debug] [2026-06-15T10:30:18.291Z] <<< [apiv2][status] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions 200
+[debug] [2026-06-15T10:30:18.292Z] <<< [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions {"name":"projects/360292021566/sites/pocketcodedpy/versions/1a062e94aadf7f61","status":"CREATED","config":{},"labels":{"deployment-tool":"cli-firebase"}}
+[info] i  hosting[pocketcodedpy]: beginning deploy... 
+[info] i  hosting[pocketcodedpy]: found 2 files in docs 
+[debug] [2026-06-15T10:30:18.315Z] [hosting] uploading with 200 concurrency
+[debug] [2026-06-15T10:30:18.318Z] [hosting] hash cache [ZG9jcw] not populated
+[debug] [2026-06-15T10:30:18.328Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:18.329Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:18.332Z] [hosting] hash cache [ZG9jcw] stored for 2 files
+[debug] [2026-06-15T10:30:18.332Z] [hosting][hash queue][FINAL] {"max":7,"min":4,"avg":5.5,"active":0,"complete":2,"success":2,"errored":0,"retried":0,"total":2,"elapsed":11}
+[debug] [2026-06-15T10:30:18.333Z] >>> [apiv2][query] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/1a062e94aadf7f61:populateFiles [none]
+[debug] [2026-06-15T10:30:18.333Z] >>> [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/1a062e94aadf7f61:populateFiles {"files":{"/account-deletion.html":"bf5b4a0a3823ea5e1409b1538fda4ee56eb86395bf0e0ea87c86eda2fe2eb39d","/privacy-policy.html":"cc6292909bf8aee4c6e897db975c1737d85850e9c52af775a5d822dae823bc05"}}
+[debug] [2026-06-15T10:30:19.151Z] <<< [apiv2][status] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/1a062e94aadf7f61:populateFiles 200
+[debug] [2026-06-15T10:30:19.152Z] <<< [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/1a062e94aadf7f61:populateFiles {"uploadRequiredHashes":["bf5b4a0a3823ea5e1409b1538fda4ee56eb86395bf0e0ea87c86eda2fe2eb39d","cc6292909bf8aee4c6e897db975c1737d85850e9c52af775a5d822dae823bc05"],"uploadUrl":"https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files"}
+[debug] [2026-06-15T10:30:19.154Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:19.154Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:19.155Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:19.155Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:19.156Z] >>> [apiv2][query] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/bf5b4a0a3823ea5e1409b1538fda4ee56eb86395bf0e0ea87c86eda2fe2eb39d [none]
+[debug] [2026-06-15T10:30:19.156Z] >>> [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/bf5b4a0a3823ea5e1409b1538fda4ee56eb86395bf0e0ea87c86eda2fe2eb39d [stream]
+[debug] [2026-06-15T10:30:19.158Z] >>> [apiv2][query] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/cc6292909bf8aee4c6e897db975c1737d85850e9c52af775a5d822dae823bc05 [none]
+[debug] [2026-06-15T10:30:19.158Z] >>> [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/cc6292909bf8aee4c6e897db975c1737d85850e9c52af775a5d822dae823bc05 [stream]
+[debug] [2026-06-15T10:30:19.160Z] [hosting][populate queue][FINAL] {"max":827,"min":827,"avg":827,"active":0,"complete":1,"success":1,"errored":0,"retried":0,"total":1,"elapsed":832}
+[debug] [2026-06-15T10:30:19.161Z] [hosting] uploads queued: 2
+[debug] [2026-06-15T10:30:20.689Z] <<< [apiv2][status] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/cc6292909bf8aee4c6e897db975c1737d85850e9c52af775a5d822dae823bc05 200
+[debug] [2026-06-15T10:30:20.724Z] <<< [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/cc6292909bf8aee4c6e897db975c1737d85850e9c52af775a5d822dae823bc05 [stream]
+[debug] [2026-06-15T10:30:20.728Z] <<< [apiv2][status] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/bf5b4a0a3823ea5e1409b1538fda4ee56eb86395bf0e0ea87c86eda2fe2eb39d 200
+[debug] [2026-06-15T10:30:20.731Z] <<< [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/1a062e94aadf7f61/files/bf5b4a0a3823ea5e1409b1538fda4ee56eb86395bf0e0ea87c86eda2fe2eb39d [stream]
+[debug] [2026-06-15T10:30:20.745Z] [hosting][upload queue][FINAL] {"max":1592,"min":1569,"avg":1580.5,"active":0,"complete":2,"success":2,"errored":0,"retried":0,"total":2,"elapsed":1592}
+[info] +  hosting[pocketcodedpy]: file upload complete 
+[debug] [2026-06-15T10:30:20.763Z] [hosting] deploy completed after 2466ms
+[debug] [2026-06-15T10:30:20.814Z] [
+  {
+    "config": {
+      "public": "docs",
+      "cleanUrls": true,
+      "trailingSlash": false,
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**"
+      ],
+      "site": "pocketcodedpy"
+    },
+    "version": "projects/360292021566/sites/pocketcodedpy/versions/1a062e94aadf7f61"
+  }
+]
+[info] i  hosting[pocketcodedpy]: finalizing version... 
+[debug] [2026-06-15T10:30:20.830Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:20.831Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:20.841Z] >>> [apiv2][query] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/1a062e94aadf7f61 updateMask=status%2Cconfig
+[debug] [2026-06-15T10:30:20.841Z] >>> [apiv2][body] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/1a062e94aadf7f61 {"status":"FINALIZED","config":{"cleanUrls":true,"trailingSlashBehavior":"REMOVE"}}
+[debug] [2026-06-15T10:30:22.571Z] <<< [apiv2][status] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/1a062e94aadf7f61 200
+[debug] [2026-06-15T10:30:22.577Z] <<< [apiv2][body] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/1a062e94aadf7f61 {"name":"projects/360292021566/sites/pocketcodedpy/versions/1a062e94aadf7f61","status":"FINALIZED","config":{"cleanUrls":true,"trailingSlashBehavior":"REMOVE"},"labels":{"deployment-tool":"cli-firebase"},"createTime":"2026-06-15T10:30:16.399769Z","createUser":{"email":"slimkheli2@gmail.com"},"finalizeTime":"2026-06-15T10:30:22.512564Z","finalizeUser":{"email":"slimkheli2@gmail.com"}}
+[debug] [2026-06-15T10:30:22.577Z] [hosting] finalized version for pocketcodedpy:[object Object]
+[info] +  hosting[pocketcodedpy]: version finalized 
+[info] i  hosting[pocketcodedpy]: releasing new version... 
+[debug] [2026-06-15T10:30:22.579Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:22.579Z] Checked if tokens are valid: true, expires at: 1781523004557
+[debug] [2026-06-15T10:30:22.580Z] >>> [apiv2][query] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/channels/live/releases versionName=projects%2F360292021566%2Fsites%2Fpocketcodedpy%2Fversions%2F1a062e94aadf7f61
+[debug] [2026-06-15T10:30:22.582Z] >>> [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/channels/live/releases {}
+[debug] [2026-06-15T10:30:24.184Z] <<< [apiv2][status] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/channels/live/releases 200
+[debug] [2026-06-15T14:17:10.627Z] ----------------------------------------------------------------------
+[debug] [2026-06-15T14:17:10.630Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\User-PC\AppData\Local\npm-cache\_npx\ba4f1959e38407b5\node_modules\firebase-tools\lib\bin\firebase.js deploy --only hosting,firestore:rules --project pocketcodedpy --non-interactive
+[debug] [2026-06-15T14:17:10.630Z] CLI Version:   15.20.0
+[debug] [2026-06-15T14:17:10.630Z] Platform:      win32
+[debug] [2026-06-15T14:17:10.630Z] Node Version:  v24.14.1
+[debug] [2026-06-15T14:17:10.630Z] Time:          Mon Jun 15 2026 16:17:10 GMT+0200 (South Africa Standard Time)
+[debug] [2026-06-15T14:17:10.631Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-06-15T14:17:12.959Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-06-15T14:17:12.960Z] > authorizing via signed-in user (slimkheli2@gmail.com)
+[debug] [2026-06-15T14:17:12.960Z] [iam] checking project pocketcodedpy for permissions ["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get","firebasehosting.sites.update"]
+[debug] [2026-06-15T14:17:12.961Z] Checked if tokens are valid: false, expires at: 1781523004557
+[debug] [2026-06-15T14:17:12.962Z] Checked if tokens are valid: false, expires at: 1781523004557
+[debug] [2026-06-15T14:17:12.962Z] > refreshing access token with scopes: []
+[debug] [2026-06-15T14:17:12.964Z] >>> [apiv2][query] POST https://www.googleapis.com/oauth2/v3/token [none]
+[debug] [2026-06-15T14:17:12.964Z] >>> [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-06-15T14:17:13.383Z] <<< [apiv2][status] POST https://www.googleapis.com/oauth2/v3/token 200
+[debug] [2026-06-15T14:17:13.384Z] <<< [apiv2][body] POST https://www.googleapis.com/oauth2/v3/token [omitted]
+[debug] [2026-06-15T14:17:13.393Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions [none]
+[debug] [2026-06-15T14:17:13.393Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions  x-goog-user-project=pocketcodedpy
+[debug] [2026-06-15T14:17:13.393Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions {"permissions":["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-06-15T14:17:13.862Z] <<< [apiv2][status] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions 200
+[debug] [2026-06-15T14:17:13.862Z] <<< [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/pocketcodedpy:testIamPermissions {"permissions":["datastore.indexes.create","datastore.indexes.delete","datastore.indexes.list","datastore.indexes.update","firebase.projects.get","firebasehosting.sites.update"]}
+[debug] [2026-06-15T14:17:13.862Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:13.863Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:13.863Z] >>> [apiv2][query] GET https://firebase.googleapis.com/v1beta1/projects/pocketcodedpy [none]
+[debug] [2026-06-15T14:17:14.453Z] <<< [apiv2][status] GET https://firebase.googleapis.com/v1beta1/projects/pocketcodedpy 200
+[debug] [2026-06-15T14:17:14.454Z] <<< [apiv2][body] GET https://firebase.googleapis.com/v1beta1/projects/pocketcodedpy {"projectId":"pocketcodedpy","projectNumber":"360292021566","displayName":"PocketCodedPy","name":"projects/pocketcodedpy","resources":{"hostingSite":"pocketcodedpy"},"state":"ACTIVE","etag":"1_50aa9b71-ebd9-446c-bc9b-dea01b7068ef"}
+[info] 
+[info] === Deploying to 'pocketcodedpy'...
+[info] 
+[info] i  deploying firestore, hosting 
+[info] i  firestore: ensuring required API firestore.googleapis.com is enabled... 
+[debug] [2026-06-15T14:17:14.457Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:14.457Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:14.457Z] >>> [apiv2][query] GET https://serviceusage.googleapis.com/v1/projects/pocketcodedpy/services/firestore.googleapis.com [none]
+[debug] [2026-06-15T14:17:14.457Z] >>> [apiv2][(partial)header] GET https://serviceusage.googleapis.com/v1/projects/pocketcodedpy/services/firestore.googleapis.com  x-goog-user-project=pocketcodedpy
+[debug] [2026-06-15T14:17:16.392Z] <<< [apiv2][status] GET https://serviceusage.googleapis.com/v1/projects/pocketcodedpy/services/firestore.googleapis.com 200
+[debug] [2026-06-15T14:17:16.392Z] <<< [apiv2][body] GET https://serviceusage.googleapis.com/v1/projects/pocketcodedpy/services/firestore.googleapis.com [omitted]
+[info] +  firestore: required API firestore.googleapis.com is enabled 
+[info] i  firestore: ensuring required API firestore.googleapis.com is enabled... 
+[debug] [2026-06-15T14:17:16.399Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:16.400Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:16.400Z] >>> [apiv2][query] GET https://firestore.googleapis.com/v1/projects/pocketcodedpy/databases/(default) [none]
+[debug] [2026-06-15T14:17:17.003Z] <<< [apiv2][status] GET https://firestore.googleapis.com/v1/projects/pocketcodedpy/databases/(default) 200
+[debug] [2026-06-15T14:17:17.003Z] <<< [apiv2][body] GET https://firestore.googleapis.com/v1/projects/pocketcodedpy/databases/(default) {"name":"projects/pocketcodedpy/databases/(default)","uid":"8e344798-52c4-4b58-8fb3-834639213155","createTime":"2026-06-14T18:18:21.029889Z","updateTime":"2026-06-14T18:18:21.029889Z","locationId":"africa-south1","type":"FIRESTORE_NATIVE","concurrencyMode":"PESSIMISTIC","versionRetentionPeriod":"3600s","earliestVersionTime":"2026-06-15T13:17:17.360739Z","appEngineIntegrationMode":"DISABLED","pointInTimeRecoveryEnablement":"POINT_IN_TIME_RECOVERY_DISABLED","deleteProtectionState":"DELETE_PROTECTION_DISABLED","databaseEdition":"STANDARD","freeTier":true,"realtimeUpdatesMode":"REALTIME_UPDATES_MODE_ENABLED","etag":"IJTo4963iZUDMJC8xre1h5UD"}
+[info] i  cloud.firestore: checking firestore.rules for compilation errors... 
+[debug] [2026-06-15T14:17:17.004Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:17.004Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:17.005Z] >>> [apiv2][query] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy:test [none]
+[debug] [2026-06-15T14:17:17.005Z] >>> [apiv2][body] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy:test [omitted]
+[debug] [2026-06-15T14:17:17.674Z] <<< [apiv2][status] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy:test 200
+[debug] [2026-06-15T14:17:17.674Z] <<< [apiv2][body] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy:test {}
+[info] +  cloud.firestore: rules file firestore.rules compiled successfully 
+[debug] [2026-06-15T14:17:17.675Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:17.675Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:17.676Z] >>> [apiv2][query] GET https://firebasehosting.googleapis.com/v1beta1/projects/pocketcodedpy/sites/pocketcodedpy [none]
+[debug] [2026-06-15T14:17:19.818Z] <<< [apiv2][status] GET https://firebasehosting.googleapis.com/v1beta1/projects/pocketcodedpy/sites/pocketcodedpy 200
+[debug] [2026-06-15T14:17:19.818Z] <<< [apiv2][body] GET https://firebasehosting.googleapis.com/v1beta1/projects/pocketcodedpy/sites/pocketcodedpy {"name":"projects/pocketcodedpy/sites/pocketcodedpy","defaultUrl":"https://pocketcodedpy.web.app","type":"DEFAULT_SITE"}
+[debug] [2026-06-15T14:17:19.820Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:19.820Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:19.821Z] >>> [apiv2][query] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions [none]
+[debug] [2026-06-15T14:17:19.821Z] >>> [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions {"status":"CREATED","labels":{"deployment-tool":"cli-firebase"}}
+[debug] [2026-06-15T14:17:21.821Z] <<< [apiv2][status] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions 200
+[debug] [2026-06-15T14:17:21.856Z] <<< [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions {"name":"projects/360292021566/sites/pocketcodedpy/versions/cb99d7ff132f4db2","status":"CREATED","config":{},"labels":{"deployment-tool":"cli-firebase"}}
+[debug] [2026-06-15T14:17:21.858Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:21.858Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:21.859Z] >>> [apiv2][query] GET https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/releases pageSize=10&pageToken=
+[debug] [2026-06-15T14:17:22.724Z] <<< [apiv2][status] GET https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/releases 200
+[debug] [2026-06-15T14:17:22.724Z] <<< [apiv2][body] GET https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/releases {"releases":[{"name":"projects/pocketcodedpy/releases/cloud.firestore","rulesetName":"projects/pocketcodedpy/rulesets/88e694b2-9bbd-4f69-b0b1-02d91a88f901","createTime":"2026-06-14T18:18:24.740880Z","updateTime":"2026-06-14T18:18:24.740880Z"}]}
+[debug] [2026-06-15T14:17:22.725Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:22.725Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:22.726Z] >>> [apiv2][query] GET https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/rulesets/88e694b2-9bbd-4f69-b0b1-02d91a88f901 [none]
+[debug] [2026-06-15T14:17:23.745Z] <<< [apiv2][status] GET https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/rulesets/88e694b2-9bbd-4f69-b0b1-02d91a88f901 200
+[debug] [2026-06-15T14:17:24.283Z] <<< [apiv2][body] GET https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/rulesets/88e694b2-9bbd-4f69-b0b1-02d91a88f901 [omitted]
+[info] i  firestore: uploading rules firestore.rules... 
+[debug] [2026-06-15T14:17:24.286Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:24.286Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:24.328Z] >>> [apiv2][query] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/rulesets [none]
+[debug] [2026-06-15T14:17:24.329Z] >>> [apiv2][body] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/rulesets [omitted]
+[debug] [2026-06-15T14:17:25.961Z] <<< [apiv2][status] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/rulesets 200
+[debug] [2026-06-15T14:17:25.961Z] <<< [apiv2][body] POST https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/rulesets {"name":"projects/pocketcodedpy/rulesets/7e44d8bf-3661-4b9f-9ad5-e80ab4eccb4a","source":{"files":[{"content":"rules_version = '2';\n\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /users/{userId} {\n      function ownsProfile() {\n        return request.auth != null && request.auth.uid == userId;\n      }\n\n      function validTrialStartOnCreate() {\n        return !('trialStartedAt' in request.resource.data)\n          || request.resource.data.trialStartedAt == request.time;\n      }\n\n      function trialStartIsImmutable() {\n        return (\n          !('trialStartedAt' in resource.data)\n          && (\n            !('trialStartedAt' in request.resource.data)\n            || request.resource.data.trialStartedAt == request.time\n          )\n        ) || (\n          'trialStartedAt' in resource.data\n          && request.resource.data.trialStartedAt == resource.data.trialStartedAt\n        );\n      }\n\n      allow read: if ownsProfile();\n      allow create: if ownsProfile() && validTrialStartOnCreate();\n      allow update: if ownsProfile() && trialStartIsImmutable();\n      allow delete: if false;\n    }\n\n    match /{document=**} {\n      allow read, write: if false;\n    }\n  }\n}\n","name":"firestore.rules"}]},"createTime":"2026-06-15T14:17:25.552911Z","metadata":{"services":["cloud.firestore"]}}
+[debug] [2026-06-15T14:17:25.961Z] [rules] created ruleset projects/pocketcodedpy/rulesets/7e44d8bf-3661-4b9f-9ad5-e80ab4eccb4a
+[info] i  hosting[pocketcodedpy]: beginning deploy... 
+[info] i  hosting[pocketcodedpy]: found 3 files in docs 
+[debug] [2026-06-15T14:17:25.994Z] [hosting] uploading with 200 concurrency
+[debug] [2026-06-15T14:17:26.011Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:26.011Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:26.013Z] [hosting] hash cache [ZG9jcw] stored for 3 files
+[debug] [2026-06-15T14:17:26.013Z] [hosting][hash queue][FINAL] {"max":11,"min":1,"avg":7,"active":0,"complete":3,"success":3,"errored":0,"retried":0,"total":3,"elapsed":14}
+[debug] [2026-06-15T14:17:26.014Z] >>> [apiv2][query] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/cb99d7ff132f4db2:populateFiles [none]
+[debug] [2026-06-15T14:17:26.014Z] >>> [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/cb99d7ff132f4db2:populateFiles {"files":{"/account-deletion.html":"bf5b4a0a3823ea5e1409b1538fda4ee56eb86395bf0e0ea87c86eda2fe2eb39d","/PLAY_BILLING_SETUP.md":"ea3705560b282e8cd2ad402dbd723e79107cef90a92070d07dc37ce472c53ac4","/privacy-policy.html":"55dfacafe7e43e0aaad8017fb7e8f06d0d55efb8a83f618756eb2b2c5064c3fd"}}
+[debug] [2026-06-15T14:17:27.246Z] <<< [apiv2][status] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/cb99d7ff132f4db2:populateFiles 200
+[debug] [2026-06-15T14:17:27.247Z] <<< [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/360292021566/sites/pocketcodedpy/versions/cb99d7ff132f4db2:populateFiles {"uploadRequiredHashes":["55dfacafe7e43e0aaad8017fb7e8f06d0d55efb8a83f618756eb2b2c5064c3fd","ea3705560b282e8cd2ad402dbd723e79107cef90a92070d07dc37ce472c53ac4"],"uploadUrl":"https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files"}
+[debug] [2026-06-15T14:17:27.248Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:27.255Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:27.255Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:27.255Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:27.256Z] >>> [apiv2][query] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/55dfacafe7e43e0aaad8017fb7e8f06d0d55efb8a83f618756eb2b2c5064c3fd [none]
+[debug] [2026-06-15T14:17:27.256Z] >>> [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/55dfacafe7e43e0aaad8017fb7e8f06d0d55efb8a83f618756eb2b2c5064c3fd [stream]
+[debug] [2026-06-15T14:17:27.258Z] >>> [apiv2][query] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/ea3705560b282e8cd2ad402dbd723e79107cef90a92070d07dc37ce472c53ac4 [none]
+[debug] [2026-06-15T14:17:27.258Z] >>> [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/ea3705560b282e8cd2ad402dbd723e79107cef90a92070d07dc37ce472c53ac4 [stream]
+[debug] [2026-06-15T14:17:27.263Z] [hosting][populate queue][FINAL] {"max":1245,"min":1245,"avg":1245,"active":0,"complete":1,"success":1,"errored":0,"retried":0,"total":1,"elapsed":1253}
+[debug] [2026-06-15T14:17:27.263Z] [hosting] uploads queued: 2
+[info] i  hosting: uploading new files [0/2] (0%) 
+[debug] [2026-06-15T14:17:29.035Z] <<< [apiv2][status] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/55dfacafe7e43e0aaad8017fb7e8f06d0d55efb8a83f618756eb2b2c5064c3fd 200
+[debug] [2026-06-15T14:17:29.035Z] <<< [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/55dfacafe7e43e0aaad8017fb7e8f06d0d55efb8a83f618756eb2b2c5064c3fd [stream]
+[debug] [2026-06-15T14:17:29.099Z] <<< [apiv2][status] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/ea3705560b282e8cd2ad402dbd723e79107cef90a92070d07dc37ce472c53ac4 200
+[debug] [2026-06-15T14:17:29.099Z] <<< [apiv2][body] POST https://upload-firebasehosting.googleapis.com/upload/sites/pocketcodedpy/versions/cb99d7ff132f4db2/files/ea3705560b282e8cd2ad402dbd723e79107cef90a92070d07dc37ce472c53ac4 [stream]
+[debug] [2026-06-15T14:17:29.100Z] [hosting][upload queue][FINAL] {"max":1845,"min":1788,"avg":1816.5,"active":0,"complete":2,"success":2,"errored":0,"retried":0,"total":2,"elapsed":1853}
+[info] i  hosting: upload complete 
+[info] +  hosting[pocketcodedpy]: file upload complete 
+[debug] [2026-06-15T14:17:29.100Z] [hosting] deploy completed after 3133ms
+[debug] [2026-06-15T14:17:29.101Z] [rules] releasing cloud.firestore with ruleset projects/pocketcodedpy/rulesets/7e44d8bf-3661-4b9f-9ad5-e80ab4eccb4a
+[debug] [2026-06-15T14:17:29.101Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:29.101Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:29.102Z] >>> [apiv2][query] PATCH https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/releases/cloud.firestore [none]
+[debug] [2026-06-15T14:17:29.102Z] >>> [apiv2][body] PATCH https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/releases/cloud.firestore {"release":{"name":"projects/pocketcodedpy/releases/cloud.firestore","rulesetName":"projects/pocketcodedpy/rulesets/7e44d8bf-3661-4b9f-9ad5-e80ab4eccb4a"}}
+[debug] [2026-06-15T14:17:29.680Z] <<< [apiv2][status] PATCH https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/releases/cloud.firestore 200
+[debug] [2026-06-15T14:17:29.680Z] <<< [apiv2][body] PATCH https://firebaserules.googleapis.com/v1/projects/pocketcodedpy/releases/cloud.firestore {"name":"projects/pocketcodedpy/releases/cloud.firestore","rulesetName":"projects/pocketcodedpy/rulesets/7e44d8bf-3661-4b9f-9ad5-e80ab4eccb4a","createTime":"2026-06-14T18:18:24.740880Z","updateTime":"2026-06-15T14:17:29.891205Z"}
+[debug] [2026-06-15T14:17:29.680Z] [rules] updated release projects/pocketcodedpy/releases/cloud.firestore
+[info] +  firestore: released rules firestore.rules to cloud.firestore 
+[debug] [2026-06-15T14:17:29.681Z] [
+  {
+    "config": {
+      "public": "docs",
+      "cleanUrls": true,
+      "trailingSlash": false,
+      "ignore": [
+        "firebase.json",
+        "**/.*",
+        "**/node_modules/**"
+      ],
+      "site": "pocketcodedpy"
+    },
+    "version": "projects/360292021566/sites/pocketcodedpy/versions/cb99d7ff132f4db2"
+  }
+]
+[info] i  hosting[pocketcodedpy]: finalizing version... 
+[debug] [2026-06-15T14:17:29.682Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:29.682Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:29.683Z] >>> [apiv2][query] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/cb99d7ff132f4db2 updateMask=status%2Cconfig
+[debug] [2026-06-15T14:17:29.683Z] >>> [apiv2][body] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/cb99d7ff132f4db2 {"status":"FINALIZED","config":{"cleanUrls":true,"trailingSlashBehavior":"REMOVE"}}
+[debug] [2026-06-15T14:17:31.480Z] <<< [apiv2][status] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/cb99d7ff132f4db2 200
+[debug] [2026-06-15T14:17:31.481Z] <<< [apiv2][body] PATCH https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/versions/cb99d7ff132f4db2 {"name":"projects/360292021566/sites/pocketcodedpy/versions/cb99d7ff132f4db2","status":"FINALIZED","config":{"cleanUrls":true,"trailingSlashBehavior":"REMOVE"},"labels":{"deployment-tool":"cli-firebase"},"createTime":"2026-06-15T14:17:20.740595Z","createUser":{"email":"slimkheli2@gmail.com"},"finalizeTime":"2026-06-15T14:17:31.587764Z","finalizeUser":{"email":"slimkheli2@gmail.com"}}
+[debug] [2026-06-15T14:17:31.481Z] [hosting] finalized version for pocketcodedpy:[object Object]
+[info] +  hosting[pocketcodedpy]: version finalized 
+[info] i  hosting[pocketcodedpy]: releasing new version... 
+[debug] [2026-06-15T14:17:31.482Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:31.482Z] Checked if tokens are valid: true, expires at: 1781536632384
+[debug] [2026-06-15T14:17:31.482Z] >>> [apiv2][query] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/channels/live/releases versionName=projects%2F360292021566%2Fsites%2Fpocketcodedpy%2Fversions%2Fcb99d7ff132f4db2
+[debug] [2026-06-15T14:17:31.482Z] >>> [apiv2][body] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/channels/live/releases {}
+[debug] [2026-06-15T14:17:33.092Z] <<< [apiv2][status] POST https://firebasehosting.googleapis.com/v1beta1/projects/-/sites/pocketcodedpy/channels/live/releases 200

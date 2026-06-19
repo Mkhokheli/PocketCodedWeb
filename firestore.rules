@@ -1,0 +1,38 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      function ownsProfile() {
+        return request.auth != null && request.auth.uid == userId;
+      }
+
+      function validTrialStartOnCreate() {
+        return !('trialStartedAt' in request.resource.data)
+          || request.resource.data.trialStartedAt == request.time;
+      }
+
+      function trialStartIsImmutable() {
+        return (
+          !('trialStartedAt' in resource.data)
+          && (
+            !('trialStartedAt' in request.resource.data)
+            || request.resource.data.trialStartedAt == request.time
+          )
+        ) || (
+          'trialStartedAt' in resource.data
+          && request.resource.data.trialStartedAt == resource.data.trialStartedAt
+        );
+      }
+
+      allow read: if ownsProfile();
+      allow create: if ownsProfile() && validTrialStartOnCreate();
+      allow update: if ownsProfile() && trialStartIsImmutable();
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

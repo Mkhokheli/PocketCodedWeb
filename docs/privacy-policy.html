@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Privacy Policy for the PocketCodedPy Android application.">
+  <title>Privacy Policy - PocketCodedPy</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --background: #f7f9fc;
+      --surface: #ffffff;
+      --text: #172033;
+      --muted: #586579;
+      --border: #dce3ee;
+      --accent: #5c55f5;
+      --accent-soft: #eeedff;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #071426;
+        --surface: #0d2038;
+        --text: #f5f7fb;
+        --muted: #b8c4d6;
+        --border: #294463;
+        --accent: #9d8cff;
+        --accent-soft: #241f4f;
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--background);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }
+
+    main {
+      width: min(860px, calc(100% - 32px));
+      margin: 40px auto;
+      padding: clamp(24px, 5vw, 56px);
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+
+    h1, h2 { line-height: 1.25; }
+    h1 { margin: 0 0 8px; font-size: clamp(2rem, 5vw, 3rem); }
+    h2 { margin: 36px 0 12px; font-size: 1.35rem; }
+    p, li { color: var(--muted); }
+    strong { color: var(--text); }
+    ul { padding-left: 24px; }
+    li + li { margin-top: 8px; }
+    a { color: var(--accent); }
+
+    .eyebrow {
+      margin: 0;
+      color: var(--accent);
+      font-weight: 700;
+      letter-spacing: 0;
+    }
+
+    .summary {
+      margin: 28px 0;
+      padding: 18px 20px;
+      background: var(--accent-soft);
+      border-left: 4px solid var(--accent);
+      border-radius: 6px;
+    }
+
+    footer {
+      margin-top: 44px;
+      padding-top: 20px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="eyebrow">PocketCodedPy</p>
+    <h1>Privacy Policy</h1>
+    <p><strong>Effective date:</strong> June 15, 2026</p>
+
+    <div class="summary">
+      PocketCodedPy is a mobile Python development environment. Your projects, source code,
+      terminal history, Git repositories, and SSH keys are stored locally on your device and
+      are not automatically uploaded to PocketCodedPy. Account information is processed using
+      Google Firebase so that you can sign in and manage your account.
+    </div>
+
+    <h2>1. Who we are</h2>
+    <p>
+      This Privacy Policy applies to the PocketCodedPy Android application ("PocketCodedPy",
+      "the app", "we", "us", or "our"). For privacy questions or requests, contact
+      <a href="mailto:Slimkheli2@gmail.com">Slimkheli2@gmail.com</a>.
+    </p>
+
+    <h2>2. Information we collect and process</h2>
+    <p><strong>Account and profile information.</strong> When you register or sign in, we process:</p>
+    <ul>
+      <li>Your name or display name;</li>
+      <li>Your email address;</li>
+      <li>A Firebase user identifier;</li>
+      <li>Your sign-in provider, such as email/password or Google; and</li>
+      <li>The date and time of your most recent sign-in.</li>
+    </ul>
+    <p>
+      Email/password authentication is handled by Firebase Authentication. PocketCodedPy does
+      not receive or store your password in readable form. Firebase may process authentication
+      information such as passwords, email addresses, IP addresses, and user-agent information
+      to authenticate users, secure accounts, and prevent abuse.
+    </p>
+
+    <p><strong>Google Sign-In information.</strong> If you choose Google Sign-In, Google provides
+      the app with account details needed to authenticate you, such as your Google account email,
+      display name, account identifier, and an authentication token. Your use of Google Sign-In
+      is also governed by Google's Privacy Policy.</p>
+
+    <p><strong>Purchase and trial information.</strong> Google Play provides the app with the
+      product identifier, localized price, purchase state, purchase token, and acknowledgement
+      status needed to complete or restore the one-time Premium purchase. The app stores a local
+      Premium entitlement flag for offline continuity and reconciles it with Google Play when a
+      Billing connection is available. PocketCodedPy stores the start of your free trial in your
+      Firebase profile and stores the most recent free-trial continuation time locally. We do not
+      receive or store your full payment-card details.</p>
+
+    <p><strong>Locally stored development data.</strong> The app stores projects and operational
+      data in app-private storage on your device, including source code, files, folders, editor
+      state, terminal commands and output, Git repositories and configuration, virtual
+      environments, installed Python packages, and SSH keys you generate. We do not automatically
+      send this development data to our servers or Firebase.</p>
+
+    <p><strong>Files you select.</strong> When you import or export a file or folder, Android's
+      system file picker gives the app access only to the item or location you select. Exported
+      copies are stored in the destination you choose and remain under your control.</p>
+
+    <p><strong>User-directed network activity.</strong> The app includes tools such as Git, SSH,
+      <code>pip</code>, and <code>curl</code>. When you use these tools, commands, credentials,
+      repository data, source code, package requests, or other content may be transmitted directly
+      to the remote host you specify, such as GitHub, GitLab, a package index, or an API endpoint.
+      Those services process information under their own privacy policies. PocketCodedPy does not
+      control user-selected remote services.</p>
+
+    <h2>3. How we use information</h2>
+    <p>We use information only as needed to:</p>
+    <ul>
+      <li>Create, authenticate, secure, and maintain user accounts;</li>
+      <li>Display and maintain basic account profile information;</li>
+      <li>Provide the editor, terminal, project, import/export, Git, SSH, and package features;</li>
+      <li>Respond to support, privacy, and account-deletion requests;</li>
+      <li>Prevent fraud, abuse, and security incidents; and</li>
+      <li>Comply with applicable law and enforce our legal rights.</li>
+    </ul>
+
+    <h2>4. Sharing and service providers</h2>
+    <p>We do not sell personal information. We do not use personal information for advertising.</p>
+    <p>Information may be processed or shared in these limited circumstances:</p>
+    <ul>
+      <li><strong>Google Firebase:</strong> Firebase Authentication processes sign-in data, and Cloud Firestore stores your display name, email, authentication providers, and last sign-in time.</li>
+      <li><strong>Google Sign-In:</strong> used only when you choose to authenticate with a Google account.</li>
+      <li><strong>Google Play:</strong> purchases and app distribution are handled by Google Play. We do not receive your full payment-card details.</li>
+      <li><strong>User-selected services:</strong> data is sent to Git hosts, package providers, websites, or APIs only when you initiate the relevant command or connection.</li>
+      <li><strong>Legal and safety reasons:</strong> information may be disclosed when reasonably necessary to comply with law, lawful process, or to protect users, the public, or our rights.</li>
+    </ul>
+
+    <h2>5. Advertising and analytics</h2>
+    <p>
+      PocketCodedPy does not currently include advertising SDKs, Firebase Analytics, or third-party
+      behavioral analytics. If this changes, this policy and the Google Play Data safety disclosure
+      will be updated before the new collection begins.
+    </p>
+
+    <h2>6. Data security</h2>
+    <p>
+      Account communications with Firebase use encrypted connections. Development files are stored
+      in Android app-private storage, and PocketCodedPy excludes project folders, SSH keys, and
+      runtime data from Android cloud backup. Access to external files is provided through Android's
+      system file picker. No system can be guaranteed completely secure, so users should protect
+      their device, account credentials, private keys, and access tokens.
+    </p>
+    <p>
+      User-directed terminal connections may use different protocols. HTTPS and SSH provide
+      encrypted transport when correctly configured; plain HTTP does not. You are responsible for
+      the destination and protocol you choose.
+    </p>
+
+    <h2>7. Retention and deletion</h2>
+    <ul>
+      <li><strong>Account data:</strong> retained while your account is active and until deletion is requested or otherwise required.</li>
+      <li><strong>Trial data:</strong> the trial start is retained with your cloud profile until account deletion; the hourly continuation timestamp and cached Premium status remain locally until app data is cleared.</li>
+      <li><strong>Firebase data:</strong> after we initiate deletion, Google may retain information in backup systems for a limited period in accordance with Firebase's retention practices.</li>
+      <li><strong>Local projects and settings:</strong> remain on your device until you delete them, clear the app's storage, or uninstall the app.</li>
+      <li><strong>Exported files:</strong> remain in the location you selected until you delete them.</li>
+      <li><strong>User-selected third parties:</strong> information sent to remote services is retained under those services' own policies.</li>
+    </ul>
+    <p>
+      To request account and associated cloud-profile deletion, follow the steps on our
+      <a href="account-deletion.html">Account Deletion page</a>. Local and exported files cannot
+      be remotely deleted by us because we do not control your device storage.
+    </p>
+
+    <h2>8. Your choices and rights</h2>
+    <p>
+      Depending on where you live, you may have rights to access, correct, delete, restrict, or
+      object to certain processing of your personal information. You may also have a right to data
+      portability or to complain to a local data-protection authority. Send requests to
+      <a href="mailto:Slimkheli2@gmail.com">Slimkheli2@gmail.com</a>. We may need to verify your
+      identity before completing a request.
+    </p>
+
+    <h2>9. Children's privacy</h2>
+    <p>
+      PocketCodedPy is not directed to children under 13, or the minimum age required to consent to
+      data processing in their country. We do not knowingly collect personal information from a
+      child below that age. If you believe a child has provided personal information, contact us so
+      that we can investigate and delete it.
+    </p>
+
+    <h2>10. International processing</h2>
+    <p>
+      Google and user-selected remote services may process information in countries other than your
+      own. Their legal terms and safeguards apply to that processing. Firebase explains its privacy,
+      security, and international-transfer practices on its official privacy and security page.
+    </p>
+
+    <h2>11. Changes to this policy</h2>
+    <p>
+      We may update this Privacy Policy when PocketCodedPy's features, service providers, or legal
+      obligations change. The effective date at the top will be updated when changes are published.
+      Material changes will be communicated in the app or through another appropriate notice where
+      required.
+    </p>
+
+    <h2>12. Contact</h2>
+    <p>
+      Privacy contact: <a href="mailto:Slimkheli2@gmail.com">Slimkheli2@gmail.com</a><br>
+      Application: PocketCodedPy<br>
+      Package name: com.mkhokheli.pocketcodedpy
+    </p>
+
+    <footer>
+      <a href="account-deletion.html">Account deletion instructions</a>
+    </footer>
+  </main>
+</body>
+</html>
