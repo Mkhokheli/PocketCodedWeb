@@ -10,10 +10,6 @@ kotlin = "2.2.10"
 composeBom = "2026.02.01"
 jgit = "6.6.1.202309021850-r"
 eddsa = "0.3.0"
-firebaseBom = "34.14.1"
-credentials = "1.3.0"
-googleId = "1.1.1"
-googleServices = "4.4.4"
 playBilling = "9.0.0"
 
 [libraries]
@@ -35,15 +31,8 @@ androidx-compose-material-icons-extended = { group = "androidx.compose.material"
 jgit = { group = "org.eclipse.jgit", name = "org.eclipse.jgit", version.ref = "jgit" }
 jgit-ssh-apache = { group = "org.eclipse.jgit", name = "org.eclipse.jgit.ssh.apache", version.ref = "jgit" }
 eddsa = { group = "net.i2p.crypto", name = "eddsa", version.ref = "eddsa" }
-firebase-bom = { group = "com.google.firebase", name = "firebase-bom", version.ref = "firebaseBom" }
-firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
-firebase-firestore = { group = "com.google.firebase", name = "firebase-firestore" }
-androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
-androidx-credentials-play-services-auth = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
-googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleId" }
 play-billing = { group = "com.android.billingclient", name = "billing", version.ref = "playBilling" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
-google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

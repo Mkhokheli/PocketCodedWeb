@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "360292021566",
+    "project_id": "PocketCodedWeb",
+    "storage_bucket": "PocketCodedWeb.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:360292021566:android:72e604827377683e01a86f",
+        "android_client_info": {
+          "package_name": "com.mkhokheli.PocketCodedWeb"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "360292021566-utqffns2he1ol3udds427p8jd5vps0nu.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.mkhokheli.PocketCodedWeb",
+            "certificate_hash": "d7f2e9ad6817bb35b7849f7757cc8bd1813bf404"
+          }
+        },
+        {
+          "client_id": "360292021566-f4dirdg67nbgcnokd71ovnhu08vagm1i.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDr-2HcwrV5DZRJzFVZ47EDFRqlNwezVh8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "360292021566-f4dirdg67nbgcnokd71ovnhu08vagm1i.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

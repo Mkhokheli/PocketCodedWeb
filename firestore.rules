@@ -31,6 +31,15 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    // AI quotas and entitlement overrides are maintained only by Cloud Functions/Admin SDK.
+    match /aiDailyUsage/{usageId} {
+      allow read, write: if false;
+    }
+
+    match /aiEntitlements/{userId} {
+      allow read, write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

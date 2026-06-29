@@ -22,5 +22,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "PocketCodedPy"
+rootProject.name = "PocketCodedWeb"
 include(":app")

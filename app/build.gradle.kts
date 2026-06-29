@@ -1,30 +1,20 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
-    id("com.chaquo.python")
-    alias(libs.plugins.google.services)
 }
 
 android {
-    namespace = "com.mkhokheli.pocketcodedpy"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    namespace = "com.mkhokheli.pocketcodedweb"
+    compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.mkhokheli.pocketcodedpy"
+        applicationId = "com.mkhokheli.pocketcodedweb"
         minSdk = 24
-        targetSdk = 36
-        versionCode = 5
-        versionName = "1.5"
+        targetSdk = 35
+        versionCode = 12
+        versionName = "3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-
-        ndk {
-            abiFilters += listOf("arm64-v8a", "x86_64")
-        }
     }
 
     buildTypes {
@@ -42,6 +32,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {
@@ -59,12 +50,6 @@ android {
 }
 
 dependencies {
-    implementation(platform(libs.firebase.bom))
-    implementation(libs.firebase.auth)
-    implementation(libs.firebase.firestore)
-    implementation(libs.androidx.credentials)
-    implementation(libs.androidx.credentials.play.services.auth)
-    implementation(libs.googleid)
     implementation(libs.play.billing)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)
@@ -88,10 +73,4 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     debugImplementation(libs.androidx.compose.ui.tooling)
-}
-
-chaquopy {
-    defaultConfig {
-        version = "3.10"
-    }
 }
