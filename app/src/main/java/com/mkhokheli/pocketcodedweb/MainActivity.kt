@@ -1,12 +1,17 @@
 package com.mkhokheli.pocketcodedweb
 
 import android.content.Context
+import android.net.Uri
 import android.os.Bundle
+import android.provider.OpenableColumns
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -93,6 +98,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableFloatStateOf
@@ -140,6 +146,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.edit
+import androidx.documentfile.provider.DocumentFile
 import com.mkhokheli.pocketcodedweb.ui.theme.PocketCodedWebTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -171,8 +178,12 @@ private const val AI_CONTEXT_FILE_LIMIT = 24
 private const val AI_CONTEXT_CHAR_LIMIT = 60_000
 private const val AI_TERMINAL_CONTEXT_LIMIT = 12_000
 private const val COMPLETION_IDLE_TIMEOUT_MS = 3_500L
-private const val COMPLETION_INTERACTION_TIMEOUT_MS = 7_000L
+private const val EDITOR_SAVE_DEBOUNCE_MS = 1_000L
 private const val DIAGNOSTIC_IDLE_DELAY_MS = 220L
+private const val SYNTAX_HIGHLIGHT_IDLE_DELAY_MS = 80L
+private const val CURSOR_REVEAL_DELAY_MS = 45L
+private const val LIVE_DIAGNOSTIC_CHAR_LIMIT = 180_000
+private const val LIVE_SYNTAX_HIGHLIGHT_CHAR_LIMIT = 120_000
 
 private val htmlFileExtensions = setOf("html", "htm", "svg")
 private val cssFileExtensions = setOf("css")
@@ -180,6 +191,36 @@ private val javascriptFileExtensions = setOf("js", "mjs", "cjs", "jsx")
 private val editableWebExtensions = htmlFileExtensions + cssFileExtensions + javascriptFileExtensions + setOf("json", "md", "txt")
 private val defaultWebFileNames = listOf("index.html", "style.css", "script.js")
 private val workspaceMetadataNames = setOf(".git", ".ssh", ".pocketcodedweb")
+
+private val HTML_COMMENT_REGEX = Regex("<!--[\\s\\S]*?-->")
+private val HTML_DOCTYPE_REGEX = Regex("(?i)<!DOCTYPE[^>]*>")
+private val HTML_TAG_BRACKETS_REGEX = Regex("</?|/?>")
+private val HTML_TAG_NAME_REGEX = Regex("</?\\s*([a-zA-Z][\\w:-]*)")
+private val HTML_ATTR_NAME_CORE_REGEX = Regex("\\b(id|class|href|src|alt|type|name|value|style|onclick|role|aria-[\\w-]+)(?=\\s*=)")
+private val HTML_ATTR_NAME_GENERIC_REGEX = Regex("\\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?=\\s*=)")
+private val HTML_ATTR_VALUE_REGEX = Regex("\"[^\"]*\"|'[^']*'")
+private val HTML_ENTITY_REGEX = Regex("&[a-zA-Z0-9#]+;")
+
+private val CSS_COMMENT_REGEX = Regex("/\\*[\\s\\S]*?\\*/")
+private val CSS_AT_RULE_REGEX = Regex("@[a-zA-Z-]+")
+private val CSS_SELECTOR_ID_CLASS_REGEX = Regex("[.#][a-zA-Z0-9_-]+")
+private val CSS_SELECTOR_BLOCK_REGEX = Regex("([a-zA-Z0-9_-]+)\\s*\\{")
+private val CSS_PROPERTY_REGEX = Regex("\\b([a-zA-Z-]+)\\s*(?=:)")
+private val CSS_COLOR_HEX_REGEX = Regex("#[0-9a-fA-F]{3,8}\\b")
+private val CSS_NUMBER_UNIT_REGEX = Regex("\\b\\d+(?:\\.\\d+)?(px|rem|em|vh|vw|%|s|ms|deg)?\\b")
+private val CSS_STRING_REGEX = Regex("\"[^\"]*\"|'[^']*'")
+private val CSS_KEYWORD_REGEX = Regex("(?i)\\b(true|false|inherit|initial|unset|none|auto|block|inline|flex|grid|absolute|relative|fixed|sticky|center|space-between|space-around|column|row|sans-serif|serif|monospace)\\b")
+
+private val JS_COMMENT_REGEX = Regex("//.*$|/\\*[\\s\\S]*?\\*/", RegexOption.MULTILINE)
+private val JS_STRING_REGEX = Regex("`[\\s\\S]*?`|\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'")
+private val JS_BOOLEAN_NULL_REGEX = Regex("\\b(true|false|null|undefined|NaN|Infinity)\\b")
+private val JS_NUMBER_REGEX = Regex("\\b\\d+(?:\\.\\d+)?\\b")
+private val JS_MEMBER_ACCESS_REGEX = Regex("\\.([A-Za-z_$][\\w$]*)")
+private val JS_FUNC_CALL_REGEX = Regex("\\b([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()|\\.([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()")
+
+private val JSON_KEY_REGEX = Regex("\"[^\"]*\"(?=\\s*:)")
+private val JSON_STRING_VALUE_REGEX = Regex(":\\s*(\"[^\"]*\")")
+private val JSON_LITERAL_VALUE_REGEX = Regex(":\\s*(\\d+|true|false|null)")
 
 private val aiModelOptions = listOf(
     AiModelOption("gemini-3.5-flash", "Gemini 3.5 Flash", "Fast coding help for everyday web work."),
@@ -284,6 +325,7 @@ private data class WebShellResult(
     val clearTerminal: Boolean = false,
     val workspaceChanged: Boolean = false,
     val openPreview: Boolean = false,
+    val runJs: String? = null,
 )
 
 internal data class CompletionItem(
@@ -301,10 +343,22 @@ internal data class CompletionContext(
     val isDotAccess: Boolean = false,
 )
 
-private data class SyntaxSpan(
-    val start: Int,
-    val end: Int,
-    val style: SpanStyle,
+private data class EditorCompletionResult(
+    val context: CompletionContext? = null,
+    val items: List<CompletionItem> = emptyList(),
+    val source: String = "",
+    val cursor: Int = -1,
+    val signatureHelp: String? = null,
+)
+
+private data class EditorVisualResult(
+    val source: String = "",
+    val text: AnnotatedString = AnnotatedString(""),
+)
+
+private data class EditorTextMetrics(
+    val lineCount: Int = 1,
+    val longestLineLength: Int = 48,
 )
 
 internal data class CodeDiagnostic(
@@ -433,6 +487,7 @@ private fun WebIdeApp(
     var terminalText by rememberSaveable(rootDirectory.absolutePath) { mutableStateOf(savedSession.terminalText) }
     var fullScreenMode by rememberSaveable(rootDirectory.absolutePath) { mutableStateOf(savedSession.fullScreenMode) }
     var directoryVersion by remember { mutableLongStateOf(0L) }
+    var fileActionsDialogOpen by remember { mutableStateOf(false) }
     var newFileDialogOpen by remember { mutableStateOf(false) }
     var newFolderDialogOpen by remember { mutableStateOf(false) }
     var renameFileTarget by remember { mutableStateOf<WebFile?>(null) }
@@ -445,14 +500,15 @@ private fun WebIdeApp(
         }
     }
     val dirtyFileIds = remember { mutableSetOf<Long>() }
+    val pendingEditorTextByFileId = remember(rootDirectory.absolutePath) { mutableMapOf<Long, String>() }
     val pendingEditorSaveJobs = remember { mutableMapOf<Long, Job>() }
 
-    val activeFile = files.firstOrNull { it.id == activeFileId }
+    val activeFile = (files.firstOrNull { it.id == activeFileId }
         ?: files.firstOrNull()
         ?: createDefaultWebFile(rootDirectory).also {
             files.add(it)
             activeFileId = it.id
-        }
+        }).withPendingEditorText(pendingEditorTextByFileId)
     var workingDirectoryPath by rememberSaveable(rootDirectory.absolutePath) {
         mutableStateOf(
             validDirectoryOrRoot(
@@ -496,6 +552,48 @@ private fun WebIdeApp(
     var aiError by remember { mutableStateOf<String?>(null) }
     var aiPendingAction by remember { mutableStateOf<AiSuggestedAction?>(null) }
     var aiVerificationMessage by remember { mutableStateOf<String?>(null) }
+    var terminalJsToRun by remember { mutableStateOf<String?>(null) }
+
+    if (terminalJsToRun != null) {
+        val jsCode = terminalJsToRun!!
+        AndroidView(
+            factory = {
+                WebView(it).apply {
+                    settings.javaScriptEnabled = true
+                    addJavascriptInterface(object {
+                        @android.webkit.JavascriptInterface
+                        fun log(msg: String) {
+                            coroutineScope.launch {
+                                terminalText = appendTerminalOutput(terminalText, msg)
+                            }
+                        }
+                        @android.webkit.JavascriptInterface
+                        fun error(msg: String) {
+                            coroutineScope.launch {
+                                terminalText = appendTerminalOutput(terminalText, "Error: $msg")
+                            }
+                        }
+                    }, "terminal")
+                }
+            },
+            update = { webView ->
+                val wrappedJs = """
+                    (function() {
+                        console.log = function() { terminal.log(Array.from(arguments).join(' ')); };
+                        console.error = function() { terminal.error(Array.from(arguments).join(' ')); };
+                        try {
+                            $jsCode
+                        } catch (e) {
+                            console.error(e.message);
+                        }
+                    })();
+                """.trimIndent()
+                webView.evaluateJavascript(wrappedJs, null)
+                terminalJsToRun = null
+            },
+            modifier = Modifier.size(0.dp)
+        )
+    }
 
     fun applyLoadedFiles(
         loadedFiles: List<WebFile>,
@@ -504,7 +602,10 @@ private fun WebIdeApp(
     ) {
         val mergedFiles = loadedFiles.map { loadedFile ->
             val currentFile = files.firstOrNull { it.id == loadedFile.id }
-            if (currentFile != null && currentFile.id in dirtyFileIds) {
+            val pendingText = pendingEditorTextByFileId[loadedFile.id]
+            if (pendingText != null) {
+                loadedFile.copy(content = pendingText, modifiedAt = currentFile?.modifiedAt ?: loadedFile.modifiedAt)
+            } else if (currentFile != null && currentFile.id in dirtyFileIds) {
                 loadedFile.copy(content = currentFile.content, modifiedAt = currentFile.modifiedAt)
             } else {
                 loadedFile
@@ -525,6 +626,42 @@ private fun WebIdeApp(
         applyLoadedFiles(loadWebFiles(rootDirectory), selectPath, workingPath)
     }
 
+    val openFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            coroutineScope.launch {
+                withContext(Dispatchers.IO) {
+                    val name = getFileName(context, it) ?: "imported_file"
+                    val target = File(workingDirectory, name)
+                    copyUriToFile(context, it, target)
+                }
+                refreshFiles()
+            }
+        }
+    }
+
+    val openFolderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let {
+            coroutineScope.launch {
+                withContext(Dispatchers.IO) {
+                    val docFile = DocumentFile.fromTreeUri(context, it)
+                    docFile?.let { importFromDocumentFile(context, it, workingDirectory) }
+                }
+                refreshFiles()
+            }
+        }
+    }
+
+    val exportFolderLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        uri?.let {
+            coroutineScope.launch {
+                withContext(Dispatchers.IO) {
+                    val docFile = DocumentFile.fromTreeUri(context, it)
+                    docFile?.let { exportToDocumentFile(context, workingDirectory, it) }
+                }
+            }
+        }
+    }
+
     fun selectFile(fileId: Long) {
         val file = files.firstOrNull { it.id == fileId } ?: return
         activeFileId = file.id
@@ -538,14 +675,18 @@ private fun WebIdeApp(
 
     fun updateActiveContent(newCode: String) {
         val fileToSync = activeFile
+        pendingEditorTextByFileId[fileToSync.id] = newCode
         dirtyFileIds += fileToSync.id
-        files.replaceFile(fileToSync.id) {
-            copy(content = newCode, modifiedAt = System.currentTimeMillis())
-        }
         pendingEditorSaveJobs.remove(fileToSync.id)?.cancel()
         pendingEditorSaveJobs[fileToSync.id] = coroutineScope.launch {
-            delay(180)
+            delay(EDITOR_SAVE_DEBOUNCE_MS)
             withContext(Dispatchers.IO) { saveFileContent(fileToSync.filePath, newCode) }
+            files.replaceFile(fileToSync.id) {
+                copy(content = newCode, modifiedAt = System.currentTimeMillis())
+            }
+            if (pendingEditorTextByFileId[fileToSync.id] == newCode) {
+                pendingEditorTextByFileId.remove(fileToSync.id)
+            }
             dirtyFileIds.remove(fileToSync.id)
             pendingEditorSaveJobs.remove(fileToSync.id)
         }
@@ -622,11 +763,16 @@ private fun WebIdeApp(
     }
 
     fun runWebPreview() {
-        terminalText = appendTerminalOutput(
-            terminalText,
-            "$terminalPromptText preview ${activeFile.name}\nOpening responsive Web preview.",
-        )
-        fullScreenMode = WebFullScreenMode.Preview
+        val isJs = fileExtension(activeFile.name) in javascriptFileExtensions
+        if (isJs) {
+            terminalJsToRun = activeFile.content
+        } else {
+            terminalText = appendTerminalOutput(
+                terminalText,
+                "$terminalPromptText preview ${activeFile.name}\nOpening responsive Web preview.",
+            )
+            fullScreenMode = WebFullScreenMode.Preview
+        }
     }
 
     fun submitTerminalCommand(commandOverride: String? = null) {
@@ -643,6 +789,7 @@ private fun WebIdeApp(
             } else {
                 terminalText = appendTerminalOutput(terminalText, appendShellResult(result))
             }
+            result.runJs?.let { terminalJsToRun = it }
             result.workingDirectoryPath?.let {
                 terminalDirectoryPath = it
                 workingDirectoryPath = it
@@ -672,8 +819,8 @@ private fun WebIdeApp(
                         modelId = selectedAiModel.id,
                         prompt = buildAiCopilotPrompt(
                             rootDirectory = rootDirectory,
-                            files = files,
-                            activeFile = activeFile,
+                            files = files.withPendingEditorTexts(pendingEditorTextByFileId),
+                            activeFile = activeFile.withPendingEditorText(pendingEditorTextByFileId),
                             userPrompt = promptText,
                             terminalText = terminalText,
                         ),
@@ -798,7 +945,8 @@ private fun WebIdeApp(
             )
             WebFullScreenMode.Preview -> WebPreviewFullScreen(
                 rootDirectory = rootDirectory,
-                activeFile = activeFile,
+                files = files.withPendingEditorTexts(pendingEditorTextByFileId),
+                activeFile = activeFile.withPendingEditorText(pendingEditorTextByFileId),
                 palette = palette,
                 onBack = { fullScreenMode = null },
             )
@@ -834,6 +982,7 @@ private fun WebIdeApp(
                 onCodeChange = ::updateActiveContent,
                 onRunPreview = ::runWebPreview,
                 onOpenAi = { fullScreenMode = WebFullScreenMode.Ai },
+                onFileActions = { fileActionsDialogOpen = true },
                 onNewFile = { newFileDialogOpen = true },
                 onNewFolder = { newFolderDialogOpen = true },
                 onRenameFile = { renameFileTarget = it },
@@ -843,8 +992,28 @@ private fun WebIdeApp(
                 onTerminalInputChange = { terminalInput = it },
                 onTerminalCommandSubmit = { submitTerminalCommand() },
                 onFullScreen = { fullScreenMode = it },
+                directoryVersion = directoryVersion,
             )
         }
+    }
+
+    if (fileActionsDialogOpen) {
+        FilesAndFoldersDialog(
+            palette = palette,
+            onDismiss = { fileActionsDialogOpen = false },
+            onOpenFile = {
+                fileActionsDialogOpen = false
+                openFileLauncher.launch(arrayOf("*/*"))
+            },
+            onOpenFolder = {
+                fileActionsDialogOpen = false
+                openFolderLauncher.launch(null)
+            },
+            onSaveCurrentFolder = {
+                fileActionsDialogOpen = false
+                exportFolderLauncher.launch(null)
+            }
+        )
     }
 
     if (newFileDialogOpen) {
@@ -940,6 +1109,7 @@ private fun WebIdeHomeScreen(
     onCodeChange: (String) -> Unit,
     onRunPreview: () -> Unit,
     onOpenAi: () -> Unit,
+    onFileActions: () -> Unit,
     onNewFile: () -> Unit,
     onNewFolder: () -> Unit,
     onRenameFile: (WebFile) -> Unit,
@@ -949,6 +1119,7 @@ private fun WebIdeHomeScreen(
     onTerminalInputChange: (String) -> Unit,
     onTerminalCommandSubmit: () -> Unit,
     onFullScreen: (WebFullScreenMode) -> Unit,
+    directoryVersion: Long,
 ) {
     BoxWithConstraints(
         modifier = Modifier
@@ -980,7 +1151,7 @@ private fun WebIdeHomeScreen(
                 onBackToProjects = onBackToProjects,
                 onToggleTheme = onToggleTheme,
                 onOpenAi = onOpenAi,
-                onNewFile = onNewFile,
+                onFileActions = onFileActions,
             )
             Spacer(Modifier.height(10.dp))
             FileTabsBar(
@@ -1022,6 +1193,7 @@ private fun WebIdeHomeScreen(
                         onRenameFolder = onRenameFolder,
                         onDeleteFile = onDeleteFile,
                         onDeleteFolder = onDeleteFolder,
+                        directoryVersion = directoryVersion,
                     )
                     ResizeHandle(
                         palette = palette,
@@ -1084,7 +1256,7 @@ private fun IdeTopBar(
     onBackToProjects: () -> Unit,
     onToggleTheme: () -> Unit,
     onOpenAi: () -> Unit,
-    onNewFile: () -> Unit,
+    onFileActions: () -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1123,7 +1295,7 @@ private fun IdeTopBar(
             )
         }
         Spacer(Modifier.weight(1f))
-        IconButton(onClick = onNewFile, modifier = Modifier.size(40.dp)) {
+        IconButton(onClick = onFileActions, modifier = Modifier.size(40.dp)) {
             Icon(
                 imageVector = Icons.Rounded.Code,
                 contentDescription = "Files and folders",
@@ -1214,6 +1386,7 @@ private fun ExplorerPanel(
     expandedFolderPaths: List<String>,
     palette: WebPalette,
     modifier: Modifier = Modifier,
+    directoryVersion: Long,
     onSearchChange: (String) -> Unit,
     onToggleFolder: (FolderTarget) -> Unit,
     onSelectFolder: (FolderTarget) -> Unit,
@@ -1293,12 +1466,13 @@ private fun ExplorerPanel(
         Spacer(Modifier.height(10.dp))
 
         val entries = remember(
-            expandedFolderPaths.joinToString("|"),
+            expandedFolderPaths.size,
             search,
             files.size,
             workingDirectory.absolutePath,
+            directoryVersion,
         ) {
-            buildExplorerEntries(rootDirectory, files, expandedFolderPaths, search)
+            buildExplorerEntries(rootDirectory, files, expandedFolderPaths.toList(), search)
         }
 
         Column(
@@ -1671,56 +1845,65 @@ private fun SmartCodeEditor(
     }
     var completionsVisible by remember(file.id) { mutableStateOf(false) }
     var suppressCompletionsForText by remember(file.id) { mutableStateOf<String?>(null) }
-    var completionInteractionVersion by remember(file.id) { mutableLongStateOf(0L) }
     var diagnostics by remember(file.id) { mutableStateOf<List<CodeDiagnostic>>(emptyList()) }
+    var completionResult by remember(file.id) { mutableStateOf(EditorCompletionResult()) }
+    var editorVisualResult by remember(file.id) {
+        val initial = highlightWebSource(file.name, file.content, palette)
+        mutableStateOf(EditorVisualResult(file.content, initial))
+    }
+    var textMetrics by remember(file.id) {
+        mutableStateOf(editorTextMetrics(file.content, cap = 1_600))
+    }
+    var pendingCursorReveal by remember(file.id) { mutableLongStateOf(0L) }
     LaunchedEffect(file.id, file.content) {
         if (file.content != editorValue.text) {
             val cursor = min(editorValue.selection.start, file.content.length).coerceAtLeast(0)
             editorValue = TextFieldValue(file.content, selection = TextRange(cursor))
+            completionResult = EditorCompletionResult()
+            completionsVisible = false
         }
     }
-    val completionContext = remember(file.name, editorValue.text, editorValue.selection) {
-        completionContextAt(editorValue.text, editorValue.selection.start, file.name)
-    }
-    val completions = remember(file.name, editorValue.text, completionContext) {
-        completionContext?.let { webCompletionsForContext(file.name, editorValue.text, it) }.orEmpty()
-    }
-    LaunchedEffect(
-        file.id,
-        completionContext?.prefix,
-        completionContext?.replaceStart,
-        completionContext?.replaceEnd,
-        completionContext?.trigger,
-        completionContext?.isDotAccess,
-        completions.size,
-        suppressCompletionsForText,
-    ) {
-        completionsVisible = completionContext != null &&
-            completions.isNotEmpty() &&
-            suppressCompletionsForText != editorValue.text
-    }
-    LaunchedEffect(
-        editorValue.text,
-        editorValue.selection,
-        completions.size,
-        completionsVisible,
-        completionInteractionVersion,
-    ) {
-        if (completions.isEmpty() || completionContext == null) {
-            completionsVisible = false
-        } else if (completionsVisible) {
-            delay(
-                if (completionInteractionVersion == 0L) {
-                    COMPLETION_IDLE_TIMEOUT_MS
+    LaunchedEffect(file.name, editorValue.text, editorValue.selection) {
+        val snapshot = editorValue.text
+        val cursor = editorValue.selection.start
+        val fileName = file.name
+        val result = withContext(Dispatchers.Default) {
+            val context = completionContextAt(snapshot, cursor, fileName)
+            EditorCompletionResult(
+                context = context,
+                items = context?.let { webCompletionsForContext(fileName, snapshot, it) }.orEmpty(),
+                source = snapshot,
+                cursor = cursor,
+                signatureHelp = if (shouldComputeSignatureHelp(snapshot, cursor)) {
+                    webSignatureHelpAt(fileName, snapshot, cursor)
                 } else {
-                    COMPLETION_INTERACTION_TIMEOUT_MS
-                }
+                    null
+                },
             )
-            completionsVisible = false
+        }
+        if (snapshot == editorValue.text && cursor == editorValue.selection.start) {
+            completionResult = result
+            completionsVisible = result.context != null &&
+                result.items.isNotEmpty() &&
+                suppressCompletionsForText != snapshot
+        }
+    }
+    val completionSurfaceVisible by remember {
+        derivedStateOf {
+            completionsVisible &&
+                completionResult.context != null &&
+                completionResult.items.isNotEmpty() &&
+                completionResult.source == editorValue.text &&
+                completionResult.cursor == editorValue.selection.start &&
+                suppressCompletionsForText != editorValue.text
         }
     }
     LaunchedEffect(file.name, editorValue.text) {
         val snapshot = editorValue.text
+        if (snapshot.length > LIVE_DIAGNOSTIC_CHAR_LIMIT) {
+            diagnostics = emptyList()
+            return@LaunchedEffect
+        }
         delay(DIAGNOSTIC_IDLE_DELAY_MS)
         val inspected = withContext(Dispatchers.Default) {
             inspectWebSource(file.name, snapshot)
@@ -1729,35 +1912,65 @@ private fun SmartCodeEditor(
             diagnostics = inspected
         }
     }
+    LaunchedEffect(file.name, editorValue.text, palette, diagnostics) {
+        val snapshot = editorValue.text
+        val fileName = file.name
+        val snapshotDiagnostics = diagnostics
+        if (snapshot.length > LIVE_SYNTAX_HIGHLIGHT_CHAR_LIMIT) {
+            editorVisualResult = EditorVisualResult(snapshot, AnnotatedString(snapshot))
+            return@LaunchedEffect
+        }
+        delay(SYNTAX_HIGHLIGHT_IDLE_DELAY_MS)
+        val visualText = withContext(Dispatchers.Default) {
+            addDiagnosticStyles(
+                source = snapshot,
+                highlighted = highlightWebSource(fileName, snapshot, palette),
+                palette = palette,
+                diagnostics = snapshotDiagnostics,
+            )
+        }
+        if (snapshot == editorValue.text) {
+            editorVisualResult = EditorVisualResult(snapshot, visualText)
+        }
+    }
+    LaunchedEffect(editorValue.text) {
+        val snapshot = editorValue.text
+        val metrics = withContext(Dispatchers.Default) {
+            editorTextMetrics(snapshot, cap = 1_600)
+        }
+        if (snapshot == editorValue.text) {
+            textMetrics = metrics
+        }
+    }
     val editorVerticalScroll = rememberScrollState()
     val editorHorizontalScroll = rememberScrollState()
     val cursorBringIntoViewRequester = remember { BringIntoViewRequester() }
     
     var lastTextLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
     
-    LaunchedEffect(editorValue.selection, editorValue.text) {
-        val lastText = editorValue.text
-        if (lastText.isNotEmpty() && editorValue.selection.collapsed) {
-            val cursor = editorValue.selection.start
-            if (cursor > 0 && lastText.getOrNull(cursor - 1) == '\n') {
-                delay(20) // Wait for layout update
-                cursorBringIntoViewRequester.bringIntoView()
-            }
+    LaunchedEffect(pendingCursorReveal) {
+        if (pendingCursorReveal > 0L) {
+            delay(CURSOR_REVEAL_DELAY_MS)
+            cursorBringIntoViewRequester.bringIntoView()
         }
     }
 
-    val lineCount = remember(editorValue.text) {
-        (editorValue.text.count { it == '\n' } + 1).coerceAtLeast(1)
+    LaunchedEffect(completionSurfaceVisible) {
+        if (completionSurfaceVisible) {
+            // Trigger a scroll to ensure cursor is above the newly shown suggestion bar
+            delay(CURSOR_REVEAL_DELAY_MS)
+            cursorBringIntoViewRequester.bringIntoView()
+        }
     }
+
+    val lineCount = textMetrics.lineCount
     val lineNumbers = remember(lineCount, diagnostics, palette) {
         diagnosticLineNumberText(lineCount, diagnostics, palette)
     }
     val gutterWidth = remember(lineCount) {
         maxOf(20.dp, (lineCount.toString().length * 8 + 10).dp)
     }
-    val maxLineCharacters = remember(editorValue.text) {
-        estimatedLongestLineLength(editorValue.text, cap = 1_600).coerceAtLeast(48)
-    }
+    val maxLineCharacters = textMetrics.longestLineLength.coerceAtLeast(48)
     val editorContentWidth = maxOf(640.dp, (maxLineCharacters * 9).dp)
     val codeStyle = TextStyle(
         color = palette.text,
@@ -1767,30 +1980,25 @@ private fun SmartCodeEditor(
     )
     val density = LocalDensity.current
     val showQuickKeys = showKeyboardAccessory && WindowInsets.ime.getBottom(density) > 0
-    val signatureHelp = remember(file.name, editorValue.text, editorValue.selection) {
-        webSignatureHelpAt(file.name, editorValue.text, editorValue.selection.start)
-    }
-    val highlightedEditorText = remember(file.name, editorValue.text, palette) {
-        highlightWebSource(file.name, editorValue.text, palette)
-    }
-    val editorVisualText = remember(editorValue.text, highlightedEditorText, palette, diagnostics) {
-        addDiagnosticStyles(editorValue.text, highlightedEditorText, palette, diagnostics)
-    }
-    val editorVisualTransformation = remember(editorValue.text, editorVisualText) {
-        WebSyntaxTransformation(editorValue.text, editorVisualText)
+    val editorVisualTransformation = remember(editorVisualResult) {
+        WebSyntaxTransformation(editorVisualResult.source, editorVisualResult.text)
     }
     fun selectCompletion(item: CompletionItem) {
-        val context = completionContext ?: return
+        val context = completionResult.context ?: return
+        if (completionResult.source != editorValue.text || completionResult.cursor != editorValue.selection.start) return
+        val previousText = editorValue.text
         val inserted = applyCompletion(editorValue, context, item)
         editorValue = inserted
+        completionResult = EditorCompletionResult()
         suppressCompletionsForText = inserted.text
-        completionInteractionVersion = 0L
         completionsVisible = false
+        val insertedStart = context.replaceStart.coerceIn(0, inserted.text.length)
+        val insertedEnd = inserted.selection.start.coerceIn(insertedStart, inserted.text.length)
+        if (previousText != inserted.text && '\n' in inserted.text.substring(insertedStart, insertedEnd)) {
+            pendingCursorReveal += 1L
+        }
         onCodeChange(inserted.text)
     }
-    val completionSurfaceVisible = completionContext != null &&
-        completions.isNotEmpty() &&
-        suppressCompletionsForText != editorValue.text
 
     Column(modifier = modifier) {
         Row(
@@ -1848,11 +2056,29 @@ private fun SmartCodeEditor(
                             val previousValue = editorValue
                             val textChanged = requestedValue.text != previousValue.text
                             val updatedValue = applySmartWebEditorChange(previousValue, requestedValue, file.name)
+                            
+                            if (textChanged) {
+                                // Fast-pass synchronous highlight to prevent flashing white
+                                val fastVisual = highlightWebSource(file.name, updatedValue.text, palette)
+                                editorVisualResult = EditorVisualResult(updatedValue.text, fastVisual)
+                            }
+
+                            val insertedSegment = if (textChanged && updatedValue.selection.collapsed) {
+                                val start = minOf(previousValue.selection.start, previousValue.selection.end)
+                                    .coerceIn(0, updatedValue.text.length)
+                                val end = updatedValue.selection.start.coerceIn(start, updatedValue.text.length)
+                                updatedValue.text.substring(start, end)
+                            } else {
+                                ""
+                            }
                             editorValue = updatedValue
                             if (textChanged) {
                                 suppressCompletionsForText = null
-                                completionInteractionVersion = 0L
-                                completionsVisible = true
+                                completionResult = EditorCompletionResult()
+                                completionsVisible = false
+                                if ('\n' in insertedSegment) {
+                                    pendingCursorReveal += 1L
+                                }
                             } else if (requestedValue.selection != previousValue.selection) {
                                 completionsVisible = false
                             }
@@ -1875,17 +2101,24 @@ private fun SmartCodeEditor(
                         } else null
                     }
                     if (cursorRect != null) {
+                        val cursorTargetTop = with(density) { cursorRect.top.toDp() } - 24.dp
                         Box(
                             modifier = Modifier
                                 .bringIntoViewRequester(cursorBringIntoViewRequester)
-                                .size(1.dp)
+                                .width(1.dp)
+                                .height(if (completionSurfaceVisible) 180.dp else 112.dp)
                                 .offset(
-                                    x = with(LocalDensity.current) { cursorRect.left.toDp() },
-                                    y = with(LocalDensity.current) { cursorRect.top.toDp() }
+                                    x = with(density) { cursorRect.left.toDp() },
+                                    y = maxOf(0.dp, cursorTargetTop),
                                 )
                         )
                     }
-                    signatureHelp?.let { signature ->
+                    val currentSignatureHelp = completionResult.signatureHelp
+                        ?.takeIf {
+                            completionResult.source == editorValue.text &&
+                                completionResult.cursor == editorValue.selection.start
+                        }
+                    currentSignatureHelp?.let { signature ->
                         SignatureHelpChip(
                             signature = signature,
                             palette = palette,
@@ -1894,28 +2127,13 @@ private fun SmartCodeEditor(
                                 .padding(start = 6.dp, bottom = 6.dp),
                         )
                     }
-                    if (
-                        completionsVisible &&
-                        completions.isNotEmpty() &&
-                        completionSurfaceVisible
-                    ) {
-                        CompletionPopup(
-                            completions = completions,
-                            palette = palette,
-                            modifier = Modifier
-                                .align(Alignment.TopStart)
-                                .padding(top = 28.dp, start = 2.dp),
-                            onSelect = { item -> selectCompletion(item) },
-                            onInteraction = { completionInteractionVersion += 1L },
-                        )
-                    }
                 }
             }
         }
         if (completionSurfaceVisible) {
             Spacer(Modifier.height(6.dp))
             CompletionSuggestionBar(
-                completions = completions,
+                completions = completionResult.items,
                 palette = palette,
                 modifier = Modifier.fillMaxWidth(),
                 onSelect = { item -> selectCompletion(item) },
@@ -1926,6 +2144,7 @@ private fun SmartCodeEditor(
             EditorQuickKeys(
                 palette = palette,
                 editorValue = editorValue,
+                fileName = file.name,
                 onEditorValueChange = { updated ->
                     editorValue = updated
                     suppressCompletionsForText = updated.text
@@ -1974,46 +2193,75 @@ private fun CompletionSuggestionBar(
     modifier: Modifier = Modifier,
     onSelect: (CompletionItem) -> Unit,
 ) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    val rows = remember(completions) { completions.take(16).chunked(3) }
+    LazyColumn(
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        contentPadding = PaddingValues(4.dp),
         modifier = modifier
-            .height(36.dp)
-            .horizontalScroll(rememberScrollState()),
+            .heightIn(min = 42.dp, max = 124.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(palette.elevatedPanel)
+            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(10.dp)),
     ) {
-        completions.take(8).forEach { item ->
+        items(
+            items = rows,
+            key = { row -> row.joinToString("|") { it.completionKey() } },
+        ) { rowItems ->
             Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
-                    .height(34.dp)
-                    .width(148.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(palette.elevatedPanel)
-                    .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(8.dp))
-                    .clickable { onSelect(item) }
-                    .padding(horizontal = 8.dp),
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
             ) {
-                Text(
-                    text = item.label,
-                    color = palette.text,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                if (item.detail.isNotBlank()) {
-                    Spacer(Modifier.width(6.dp))
-                    Text(
-                        text = item.detail,
-                        color = palette.subtleText,
-                        fontSize = 10.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.width(42.dp),
+                rowItems.forEach { item ->
+                    CompletionSuggestionChip(
+                        item = item,
+                        palette = palette,
+                        onSelect = { onSelect(item) },
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CompletionSuggestionChip(
+    item: CompletionItem,
+    palette: WebPalette,
+    onSelect: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .height(34.dp)
+            .width(150.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.panel)
+            .border(BorderStroke(1.dp, palette.strongBorder), RoundedCornerShape(8.dp))
+            .clickable { onSelect() }
+            .padding(horizontal = 8.dp),
+    ) {
+        Text(
+            text = item.label,
+            color = palette.text,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (item.detail.isNotBlank()) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = item.detail,
+                color = palette.subtleText,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.width(48.dp),
+            )
         }
     }
 }
@@ -2074,198 +2322,57 @@ private fun InspectionStrip(
 }
 
 @Composable
-private fun CompletionPopup(
-    completions: List<CompletionItem>,
-    palette: WebPalette,
-    modifier: Modifier = Modifier,
-    onSelect: (CompletionItem) -> Unit,
-    onInteraction: () -> Unit,
-) {
-    val completionKey = completions.joinToString("|") { it.completionKey() }
-    var detailItemKey by remember(completionKey) { mutableStateOf<String?>(null) }
-    val detailItem = completions.firstOrNull { it.completionKey() == detailItemKey }
-
-    Column(
-        modifier = modifier
-            .width(284.dp)
-            .heightIn(max = 330.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(palette.elevatedPanel)
-            .border(BorderStroke(1.dp, palette.strongBorder), RoundedCornerShape(12.dp))
-            .pointerInput(onInteraction) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent()
-                        if (event.changes.any { it.pressed != it.previousPressed }) {
-                            onInteraction()
-                        }
-                    }
-                }
-            }
-            .verticalScroll(rememberScrollState())
-            .padding(vertical = 4.dp),
-    ) {
-        completions.take(9).forEach { item ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable { onSelect(item) }
-                    .padding(start = 10.dp, end = 2.dp, top = 6.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = item.label,
-                    color = palette.text,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 14.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = item.detail,
-                    color = palette.subtleText,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.width(78.dp),
-                )
-                IconButton(
-                    onClick = {
-                        detailItemKey = if (detailItemKey == item.completionKey()) null else item.completionKey()
-                    },
-                    modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.MoreHoriz,
-                        contentDescription = "Show completion details",
-                        tint = palette.subtleText,
-                        modifier = Modifier.size(18.dp),
-                    )
-                }
-            }
-        }
-        detailItem?.let { item ->
-            CompletionDetailCard(
-                item = item,
-                palette = palette,
-                modifier = Modifier
-                    .padding(horizontal = 7.dp, vertical = 5.dp)
-                    .fillMaxWidth(),
-            )
-        }
-    }
-}
-
-@Composable
-private fun CompletionDetailCard(
-    item: CompletionItem,
-    palette: WebPalette,
-    modifier: Modifier = Modifier,
-) {
-    val syntax = completionSyntax(item)
-    val example = completionExample(item)
-
-    Column(
-        modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(palette.panel)
-            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(10.dp))
-            .heightIn(max = 250.dp)
-            .verticalScroll(rememberScrollState())
-            .padding(10.dp),
-    ) {
-        Text(
-            text = item.label,
-            color = palette.text,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(3.dp))
-        Text(
-            text = "Kind: ${item.detail}",
-            color = palette.subtleText,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Definition:",
-            color = palette.subtleText,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = completionExplanation(item),
-            color = palette.mutedText,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
-            lineHeight = 17.sp,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Syntax:",
-            color = palette.subtleText,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = syntax,
-            color = palette.text,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
-        )
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Example:",
-            color = palette.subtleText,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-        Text(
-            text = example,
-            color = palette.text,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 11.sp,
-            lineHeight = 15.sp,
-        )
-    }
-}
-
-@Composable
 private fun EditorQuickKeys(
     palette: WebPalette,
     editorValue: TextFieldValue,
+    fileName: String,
     modifier: Modifier = Modifier,
     onEditorValueChange: (TextFieldValue) -> Unit,
 ) {
+    val language = remember(fileName) { webLanguageForFile(fileName) }
+
     Row(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         modifier = modifier.horizontalScroll(rememberScrollState()),
     ) {
         QuickKey("Tab", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "    ")) }
-        QuickKey("<>", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "<", ">")) }
-        QuickKey("</>", palette) { onEditorValueChange(insertClosingHtmlTag(editorValue)) }
-        QuickKey("{}", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "{", "}")) }
-        QuickKey("()", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "(", ")")) }
-        QuickKey("[]", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "[", "]")) }
+        
+        when (language) {
+            WebEditorLanguage.Html -> {
+                QuickKey("<>", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "<", ">")) }
+                QuickKey("</>", palette) { onEditorValueChange(insertClosingHtmlTag(editorValue)) }
+            }
+            WebEditorLanguage.Css -> {
+                QuickKey(":", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ":")) }
+                QuickKey(";", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ";")) }
+                QuickKey("#", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "#")) }
+                QuickKey("()", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "(", ")")) }
+            }
+            WebEditorLanguage.JavaScript -> {
+                QuickKey("()", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "(", ")")) }
+                QuickKey("{}", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "{", "}")) }
+                QuickKey("[]", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "[", "]")) }
+                QuickKey("=>", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "=> ")) }
+                QuickKey(";", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ";")) }
+            }
+            else -> {}
+        }
+
+        if (language != WebEditorLanguage.Html) {
+            QuickKey("{}", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "{", "}")) }
+        }
+        
         QuickKey("\"\"", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "\"", "\"")) }
         QuickKey("''", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "'", "'")) }
         QuickKey("=", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "=")) }
-        QuickKey(":", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ":")) }
-        QuickKey(";", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ";")) }
         QuickKey(".", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ".")) }
-        QuickKey("#", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "#")) }
         QuickKey("/", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "/")) }
+        
+        if (language == WebEditorLanguage.JavaScript) {
+            QuickKey("!", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "!")) }
+            QuickKey("&", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "&")) }
+            QuickKey("|", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "|")) }
+        }
     }
 }
 
@@ -2624,16 +2731,6 @@ private fun TerminalBody(
                                     .focusRequester(inputFocusRequester)
                                     .onFocusChanged { focusState -> onTerminalFocusChange(focusState.isFocused) },
                             )
-                            if (terminalInput.isNotBlank()) {
-                                IconButton(onClick = onTerminalCommandSubmit, modifier = Modifier.size(28.dp)) {
-                                    Icon(
-                                        Icons.AutoMirrored.Rounded.Send,
-                                        contentDescription = "Send",
-                                        tint = palette.accent,
-                                        modifier = Modifier.size(18.dp),
-                                    )
-                                }
-                            }
                         }
                     }
                 }
@@ -3149,9 +3246,15 @@ private fun AiComposer(
 }
 
 @Composable
-private fun WebPreviewFullScreen(rootDirectory: File, activeFile: WebFile, palette: WebPalette, onBack: () -> Unit) {
+private fun WebPreviewFullScreen(
+    rootDirectory: File,
+    files: List<WebFile>,
+    activeFile: WebFile,
+    palette: WebPalette,
+    onBack: () -> Unit
+) {
     val previewHtml = remember(rootDirectory.absolutePath, activeFile.filePath, activeFile.content) {
-        buildPreviewHtml(rootDirectory, activeFile)
+        buildPreviewHtml(rootDirectory, files, activeFile)
     }
 
     Column(modifier = Modifier.fillMaxSize().background(Color.White)) {
@@ -3617,26 +3720,26 @@ private fun highlightHtml(source: String, palette: WebPalette): AnnotatedString 
     val dark = palette.text == Color.White
     
     // Comments
-    applyRegexColor(this, source, Regex("<!--[\\s\\S]*?-->"), palette.subtleText, italic = true)
+    applyRegexColor(this, source, HTML_COMMENT_REGEX, palette.subtleText, italic = true)
     
     // Doctype
-    applyRegexColor(this, source, Regex("(?i)<!DOCTYPE[^>]*>"), if (dark) Color(0xFFFF7AB6) else Color(0xFFB4236E), bold = true)
+    applyRegexColor(this, source, HTML_DOCTYPE_REGEX, if (dark) Color(0xFFFF7AB6) else Color(0xFFB4236E), bold = true)
     
     // Tag Brackets
-    applyRegexColor(this, source, Regex("</?|/?>"), palette.text.copy(alpha = 0.7f))
+    applyRegexColor(this, source, HTML_TAG_BRACKETS_REGEX, palette.text.copy(alpha = 0.7f))
     
     // Tag Names
-    applyRegexGroupColor(this, source, Regex("</?\\s*([a-zA-Z][\\w:-]*)"), 1, if (dark) Color(0xFF569CD6) else Color(0xFF264F78), bold = true)
+    applyRegexGroupColor(this, source, HTML_TAG_NAME_REGEX, 1, if (dark) Color(0xFF569CD6) else Color(0xFF264F78), bold = true)
     
     // Attribute Names
-    applyRegexGroupColor(this, source, Regex("\\b(id|class|href|src|alt|type|name|value|style|onclick|role|aria-[\\w-]+)(?=\\s*=)"), 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080), bold = true)
-    applyRegexGroupColor(this, source, Regex("\\s([a-zA-Z_:][-a-zA-Z0-9_:.]*)(?=\\s*=)"), 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
+    applyRegexGroupColor(this, source, HTML_ATTR_NAME_CORE_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080), bold = true)
+    applyRegexGroupColor(this, source, HTML_ATTR_NAME_GENERIC_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
     
     // Attribute Values (Strings)
-    applyRegexColor(this, source, Regex("\"[^\"]*\"|'[^']*'"), if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
+    applyRegexColor(this, source, HTML_ATTR_VALUE_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
     
     // Entities
-    applyRegexColor(this, source, Regex("&[a-zA-Z0-9#]+;"), if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
+    applyRegexColor(this, source, HTML_ENTITY_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
 }
 
 private fun highlightCss(source: String, palette: WebPalette): AnnotatedString = buildAnnotatedString {
@@ -3645,29 +3748,29 @@ private fun highlightCss(source: String, palette: WebPalette): AnnotatedString =
     val dark = palette.text == Color.White
     
     // Comments
-    applyRegexColor(this, source, Regex("/\\*[\\s\\S]*?\\*/"), palette.subtleText, italic = true)
+    applyRegexColor(this, source, CSS_COMMENT_REGEX, palette.subtleText, italic = true)
     
     // At-rules
-    applyRegexColor(this, source, Regex("@[a-zA-Z-]+"), if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0))
+    applyRegexColor(this, source, CSS_AT_RULE_REGEX, if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0))
     
     // Selectors
-    applyRegexColor(this, source, Regex("[.#][a-zA-Z0-9_-]+"), if (dark) Color(0xFFD7BA7D) else Color(0xFF795E26))
-    applyRegexGroupColor(this, source, Regex("([a-zA-Z0-9_-]+)\\s*\\{"), 1, if (dark) Color(0xFFD7BA7D) else Color(0xFF795E26))
+    applyRegexColor(this, source, CSS_SELECTOR_ID_CLASS_REGEX, if (dark) Color(0xFFD7BA7D) else Color(0xFF795E26))
+    applyRegexGroupColor(this, source, CSS_SELECTOR_BLOCK_REGEX, 1, if (dark) Color(0xFFD7BA7D) else Color(0xFF795E26))
     
     // Properties
-    applyRegexGroupColor(this, source, Regex("\\b([a-zA-Z-]+)\\s*(?=:)"), 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
+    applyRegexGroupColor(this, source, CSS_PROPERTY_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
     
     // Values - Hex Colors
-    applyRegexColor(this, source, Regex("#[0-9a-fA-F]{3,8}\\b"), if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
+    applyRegexColor(this, source, CSS_COLOR_HEX_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
     
     // Values - Numbers and Units
-    applyRegexColor(this, source, Regex("\\b\\d+(?:\\.\\d+)?(px|rem|em|vh|vw|%|s|ms|deg)?\\b"), if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
+    applyRegexColor(this, source, CSS_NUMBER_UNIT_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
     
     // Values - Strings
-    applyRegexColor(this, source, Regex("\"[^\"]*\"|'[^']*'"), if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
+    applyRegexColor(this, source, CSS_STRING_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
     
     // Values - Keywords
-    applyRegexColor(this, source, Regex("(?i)\\b(true|false|inherit|initial|unset|none|auto|block|inline|flex|grid|absolute|relative|fixed|sticky|center|space-between|space-around|column|row|sans-serif|serif|monospace)\\b"), if (dark) Color(0xFF569CD6) else Color(0xFF0451A5))
+    applyRegexColor(this, source, CSS_KEYWORD_REGEX, if (dark) Color(0xFF569CD6) else Color(0xFF0451A5))
 }
 
 private fun highlightJs(source: String, palette: WebPalette): AnnotatedString = buildAnnotatedString {
@@ -3676,31 +3779,37 @@ private fun highlightJs(source: String, palette: WebPalette): AnnotatedString = 
     val dark = palette.text == Color.White
     
     // Comments
-    applyRegexColor(this, source, Regex("//.*$|/\\*[\\s\\S]*?\\*/", RegexOption.MULTILINE), palette.subtleText, italic = true)
+    applyRegexColor(this, source, JS_COMMENT_REGEX, palette.subtleText, italic = true)
     
     // Strings
-    applyRegexColor(this, source, Regex("`[\\s\\S]*?`|\"([^\"\\\\]|\\\\.)*\"|'([^'\\\\]|\\\\.)*'"), if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
+    applyRegexColor(this, source, JS_STRING_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
     
     // Keywords
     val jsKeywordsPattern = "\\b(${javascriptKeywords.joinToString("|")})\\b"
     applyRegexColor(this, source, Regex(jsKeywordsPattern), if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0), bold = true)
     
     // Booleans/Null
-    applyRegexColor(this, source, Regex("\\b(true|false|null|undefined|NaN|Infinity)\\b"), if (dark) Color(0xFF569CD6) else Color(0xFF0451A5), bold = true)
+    applyRegexColor(this, source, JS_BOOLEAN_NULL_REGEX, if (dark) Color(0xFF569CD6) else Color(0xFF0451A5), bold = true)
     
     // Builtins/Globals
     val jsBuiltinsPattern = "\\b(${javascriptBuiltins.joinToString("|")})\\b"
     applyRegexColor(this, source, Regex(jsBuiltinsPattern), if (dark) Color(0xFF4EC9B0) else Color(0xFF267F99))
     
     // Numbers
-    applyRegexColor(this, source, Regex("\\b\\d+(?:\\.\\d+)?\\b"), if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
+    applyRegexColor(this, source, JS_NUMBER_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
     
     // Member access (Properties)
-    applyRegexGroupColor(this, source, Regex("\\.([A-Za-z_$][\\w$]*)"), 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
+    applyRegexGroupColor(this, source, JS_MEMBER_ACCESS_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
     
     // Function calls & Methods
-    applyRegexGroupColor(this, source, Regex("\\b([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()"), 1, if (dark) Color(0xFFDCDCAA) else Color(0xFF795E26))
-    applyRegexGroupColor(this, source, Regex("\\.([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()"), 1, if (dark) Color(0xFFDCDCAA) else Color(0xFF795E26))
+    JS_FUNC_CALL_REGEX.findAll(source).forEach { match ->
+        val group = match.groups[1] ?: match.groups[2] ?: return@forEach
+        addStyle(
+            SpanStyle(color = if (dark) Color(0xFFDCDCAA) else Color(0xFF795E26)),
+            group.range.first,
+            group.range.last + 1
+        )
+    }
 }
 
 private fun highlightJson(source: String, palette: WebPalette): AnnotatedString = buildAnnotatedString {
@@ -3709,13 +3818,13 @@ private fun highlightJson(source: String, palette: WebPalette): AnnotatedString 
     val dark = palette.text == Color.White
     
     // Keys
-    applyRegexGroupColor(this, source, Regex("\"[^\"]*\"(?=\\s*:)"), 0, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
+    applyRegexGroupColor(this, source, JSON_KEY_REGEX, 0, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
     
     // Values - Strings
-    applyRegexGroupColor(this, source, Regex(":\\s*(\"[^\"]*\")"), 1, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
+    applyRegexGroupColor(this, source, JSON_STRING_VALUE_REGEX, 1, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
     
     // Values - Numbers/Booleans/Null
-    applyRegexGroupColor(this, source, Regex(":\\s*(\\d+|true|false|null)"), 1, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
+    applyRegexGroupColor(this, source, JSON_LITERAL_VALUE_REGEX, 1, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
 }
 
 private fun webLanguageForFile(fileName: String): WebEditorLanguage {
@@ -3806,6 +3915,9 @@ internal fun completionContextAt(text: String, rawCursor: Int, fileName: String)
     val language = webLanguageAt(fileName, text, cursor)
     val insideHtmlTag = language == WebEditorLanguage.Html && tagStart > tagEnd
     val attributeValueName = if (insideHtmlTag) activeHtmlAttributeValueName(before) else null
+    val activeHtmlTagText = if (insideHtmlTag) before.substring(tagStart) else ""
+    val completingClosingHtmlTag = isCompletingClosingHtmlTag(activeHtmlTagText)
+    val completingOpeningHtmlTag = isCompletingOpeningHtmlTag(activeHtmlTagText)
     if (before.endsWith(".") && language == WebEditorLanguage.JavaScript) {
         return CompletionContext(
             prefix = "",
@@ -3816,10 +3928,10 @@ internal fun completionContextAt(text: String, rawCursor: Int, fileName: String)
         )
     }
     val trigger = when {
-        before.endsWith("</") -> "closingTag"
+        before.endsWith("</") || completingClosingHtmlTag -> "closingTag"
         attributeValueName != null -> "attributeValue:$attributeValueName"
         insideHtmlTag && before.substring(tagStart).contains(Regex("\\s")) -> "attribute"
-        before.endsWith("<") -> "tag"
+        before.endsWith("<") || completingOpeningHtmlTag -> "tag"
         language == WebEditorLanguage.Css && isInsideCssRuleBlock(before) && isCssVariableValueCompletion(before) -> "cssVariable"
         language == WebEditorLanguage.Css && isCssAtRuleCompletion(before) -> "cssAtRule"
         language == WebEditorLanguage.Css && isCssDeclarationValueCompletion(before) -> "cssValue"
@@ -3841,10 +3953,20 @@ internal fun completionContextAt(text: String, rawCursor: Int, fileName: String)
     val isDotAccess = start > 0 && text[start - 1] == '.'
     val prefix = text.substring(start, cursor)
     if (prefix.isBlank() && trigger.isBlank() && !isDotAccess) return null
+    val replaceStart = when {
+        completingClosingHtmlTag || before.endsWith("</") -> tagStart + 1
+        completingOpeningHtmlTag || before.endsWith("<") -> tagStart
+        else -> start
+    }
+    val replaceEnd = if (trigger == "tag" || trigger == "closingTag") {
+        htmlTagShellReplaceEnd(text, cursor)
+    } else {
+        cursor
+    }
     return CompletionContext(
         prefix = prefix,
-        replaceStart = start,
-        replaceEnd = cursor,
+        replaceStart = replaceStart,
+        replaceEnd = replaceEnd,
         trigger = trigger,
         isDotAccess = isDotAccess,
     )
@@ -3873,6 +3995,7 @@ internal fun webCompletionsForContext(
         context.trigger == "cssVariable" -> cssCustomPropertyValueCompletions(source)
         context.trigger == "cssValue" -> cssValueCompletionsFor(source, context.replaceStart)
         context.isDotAccess && language == WebEditorLanguage.JavaScript -> jsDotCompletionsForSource(source, context.replaceStart - 1)
+        context.trigger == "tag" && language == WebEditorLanguage.Html -> htmlCompletionItems
         language == WebEditorLanguage.Html -> userDefinedHtmlCompletions(source) + htmlCompletionItems
         language == WebEditorLanguage.Css -> cssContextualCompletions(source, context.replaceStart)
         language == WebEditorLanguage.JavaScript -> userDefinedJsCompletions(source) + jsCompletionItems
@@ -3903,6 +4026,25 @@ private fun String.trimCompletionPrefixSymbols(): String {
     return trimStart('<', '/', '.', '#', ':', '"', '\'')
 }
 
+private fun isCompletingOpeningHtmlTag(activeTagText: String): Boolean {
+    if (!activeTagText.startsWith("<")) return false
+    if (activeTagText.startsWith("</") || activeTagText.startsWith("<!") || activeTagText.startsWith("<?")) return false
+    val body = activeTagText.drop(1)
+    return body.none { it.isWhitespace() || it == '<' || it == '>' || it == '/' }
+}
+
+private fun isCompletingClosingHtmlTag(activeTagText: String): Boolean {
+    if (!activeTagText.startsWith("</")) return false
+    val body = activeTagText.drop(2)
+    return body.none { it.isWhitespace() || it == '<' || it == '>' || it == '/' }
+}
+
+private fun htmlTagShellReplaceEnd(text: String, cursor: Int): Int {
+    var end = cursor.coerceIn(0, text.length)
+    while (end < text.length && text[end].isWhitespace()) end += 1
+    return if (text.getOrNull(end) == '>') end + 1 else cursor
+}
+
 private fun applyCompletion(value: TextFieldValue, context: CompletionContext, item: CompletionItem): TextFieldValue {
     val nextText = buildString {
         append(value.text.substring(0, context.replaceStart))
@@ -3915,116 +4057,6 @@ private fun applyCompletion(value: TextFieldValue, context: CompletionContext, i
 
 private fun CompletionItem.completionKey(): String {
     return "$label|$insertText|$detail"
-}
-
-private fun completionLookupKey(item: CompletionItem): String {
-    return "${item.label.removePrefix("<").removeSuffix(">").removeSuffix("()")}|${item.detail}"
-}
-
-internal fun completionExplanation(item: CompletionItem): String {
-    webCompletionDefinitions[completionLookupKey(item)]?.let { return it }
-    return when (item.detail) {
-        "document" -> "Starts an HTML document in standards mode so browsers use modern layout and parsing behavior."
-        "page" -> "Creates a complete HTML page shell with head metadata, viewport settings, and a body ready for content."
-        "element" -> "An HTML element defines a part of the page structure. Choose semantic elements when they describe the content clearly."
-        "media" -> "An HTML media element embeds images, video, canvas drawing, or responsive image sources in the page."
-        "form" -> "A form control or form container for collecting user input and sending or handling it with JavaScript."
-        "list" -> "A list element groups related items in ordered, unordered, or item form."
-        "script" -> "Connects JavaScript to the page, either inline or from an external file."
-        "stylesheet" -> "Links a CSS file so the browser can style the HTML document."
-        "metadata" -> "Adds document metadata that affects mobile layout, encoding, search, or browser behavior."
-        "closing tag" -> "Closes the currently open HTML element so the browser keeps the document tree balanced."
-        "attribute" -> "An HTML attribute changes an element's behavior, accessibility, styling hook, or linked resource."
-        "attribute value" -> "An HTML attribute value completes the current attribute with a valid option for this element."
-        "css property" -> "A CSS property controls visual presentation. Complete the declaration, then adjust the value for the layout or style you want."
-        "css value" -> "A CSS value belongs after a property colon. Use it to describe size, color, layout, timing, or display behavior."
-        "css variable" -> "A CSS custom property reference keeps repeated colors, sizes, and timing values consistent."
-        "at-rule" -> "A CSS at-rule controls responsive rules, animations, imports, layers, supports checks, or font declarations."
-        "selector" -> "A CSS selector targets elements, classes, ids, states, or structural positions in the document."
-        "keyword" -> "A JavaScript keyword is part of the language grammar and helps define variables, functions, control flow, modules, or async behavior."
-        "function" -> "A JavaScript function call. Put arguments inside the parentheses and use the returned value when the API gives one back."
-        "dom" -> "A browser DOM API for finding elements, changing the page, or responding to user interaction."
-        "array" -> "An Array method for reading, transforming, filtering, or changing ordered values."
-        "string" -> "A String method for searching, slicing, comparing, or transforming text."
-        "number" -> "A Number method for formatting, converting, or inspecting numeric values."
-        "promise" -> "A Promise method for handling an asynchronous result or failure."
-        "date" -> "A Date method for reading or formatting a point in time."
-        "style" -> "A DOM style property that writes inline CSS through JavaScript."
-        "snippet" -> "A reusable Web code template with common indentation and placeholders already started."
-        "builtin" -> "A built-in browser or JavaScript object available without importing anything."
-        "class" -> "A class symbol declared in this file. Use it to create objects or organize related methods."
-        "variable" -> "A symbol declared in this file. Use it to reference existing state, functions, classes, or DOM nodes."
-        "field" -> "A JSON object field. Use it as a quoted key followed by a colon and a valid JSON value."
-        else -> "A Web completion available in the current editor context."
-    }
-}
-
-internal fun completionSyntax(item: CompletionItem): String {
-    return webCompletionSyntaxes[completionLookupKey(item)] ?: when (item.detail) {
-        "document", "page", "element", "media", "form", "list", "script", "stylesheet", "metadata", "closing tag" -> item.insertText
-        "attribute", "attribute value" -> item.insertText
-        "css property", "css value", "css variable", "at-rule", "selector" -> item.insertText
-        "keyword", "snippet", "function", "dom", "array", "string", "number", "promise", "date", "style", "builtin", "class" -> item.insertText
-        "variable" -> item.label
-        "field" -> item.insertText
-        else -> item.insertText.ifBlank { item.label }
-    }
-}
-
-internal fun completionExample(item: CompletionItem): String {
-    return webCompletionExamples[completionLookupKey(item)]
-        ?: webCompletionExamples[item.label]
-        ?: when (item.detail) {
-            "document" -> "<!DOCTYPE html>\n<html lang=\"en\">\n</html>"
-            "page" -> item.insertText
-            "element" -> item.insertText
-            "media" -> item.insertText
-            "form" -> "<form>\n    ${item.insertText}\n</form>"
-            "list" -> item.insertText
-            "script" -> item.insertText
-            "stylesheet" -> item.insertText
-            "metadata" -> item.insertText
-            "closing tag" -> "<main>\n    Content\n${item.insertText}"
-            "attribute" -> "<button ${item.insertText}>Save</button>"
-            "attribute value" -> "<button type=\"${item.insertText}\">Save</button>"
-            "css property" -> ".card {\n    ${item.insertText}\n}"
-            "css value" -> ".card {\n    display: ${item.insertText};\n}"
-            "css variable" -> ".card {\n    color: ${item.insertText};\n}"
-            "at-rule" -> item.insertText
-            "selector" -> "${item.insertText} {\n    display: block;\n}"
-            "keyword" -> javascriptKeywordExample(item.label)
-            "function", "dom", "builtin" -> item.insertText
-            "array" -> "const nextItems = items.${item.insertText};"
-            "string" -> "const nextText = title.${item.insertText};"
-            "number" -> "const rounded = price.${item.insertText};"
-            "promise" -> "request.${item.insertText};"
-            "date" -> "const formatted = createdAt.${item.insertText};"
-            "style" -> "element.style.${item.insertText};"
-            "snippet" -> item.insertText
-            "class" -> "const instance = new ${item.label}();"
-            "variable" -> "console.log(${item.label})"
-            "field" -> "{\n    ${item.insertText}\n}"
-            else -> item.insertText.ifBlank { item.label }
-        }
-}
-
-private fun javascriptKeywordExample(label: String): String {
-    return when (label.removeSuffix("()")) {
-        "const" -> "const title = 'PocketCoded Web';"
-        "let" -> "let count = 0;"
-        "var" -> "var legacyValue = true;"
-        "return" -> "return value;"
-        "async" -> "async function loadData() {\n    return await fetch('/data.json');\n}"
-        "await" -> "const response = await fetch('/data.json');"
-        "import" -> "import value from './module.js';"
-        "export" -> "export function start() {}"
-        "if" -> "if (ready) {\n    start();\n}"
-        "else" -> "else {\n    showFallback();\n}"
-        "for" -> "for (const item of items) {\n    console.log(item);\n}"
-        "while" -> "while (running) {\n    tick();\n}"
-        "switch" -> "switch (mode) {\n    case 'dark':\n        break;\n}"
-        else -> label
-    }
 }
 
 private val htmlCompletionItems = listOf(
@@ -4932,6 +4964,14 @@ private fun inferJsDotTargetType(source: String, dotIndex: Int): String? {
     }
 }
 
+private fun shouldComputeSignatureHelp(source: String, rawCursor: Int): Boolean {
+    val cursor = rawCursor.coerceIn(0, source.length)
+    val windowStart = maxOf(0, cursor - 320)
+    val nearby = source.substring(windowStart, cursor)
+    val openParen = nearby.lastIndexOf('(')
+    return openParen >= 0 && openParen > nearby.lastIndexOf(')')
+}
+
 private fun webSignatureHelpAt(fileName: String, source: String, rawCursor: Int): String? {
     val cursor = rawCursor.coerceIn(0, source.length)
     val language = webLanguageAt(fileName, source, cursor)
@@ -5664,45 +5704,6 @@ private fun hasJavaScriptStatementTerminator(trimmed: String): Boolean {
         trimmed.endsWith(")")
 }
 
-private val webCompletionDefinitions = mapOf(
-    "html|page" to "Creates a full HTML document skeleton with language, metadata, viewport, title, and body sections.",
-    "main|element" to "Marks the main unique content of the page. Screen readers can jump to it as a landmark.",
-    "section|element" to "Groups a themed part of a page, usually with its own heading.",
-    "button|element" to "Creates an interactive button for actions. Use type=\"button\" when it is not submitting a form.",
-    "img|media" to "Embeds an image. Always include alt text unless the image is purely decorative.",
-    "script:src|script" to "Loads JavaScript from an external file so behavior stays separate from document structure.",
-    "link:css|stylesheet" to "Connects an external stylesheet to the current HTML document.",
-    "meta:viewport|metadata" to "Sets the mobile viewport so responsive CSS uses the real device width.",
-    "id|attribute" to "Assigns one unique identifier to an element for labels, anchors, CSS, or JavaScript lookups.",
-    "querySelector|dom" to "Returns the first element that matches a CSS selector. It returns null when nothing matches, so check the result before using it.",
-    "querySelectorAll|dom" to "Returns all matching elements as a NodeList. Convert it with Array.from when you want full Array methods.",
-    "getElementById|dom" to "Finds one element by its id. Pass the id text without the leading #.",
-    "createElement|dom" to "Creates an element in memory. Append it before it appears on the page.",
-    "addEventListener|dom" to "Registers a callback for a browser event such as click, input, submit, keydown, or pointermove.",
-    "fetch|function" to "Starts an HTTP request and returns a Promise. Await it or chain .then() before reading the response body.",
-    "console.log|function" to "Writes values to the browser console for quick debugging.",
-    "setTimeout|function" to "Runs a callback once after a delay in milliseconds.",
-    "JSON|builtin" to "Built-in JSON helper for parsing strings into objects and serializing objects back to text.",
-    "Promise|builtin" to "Represents an async result that may complete later or fail.",
-    "map|array" to "Creates a new array by transforming every item in the original array.",
-    "filter|array" to "Creates a new array containing only the items that pass a test.",
-    "forEach|array" to "Runs a callback for every item when you want side effects instead of a returned array.",
-    "includes|string" to "Checks whether text contains another string and returns true or false.",
-    "trim|string" to "Removes whitespace from the start and end of a string.",
-    "then|promise" to "Registers the next step after a Promise resolves.",
-    "catch|promise" to "Handles a rejected Promise or thrown async error.",
-    "display|css property" to "Controls how an element participates in layout. flex and grid are the most common choices for modern UI.",
-    "position|css property" to "Controls how an element is placed in the document flow or relative to another containing box.",
-    "gap|css property" to "Sets space between rows and columns in flex and grid layouts.",
-    "color|css property" to "Sets the foreground text color.",
-    "background|css property" to "Sets background color, images, gradients, or repeated background layers.",
-    "grid-template-columns|css property" to "Defines the column tracks of a CSS grid. repeat() and minmax() are useful for responsive layouts.",
-    "@media|at-rule" to "Applies nested CSS only when a media query matches, usually for responsive breakpoints.",
-    "@keyframes|at-rule" to "Defines animation steps that can be referenced by the animation property.",
-    ":hover|selector" to "Targets an element while the pointer is over it.",
-    "class|attribute" to "Assigns one or more CSS class names to an HTML element so styles and JavaScript can target it.",
-)
-
 private val webCompletionSyntaxes = mapOf(
     "main|element" to "<main>...</main>",
     "section|element" to "<section>...</section>",
@@ -5730,37 +5731,6 @@ private val webCompletionSyntaxes = mapOf(
     "position|css property" to "position: relative;",
     "gap|css property" to "gap: 1rem;",
     "@media|at-rule" to "@media (max-width: 700px) {\n    ...\n}",
-)
-
-private val webCompletionExamples = mapOf(
-    "main|element" to "<main class=\"app\">\n    <h1>PocketCoded Web</h1>\n</main>",
-    "section|element" to "<section aria-labelledby=\"features-title\">\n    <h2 id=\"features-title\">Features</h2>\n</section>",
-    "button|element" to "<button type=\"button\" id=\"runButton\">Run</button>",
-    "img|media" to "<img src=\"hero.png\" alt=\"App preview\">",
-    "class|attribute" to "<section class=\"panel primary\"></section>",
-    "id|attribute" to "<p id=\"output\"></p>",
-    "querySelector|dom" to "const button = document.querySelector('#actionButton');",
-    "querySelectorAll|dom" to "document.querySelectorAll('.item').forEach(item => {\n    item.classList.add('ready');\n});",
-    "getElementById|dom" to "const output = document.getElementById('output');",
-    "createElement|dom" to "const card = document.createElement('article');\ncard.className = 'card';",
-    "addEventListener|dom" to "button.addEventListener('click', () => {\n    console.log('clicked');\n});",
-    "fetch|function" to "const response = await fetch('/data.json');\nconst data = await response.json();",
-    "console.log|function" to "console.log('Current count:', count);",
-    "setTimeout|function" to "setTimeout(() => {\n    showToast('Saved');\n}, 300);",
-    "map|array" to "const labels = items.map(item => item.label);",
-    "filter|array" to "const visibleItems = items.filter(item => item.visible);",
-    "forEach|array" to "items.forEach(item => renderItem(item));",
-    "includes|string" to "if (title.includes('Web')) {\n    highlight(title);\n}",
-    "trim|string" to "const name = input.value.trim();",
-    "then|promise" to "fetch('/data.json')\n    .then(response => response.json())\n    .then(data => render(data));",
-    "catch|promise" to "fetch('/data.json').catch(error => {\n    console.error(error);\n});",
-    "display|css property" to ".toolbar {\n    display: flex;\n    gap: 0.75rem;\n}",
-    "position|css property" to ".badge {\n    position: absolute;\n    top: 0.5rem;\n    right: 0.5rem;\n}",
-    "gap|css property" to ".grid {\n    display: grid;\n    gap: 1rem;\n}",
-    "grid-template-columns|css property" to ".gallery {\n    display: grid;\n    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));\n}",
-    "@media|at-rule" to "@media (max-width: 700px) {\n    .layout {\n        grid-template-columns: 1fr;\n    }\n}",
-    "@keyframes|at-rule" to "@keyframes fade-in {\n    from { opacity: 0; }\n    to { opacity: 1; }\n}",
-    ":hover|selector" to ".button:hover {\n    filter: brightness(1.08);\n}",
 )
 
 private fun webIdePalette(theme: WebTheme): WebPalette = when (theme) {
@@ -6066,8 +6036,16 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
             target.writeText(formatted)
             WebShellResult(output = "Formatted ${relativeWorkspacePath(root, target)}", workspaceChanged = true)
         }
-        "npm", "node" -> WebShellResult(
-            error = "$executable is not bundled in PocketCoded Web. Use preview/run for HTML, CSS and JavaScript projects."
+        "node", "js" -> {
+            val target = resolveTerminalPath(root, working, args.getOrNull(1).orEmpty())
+                ?: return WebShellResult(error = "$executable: outside project")
+            if (!target.isFile || fileExtension(target.name) !in javascriptFileExtensions) {
+                return WebShellResult(error = "$executable: ${args.getOrNull(1).orEmpty()}: expected a JavaScript file")
+            }
+            WebShellResult(output = "", runJs = target.readText())
+        }
+        "npm" -> WebShellResult(
+            error = "npm is not bundled in PocketCoded Web. Use node/js <file> to run scripts."
         )
         else -> WebShellResult(error = "Command not found: $executable. Run help to see available commands.")
     }
@@ -6139,6 +6117,27 @@ internal fun estimatedLongestLineLength(text: String, cap: Int): Int {
         }
     }
     return maxOf(longest, current)
+}
+
+private fun editorTextMetrics(text: String, cap: Int): EditorTextMetrics {
+    if (text.isEmpty()) return EditorTextMetrics()
+    var lineCount = 1
+    var longest = 0
+    var current = 0
+    text.forEach { char ->
+        if (char == '\n') {
+            lineCount += 1
+            if (current > longest) longest = current
+            current = 0
+        } else {
+            current += 1
+            if (current > cap) current = cap
+        }
+    }
+    return EditorTextMetrics(
+        lineCount = lineCount,
+        longestLineLength = maxOf(longest, current).coerceAtLeast(48),
+    )
 }
 
 private fun listDirectory(directory: File, showHidden: Boolean): String {
@@ -6220,13 +6219,15 @@ private fun formatWebSource(name: String, source: String): String {
     }
 }
 
-private fun buildPreviewHtml(rootDirectory: File, activeFile: WebFile): String {
+private fun buildPreviewHtml(rootDirectory: File, files: List<WebFile>, activeFile: WebFile): String {
     val active = File(activeFile.filePath)
     val source = when (fileExtension(activeFile.name)) {
         "html", "htm", "svg" -> activeFile.content
         "css" -> {
-            val index = File(rootDirectory, "index.html")
-            if (index.isFile) index.readText() else """
+            val indexFile = files.firstOrNull { it.name == "index.html" && samePath(it.parentDirectoryPath(rootDirectory), rootDirectory.absolutePath) }
+            val indexContent = indexFile?.content ?: runCatching { File(rootDirectory, "index.html").readText() }.getOrNull()
+            
+            if (indexContent != null) indexContent else """
                 <!DOCTYPE html>
                 <html lang="en">
                 <head>
@@ -6245,8 +6246,10 @@ private fun buildPreviewHtml(rootDirectory: File, activeFile: WebFile): String {
             """.trimIndent()
         }
         "js", "mjs" -> {
-            val index = File(rootDirectory, "index.html")
-            if (index.isFile) index.readText() else """
+            val indexFile = files.firstOrNull { it.name == "index.html" && samePath(it.parentDirectoryPath(rootDirectory), rootDirectory.absolutePath) }
+            val indexContent = indexFile?.content ?: runCatching { File(rootDirectory, "index.html").readText() }.getOrNull()
+            
+            if (indexContent != null) indexContent else """
                 <!DOCTYPE html>
                 <html lang="en">
                 <head>
@@ -6796,6 +6799,15 @@ private fun SnapshotStateList<String>.addUniquePath(path: String) {
     if (none { samePath(it, path) }) add(path)
 }
 
+private fun WebFile.withPendingEditorText(pendingTexts: Map<Long, String>): WebFile {
+    val pending = pendingTexts[id]
+    return if (pending != null) copy(content = pending) else this
+}
+
+private fun List<WebFile>.withPendingEditorTexts(pendingTexts: Map<Long, String>): List<WebFile> {
+    return map { it.withPendingEditorText(pendingTexts) }
+}
+
 private fun SnapshotStateList<WebFile>.replaceFile(id: Long, transform: WebFile.() -> WebFile) {
     val index = indexOfFirst { it.id == id }
     if (index >= 0) this[index] = this[index].transform()
@@ -6886,4 +6898,137 @@ private fun parseStringList(raw: String): List<String> {
             }
         }
     }.getOrDefault(emptyList())
+}
+
+@Composable
+private fun FilesAndFoldersDialog(
+    palette: WebPalette,
+    onDismiss: () -> Unit,
+    onOpenFile: () -> Unit,
+    onOpenFolder: () -> Unit,
+    onSaveCurrentFolder: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = palette.elevatedPanel,
+        title = { Text("Files and folders", color = palette.text) },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                Text("Destination: -", color = palette.subtleText, fontSize = 12.sp)
+                Spacer(Modifier.height(16.dp))
+
+                FileActionButton(
+                    text = "Open file",
+                    icon = Icons.Rounded.Description,
+                    palette = palette,
+                    onClick = onOpenFile
+                )
+                Spacer(Modifier.height(8.dp))
+                FileActionButton(
+                    text = "Open folder",
+                    icon = Icons.Rounded.Folder,
+                    palette = palette,
+                    onClick = onOpenFolder
+                )
+
+                Spacer(Modifier.height(16.dp))
+                HorizontalRule(palette)
+                Spacer(Modifier.height(16.dp))
+
+                Text("Save from sandbox", color = palette.subtleText, fontSize = 12.sp)
+                Spacer(Modifier.height(16.dp))
+
+                FileActionButton(
+                    text = "Save current folder",
+                    icon = Icons.Rounded.Folder,
+                    palette = palette,
+                    onClick = onSaveCurrentFolder
+                )
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", color = palette.accent) }
+        }
+    )
+}
+
+@Composable
+private fun FileActionButton(
+    text: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    palette: WebPalette,
+    onClick: () -> Unit,
+) {
+    OutlinedButton(
+        onClick = onClick,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp),
+        shape = RoundedCornerShape(24.dp),
+        colors = ButtonDefaults.outlinedButtonColors(contentColor = palette.text),
+        border = BorderStroke(1.dp, palette.border)
+    ) {
+        Icon(icon, null, modifier = Modifier.size(20.dp), tint = palette.accent)
+        Spacer(Modifier.width(12.dp))
+        Text(text, fontSize = 15.sp)
+    }
+}
+
+private fun getFileName(context: Context, uri: Uri): String? {
+    var name: String? = null
+    if (uri.scheme == "content") {
+        val cursor = context.contentResolver.query(uri, null, null, null, null)
+        cursor?.use {
+            if (it.moveToFirst()) {
+                val index = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index != -1) name = it.getString(index)
+            }
+        }
+    }
+    return name ?: uri.path?.substringAfterLast('/')
+}
+
+private fun copyUriToFile(context: Context, uri: Uri, target: File): Boolean {
+    return runCatching {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            target.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+        true
+    }.getOrDefault(false)
+}
+
+private fun importFromDocumentFile(context: Context, docFile: DocumentFile, targetDir: File) {
+    if (docFile.isDirectory) {
+        val newDir = File(targetDir, docFile.name ?: "imported_folder").apply { mkdirs() }
+        docFile.listFiles().forEach { child ->
+            importFromDocumentFile(context, child, newDir)
+        }
+    } else {
+        val targetFile = File(targetDir, docFile.name ?: "imported_file")
+        context.contentResolver.openInputStream(docFile.uri)?.use { input ->
+            targetFile.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+    }
+}
+
+private fun exportToDocumentFile(context: Context, sourceDir: File, destFolder: DocumentFile) {
+    sourceDir.listFiles()?.forEach { file ->
+        if (isProjectIgnoredDirectory(file)) return@forEach
+        if (file.isDirectory) {
+            val subFolder = destFolder.createDirectory(file.name ?: "folder") ?: return@forEach
+            exportToDocumentFile(context, file, subFolder)
+        } else {
+            val destFile = destFolder.createFile("application/octet-stream", file.name ?: "file") ?: return@forEach
+            context.contentResolver.openOutputStream(destFile.uri)?.use { output ->
+                file.inputStream().use { input ->
+                    input.copyTo(output)
+                }
+            }
+        }
+    }
 }

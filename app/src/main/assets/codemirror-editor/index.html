@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <style>
+    html,
+    body,
+    #app {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: transparent;
+      touch-action: manipulation;
+    }
+
+    body {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    #app {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+    }
+
+    #editor {
+      flex: 1;
+      min-height: 0;
+      overflow: hidden;
+    }
+
+    #bottomTray {
+      flex: 0 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding-top: 6px;
+    }
+
+    #suggestionTray {
+      display: none;
+      max-height: 108px;
+      overflow: auto;
+      border-radius: 10px;
+      padding: 4px;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    #suggestionGrid {
+      display: grid;
+      grid-auto-flow: column;
+      grid-template-rows: repeat(2, 34px);
+      grid-auto-columns: minmax(132px, 168px);
+      gap: 6px;
+      width: max-content;
+      min-width: 100%;
+    }
+
+    .suggestionChip,
+    .quickKey {
+      height: 32px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      font: inherit;
+      white-space: nowrap;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    .suggestionChip {
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 8px;
+      overflow: hidden;
+    }
+
+    .suggestionLabel,
+    .suggestionDetail {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .suggestionLabel {
+      font-size: 12px;
+    }
+
+    .suggestionDetail {
+      flex: 0 0 auto;
+      max-width: 56px;
+      font-size: 10px;
+    }
+
+    #quickKeys {
+      display: none;
+      gap: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      padding-bottom: 1px;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .quickKey {
+      min-width: 56px;
+      padding: 0 12px;
+      font-size: 13px;
+    }
+
+    #diagnostics {
+      display: none;
+      max-height: 42px;
+      overflow-y: auto;
+      border-radius: 8px;
+      padding: 6px 10px;
+      box-sizing: border-box;
+      font-size: 11px;
+      line-height: 18px;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .diagnosticLine {
+      display: flex;
+      gap: 7px;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .diagnosticDot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex: 0 0 auto;
+    }
+
+    .diagnosticText {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .cm-editor {
+      height: 100%;
+      background: transparent;
+      font-size: 14px;
+      line-height: 20px;
+    }
+
+    .cm-scroller {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      -webkit-overflow-scrolling: touch;
+    }
+
+    .cm-content {
+      min-width: max-content;
+      padding: 0 0 40px 0;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="editor"></div>
+    <div id="bottomTray">
+      <div id="suggestionTray"><div id="suggestionGrid"></div></div>
+      <div id="quickKeys"></div>
+      <div id="diagnostics"></div>
+    </div>
+  </div>
+  <script src="editor.js"></script>
+</body>
+</html>
