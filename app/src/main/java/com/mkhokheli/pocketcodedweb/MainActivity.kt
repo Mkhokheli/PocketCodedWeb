@@ -3,11 +3,20 @@ package com.mkhokheli.pocketcodedweb
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
+import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -106,6 +115,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
@@ -177,6 +187,7 @@ private const val MAX_EDITABLE_PROJECT_FILE_BYTES = 1_000_000L
 private const val AI_CONTEXT_FILE_LIMIT = 24
 private const val AI_CONTEXT_CHAR_LIMIT = 60_000
 private const val AI_TERMINAL_CONTEXT_LIMIT = 12_000
+private const val AI_MAX_OUTPUT_TOKENS = 16_384
 private const val COMPLETION_IDLE_TIMEOUT_MS = 3_500L
 private const val EDITOR_SAVE_DEBOUNCE_MS = 1_000L
 private const val DIAGNOSTIC_IDLE_DELAY_MS = 220L
@@ -191,6 +202,46 @@ private val javascriptFileExtensions = setOf("js", "mjs", "cjs", "jsx")
 private val editableWebExtensions = htmlFileExtensions + cssFileExtensions + javascriptFileExtensions + setOf("json", "md", "txt")
 private val defaultWebFileNames = listOf("index.html", "style.css", "script.js")
 private val workspaceMetadataNames = setOf(".git", ".ssh", ".pocketcodedweb")
+private val aiEditableFilePathRegex =
+    Regex("""(?i)(?:^|[`'"\s(:-])([A-Za-z0-9_. -]+(?:/[A-Za-z0-9_. -]+)*\.(?:html|htm|css|js|mjs|cjs|jsx|json|md|txt|svg))(?=$|[`'")\s:,-])""")
+private val jsImportSpecifierRegex =
+    Regex("""(?m)\b(?:import|export)\s+(?:[^'"]*?\s+from\s*)?["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*\)""")
+private val commonLibraryPackageNames = listOf(
+    "react",
+    "react-dom/client",
+    "vue",
+    "petite-vue",
+    "svelte",
+    "three",
+    "gsap",
+    "animejs",
+    "axios",
+    "lodash",
+    "lodash-es",
+    "d3",
+    "chart.js/auto",
+    "dayjs",
+    "date-fns",
+    "firebase/app",
+    "firebase/auth",
+    "firebase/firestore",
+    "@supabase/supabase-js",
+    "zod",
+    "uuid",
+    "nanoid",
+    "matter-js",
+    "phaser",
+    "p5",
+    "pixi.js",
+    "@babylonjs/core",
+    "howler",
+    "tone",
+    "canvas-confetti",
+    "swiper",
+    "marked",
+    "prismjs",
+    "highlight.js",
+)
 
 private val HTML_COMMENT_REGEX = Regex("<!--[\\s\\S]*?-->")
 private val HTML_DOCTYPE_REGEX = Regex("(?i)<!DOCTYPE[^>]*>")
@@ -417,6 +468,12 @@ internal data class AiProjectFileChange(
     val content: String = "",
 )
 
+private data class AiCodeBlock(
+    val prefix: String,
+    val language: String,
+    val code: String,
+)
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -509,6 +566,15 @@ private fun WebIdeApp(
             files.add(it)
             activeFileId = it.id
         }).withPendingEditorText(pendingEditorTextByFileId)
+
+    BackHandler(enabled = true) {
+        if (fullScreenMode != null) {
+            fullScreenMode = null
+        } else {
+            onBackToProjects()
+        }
+    }
+
     var workingDirectoryPath by rememberSaveable(rootDirectory.absolutePath) {
         mutableStateOf(
             validDirectoryOrRoot(
@@ -560,17 +626,38 @@ private fun WebIdeApp(
             factory = {
                 WebView(it).apply {
                     settings.javaScriptEnabled = true
+                    webChromeClient = object : WebChromeClient() {
+                        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+                            consoleMessage ?: return false
+                            coroutineScope.launch {
+                                terminalText = appendTerminalOutput(
+                                    terminalText,
+                                    formatPreviewRuntimeMessage(
+                                        level = consoleMessage.messageLevel().name.lowercase(),
+                                        message = consoleMessage.message().orEmpty(),
+                                        source = consoleMessage.sourceId().orEmpty().ifBlank { "terminal.js" },
+                                        line = consoleMessage.lineNumber(),
+                                        column = 0,
+                                    ),
+                                )
+                            }
+                            return true
+                        }
+                    }
                     addJavascriptInterface(object {
-                        @android.webkit.JavascriptInterface
+                        @JavascriptInterface
                         fun log(msg: String) {
                             coroutineScope.launch {
                                 terminalText = appendTerminalOutput(terminalText, msg)
                             }
                         }
-                        @android.webkit.JavascriptInterface
+                        @JavascriptInterface
                         fun error(msg: String) {
                             coroutineScope.launch {
-                                terminalText = appendTerminalOutput(terminalText, "Error: $msg")
+                                terminalText = appendTerminalOutput(
+                                    terminalText,
+                                    formatPreviewRuntimeMessage("error", msg, "terminal.js", 0, 0),
+                                )
                             }
                         }
                     }, "terminal")
@@ -580,11 +667,15 @@ private fun WebIdeApp(
                 val wrappedJs = """
                     (function() {
                         console.log = function() { terminal.log(Array.from(arguments).join(' ')); };
+                        console.warn = function() { terminal.log('Warning: ' + Array.from(arguments).join(' ')); };
                         console.error = function() { terminal.error(Array.from(arguments).join(' ')); };
+                        window.addEventListener('unhandledrejection', function(event) {
+                            terminal.error('Unhandled promise rejection: ' + (event.reason && (event.reason.stack || event.reason.message || event.reason) || 'unknown'));
+                        });
                         try {
                             $jsCode
                         } catch (e) {
-                            console.error(e.message);
+                            terminal.error(e.stack || e.message || String(e));
                         }
                     })();
                 """.trimIndent()
@@ -762,17 +853,34 @@ private fun WebIdeApp(
         }
     }
 
-    fun runWebPreview() {
-        val isJs = fileExtension(activeFile.name) in javascriptFileExtensions
-        if (isJs) {
-            terminalJsToRun = activeFile.content
-        } else {
-            terminalText = appendTerminalOutput(
-                terminalText,
-                "$terminalPromptText preview ${activeFile.name}\nOpening responsive Web preview.",
-            )
-            fullScreenMode = WebFullScreenMode.Preview
+    fun commitPendingEditorStateForPreview() {
+        if (pendingEditorTextByFileId.isEmpty()) return
+        val pendingSnapshot = pendingEditorTextByFileId.toMap()
+        val modifiedAt = System.currentTimeMillis()
+        pendingSnapshot.forEach { (fileId, pendingText) ->
+            pendingEditorSaveJobs.remove(fileId)?.cancel()
+            files.replaceFile(fileId) {
+                copy(content = pendingText, modifiedAt = modifiedAt)
+            }
+            dirtyFileIds.remove(fileId)
         }
+        pendingEditorTextByFileId.clear()
+    }
+
+    fun runWebPreview() {
+        val previewFiles = files.withPendingEditorTexts(pendingEditorTextByFileId)
+        val diagnostics = previewDiagnosticsForTerminal(rootDirectory, previewFiles)
+        commitPendingEditorStateForPreview()
+        terminalText = appendTerminalOutput(
+            terminalText,
+            buildString {
+                append("$terminalPromptText preview ${activeFile.name}\nOpening responsive Web preview.")
+                if (diagnostics.isNotBlank()) {
+                    append("\n").append(diagnostics)
+                }
+            },
+        )
+        fullScreenMode = WebFullScreenMode.Preview
     }
 
     fun submitTerminalCommand(commandOverride: String? = null) {
@@ -795,7 +903,15 @@ private fun WebIdeApp(
                 workingDirectoryPath = it
             }
             if (result.workspaceChanged) refreshFiles(workingPath = terminalDirectoryPath)
-            if (result.openPreview) fullScreenMode = WebFullScreenMode.Preview
+            if (result.openPreview) {
+                val previewFiles = files.withPendingEditorTexts(pendingEditorTextByFileId)
+                val diagnostics = previewDiagnosticsForTerminal(rootDirectory, previewFiles)
+                commitPendingEditorStateForPreview()
+                if (diagnostics.isNotBlank()) {
+                    terminalText = appendTerminalOutput(terminalText, diagnostics)
+                }
+                fullScreenMode = WebFullScreenMode.Preview
+            }
         }
     }
 
@@ -831,7 +947,10 @@ private fun WebIdeApp(
             result
                 .onSuccess { response ->
                     aiMessages += AiChatMessage(AiChatRole.Assistant, response)
-                    aiPendingAction = suggestedActionFromAiText(response)
+                    aiPendingAction = suggestedActionFromAiText(
+                        text = response,
+                        activeFile = activeFile.withPendingEditorText(pendingEditorTextByFileId),
+                    )
                 }
                 .onFailure { error ->
                     aiError = friendlyGeminiError(error.message.orEmpty())
@@ -853,9 +972,18 @@ private fun WebIdeApp(
                 aiVerificationMessage = "Replaced ${activeFile.name}."
             }
             is AiSuggestedAction.ApplyProjectFileChanges -> {
-                val message = applyAiProjectFileChanges(rootDirectory, action.changes)
-                refreshFiles(selectPath = activeFile.filePath, workingPath = workingDirectory.absolutePath)
-                aiVerificationMessage = message
+                runCatching {
+                    applyAiProjectFileChanges(rootDirectory, action.changes)
+                }.onSuccess { message ->
+                    val selectedPath = action.changes
+                        .firstOrNull { it.operation == AiProjectFileOperation.Write }
+                        ?.let { File(rootDirectory, it.path).absolutePath }
+                        ?: activeFile.filePath
+                    refreshFiles(selectPath = selectedPath, workingPath = workingDirectory.absolutePath)
+                    aiVerificationMessage = message
+                }.onFailure { error ->
+                    aiVerificationMessage = error.message ?: "Could not apply AI changes."
+                }
             }
         }
         aiPendingAction = null
@@ -948,6 +1076,9 @@ private fun WebIdeApp(
                 files = files.withPendingEditorTexts(pendingEditorTextByFileId),
                 activeFile = activeFile.withPendingEditorText(pendingEditorTextByFileId),
                 palette = palette,
+                onRuntimeMessage = { message ->
+                    terminalText = appendTerminalOutput(terminalText, message)
+                },
                 onBack = { fullScreenMode = null },
             )
             null -> WebIdeHomeScreen(
@@ -1884,18 +2015,18 @@ private fun SmartCodeEditor(
         if (snapshot == editorValue.text && cursor == editorValue.selection.start) {
             completionResult = result
             completionsVisible = result.context != null &&
-                result.items.isNotEmpty() &&
-                suppressCompletionsForText != snapshot
+                    result.items.isNotEmpty() &&
+                    suppressCompletionsForText != snapshot
         }
     }
     val completionSurfaceVisible by remember {
         derivedStateOf {
             completionsVisible &&
-                completionResult.context != null &&
-                completionResult.items.isNotEmpty() &&
-                completionResult.source == editorValue.text &&
-                completionResult.cursor == editorValue.selection.start &&
-                suppressCompletionsForText != editorValue.text
+                    completionResult.context != null &&
+                    completionResult.items.isNotEmpty() &&
+                    completionResult.source == editorValue.text &&
+                    completionResult.cursor == editorValue.selection.start &&
+                    suppressCompletionsForText != editorValue.text
         }
     }
     LaunchedEffect(file.name, editorValue.text) {
@@ -1945,9 +2076,9 @@ private fun SmartCodeEditor(
     val editorVerticalScroll = rememberScrollState()
     val editorHorizontalScroll = rememberScrollState()
     val cursorBringIntoViewRequester = remember { BringIntoViewRequester() }
-    
+
     var lastTextLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
-    
+
     LaunchedEffect(pendingCursorReveal) {
         if (pendingCursorReveal > 0L) {
             delay(CURSOR_REVEAL_DELAY_MS)
@@ -2056,7 +2187,7 @@ private fun SmartCodeEditor(
                             val previousValue = editorValue
                             val textChanged = requestedValue.text != previousValue.text
                             val updatedValue = applySmartWebEditorChange(previousValue, requestedValue, file.name)
-                            
+
                             if (textChanged) {
                                 // Fast-pass synchronous highlight to prevent flashing white
                                 val fastVisual = highlightWebSource(file.name, updatedValue.text, palette)
@@ -2092,7 +2223,7 @@ private fun SmartCodeEditor(
                         visualTransformation = editorVisualTransformation,
                         modifier = Modifier.fillMaxSize(),
                     )
-                    
+
                     // Cursor snap placeholder
                     val cursorRect = lastTextLayoutResult?.let { layout ->
                         if (layout.layoutInput.text.text == editorValue.text) {
@@ -2116,7 +2247,7 @@ private fun SmartCodeEditor(
                     val currentSignatureHelp = completionResult.signatureHelp
                         ?.takeIf {
                             completionResult.source == editorValue.text &&
-                                completionResult.cursor == editorValue.selection.start
+                                    completionResult.cursor == editorValue.selection.start
                         }
                     currentSignatureHelp?.let { signature ->
                         SignatureHelpChip(
@@ -2336,7 +2467,7 @@ private fun EditorQuickKeys(
         modifier = modifier.horizontalScroll(rememberScrollState()),
     ) {
         QuickKey("Tab", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "    ")) }
-        
+
         when (language) {
             WebEditorLanguage.Html -> {
                 QuickKey("<>", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "<", ">")) }
@@ -2361,13 +2492,13 @@ private fun EditorQuickKeys(
         if (language != WebEditorLanguage.Html) {
             QuickKey("{}", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "{", "}")) }
         }
-        
+
         QuickKey("\"\"", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "\"", "\"")) }
         QuickKey("''", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "'", "'")) }
         QuickKey("=", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "=")) }
         QuickKey(".", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ".")) }
         QuickKey("/", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "/")) }
-        
+
         if (language == WebEditorLanguage.JavaScript) {
             QuickKey("!", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "!")) }
             QuickKey("&", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "&")) }
@@ -3000,23 +3131,201 @@ private fun AiMessageBubble(
             fontSize = 11.sp,
             modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
         )
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(if (isUser) 0.90f else 1f)
-                .clip(RoundedCornerShape(8.dp))
-                .background(if (isUser) palette.selectedTab else palette.elevatedPanel)
-                .border(1.dp, palette.border, RoundedCornerShape(8.dp))
-                .padding(10.dp),
-        ) {
-            SelectionContainer {
+        if (isUser) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(0.90f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.selectedTab)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(10.dp),
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = message.text,
+                        color = palette.text,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                    )
+                }
+            }
+        } else {
+            AiAssistantResponse(
+                text = message.text,
+                palette = palette,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiAssistantResponse(
+    text: String,
+    palette: WebPalette,
+) {
+    val displayText = remember(text) { aiVisibleResponseText(text) }
+    val action = remember(text) { suggestedActionFromAiText(text) }
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        if (displayText.isNotBlank()) {
+            AiResponseSection(
+                title = "Response",
+                text = displayText,
+                palette = palette,
+            )
+        }
+        action?.let {
+            AiActionSummarySection(
+                action = it,
+                palette = palette,
+            )
+        }
+        if (displayText.isBlank() && action == null) {
+            AiResponseSection(
+                title = "Response",
+                text = text,
+                palette = palette,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiResponseSection(
+    title: String,
+    text: String,
+    palette: WebPalette,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.elevatedPanel)
+            .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+            .padding(10.dp),
+    ) {
+        Text(
+            text = title,
+            color = palette.subtleText,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(Modifier.height(5.dp))
+        SelectionContainer {
+            Text(
+                text = text,
+                color = palette.text,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AiActionSummarySection(
+    action: AiSuggestedAction,
+    palette: WebPalette,
+) {
+    val title = when (action) {
+        is AiSuggestedAction.RunTerminalCommand -> "Suggested Command"
+        is AiSuggestedAction.ReplaceActiveFile -> "Prepared Edit"
+        is AiSuggestedAction.ApplyProjectFileChanges -> "Proposed File Changes"
+    }
+    val subtitle = when (action) {
+        is AiSuggestedAction.RunTerminalCommand -> "Ready to run in the project terminal."
+        is AiSuggestedAction.ReplaceActiveFile -> "${action.code.lines().size} lines for the active file."
+        is AiSuggestedAction.ApplyProjectFileChanges -> {
+            val writes = action.changes.count { it.operation == AiProjectFileOperation.Write }
+            val deletes = action.changes.count { it.operation == AiProjectFileOperation.Delete }
+            listOfNotNull(
+                writes.takeIf { it > 0 }?.let { "$it write${if (it == 1) "" else "s"}" },
+                deletes.takeIf { it > 0 }?.let { "$it delete${if (it == 1) "" else "s"}" },
+            ).joinToString(", ").ifBlank { "${action.changes.size} file change${if (action.changes.size == 1) "" else "s"}" }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.panel)
+            .border(1.dp, palette.strongBorder, RoundedCornerShape(8.dp))
+            .padding(10.dp),
+    ) {
+        Text(title, color = palette.text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(3.dp))
+        Text(subtitle, color = palette.mutedText, fontSize = 12.sp)
+        Spacer(Modifier.height(8.dp))
+        when (action) {
+            is AiSuggestedAction.RunTerminalCommand -> {
                 Text(
-                    text = message.text,
+                    text = action.command,
                     color = palette.text,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
                 )
             }
+            is AiSuggestedAction.ReplaceActiveFile -> {
+                Text(
+                    text = action.code.lineSequence().take(8).joinToString("\n"),
+                    color = palette.mutedText,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    lineHeight = 17.sp,
+                    maxLines = 8,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            is AiSuggestedAction.ApplyProjectFileChanges -> {
+                action.changes.take(8).forEach { change ->
+                    AiActionFileRow(change = change, palette = palette)
+                }
+                val remaining = action.changes.size - 8
+                if (remaining > 0) {
+                    Spacer(Modifier.height(5.dp))
+                    Text("+$remaining more", color = palette.subtleText, fontSize = 11.sp)
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun AiActionFileRow(
+    change: AiProjectFileChange,
+    palette: WebPalette,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 24.dp),
+    ) {
+        val operation = when (change.operation) {
+            AiProjectFileOperation.Write -> "write"
+            AiProjectFileOperation.Delete -> "delete"
+        }
+        Text(
+            text = operation,
+            color = if (change.operation == AiProjectFileOperation.Delete) palette.error else palette.success,
+            fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace,
+            modifier = Modifier.width(48.dp),
+        )
+        Text(
+            text = change.path,
+            color = palette.text,
+            fontSize = 12.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -3251,10 +3560,25 @@ private fun WebPreviewFullScreen(
     files: List<WebFile>,
     activeFile: WebFile,
     palette: WebPalette,
-    onBack: () -> Unit
+    onRuntimeMessage: (String) -> Unit,
+    onBack: () -> Unit,
 ) {
-    val previewHtml = remember(rootDirectory.absolutePath, activeFile.filePath, activeFile.content) {
-        buildPreviewHtml(rootDirectory, files, activeFile)
+    val latestRuntimeMessage = rememberUpdatedState(onRuntimeMessage)
+    val previewFilesKey = files.joinToString("|") { file -> "${file.filePath}:${file.modifiedAt}:${file.content.hashCode()}" }
+    var previewEntryFile by remember(rootDirectory.absolutePath) { mutableStateOf<File?>(null) }
+    var previewError by remember(rootDirectory.absolutePath) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(rootDirectory.absolutePath, previewFilesKey, activeFile.filePath, activeFile.content) {
+        val result = withContext(Dispatchers.IO) {
+            runCatching { prepareLivePreviewEntry(rootDirectory, files, activeFile) }
+        }
+        result.onSuccess { entryFile ->
+            previewEntryFile = entryFile
+            previewError = null
+        }.onFailure { error ->
+            previewEntryFile = null
+            previewError = error.message ?: "Could not prepare the live preview."
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize().background(Color.White)) {
@@ -3266,23 +3590,585 @@ private fun WebPreviewFullScreen(
             Text("Responsive Preview", color = palette.text, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             Text(activeFile.name, color = palette.subtleText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        previewError?.let { message ->
+            Text(
+                text = message,
+                color = palette.error,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.elevatedPanel)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            )
+        }
         AndroidView(
             factory = {
                 WebView(it).apply {
-                    webViewClient = WebViewClient()
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    settings.allowFileAccess = true
-                    settings.allowContentAccess = true
-                    settings.useWideViewPort = true
-                    settings.loadWithOverviewMode = true
+                    configureLivePreviewWebView(
+                        webView = this,
+                        onRuntimeMessage = { message -> latestRuntimeMessage.value(message) },
+                    )
                 }
             },
             update = { webView ->
-                webView.loadDataWithBaseURL("file://${rootDirectory.absolutePath}/", previewHtml, "text/html", "UTF-8", null)
+                val entryFile = previewEntryFile
+                if (entryFile == null) {
+                    if (webView.tag != "preparing") {
+                        webView.tag = "preparing"
+                        webView.loadDataWithBaseURL(
+                            null,
+                            livePreviewStatusHtml("Preparing preview..."),
+                            "text/html",
+                            "UTF-8",
+                            null,
+                        )
+                    }
+                    return@AndroidView
+                }
+                val previewUrl = Uri.fromFile(entryFile).toString()
+                if (webView.tag != previewUrl) {
+                    webView.tag = previewUrl
+                    loadLivePreviewUrl(webView, previewUrl)
+                }
             },
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
         )
+    }
+}
+
+@Suppress("DEPRECATION")
+private fun configureLivePreviewWebView(
+    webView: WebView,
+    onRuntimeMessage: (String) -> Unit,
+) {
+    webView.isFocusable = false
+    webView.isFocusableInTouchMode = false
+    webView.isLongClickable = false
+    webView.setBackgroundColor(android.graphics.Color.WHITE)
+    webView.webChromeClient = object : WebChromeClient() {
+        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
+            consoleMessage ?: return false
+            onRuntimeMessage(
+                formatPreviewRuntimeMessage(
+                    level = consoleMessage.messageLevel().name.lowercase(),
+                    message = consoleMessage.message().orEmpty(),
+                    source = consoleMessage.sourceId().orEmpty(),
+                    line = consoleMessage.lineNumber(),
+                    column = 0,
+                )
+            )
+            return true
+        }
+    }
+    webView.webViewClient = object : WebViewClient() {
+        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+            return false
+        }
+
+        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
+            val url = request?.url?.toString().orEmpty()
+            val description = error?.description?.toString().orEmpty()
+            if (url.isNotBlank() || description.isNotBlank()) {
+                onRuntimeMessage(
+                    formatPreviewRuntimeMessage(
+                        level = "error",
+                        message = listOf("Resource load failed", description)
+                            .filter { it.isNotBlank() }
+                            .joinToString(": "),
+                        source = url,
+                        line = 0,
+                        column = 0,
+                    )
+                )
+            }
+        }
+
+        override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
+            val url = request?.url?.toString().orEmpty()
+            if (url.endsWith("/favicon.ico")) return
+            onRuntimeMessage(
+                formatPreviewRuntimeMessage(
+                    level = "error",
+                    message = "HTTP ${errorResponse?.statusCode ?: 0} ${errorResponse?.reasonPhrase.orEmpty()}",
+                    source = url,
+                    line = 0,
+                    column = 0,
+                )
+            )
+        }
+
+        override fun onPageFinished(view: WebView?, url: String?) {
+            view?.let(::injectLivePreviewFitController)
+        }
+    }
+    webView.settings.apply {
+        javaScriptEnabled = true
+        domStorageEnabled = true
+        allowFileAccess = true
+        allowContentAccess = true
+        allowFileAccessFromFileURLs = true
+        allowUniversalAccessFromFileURLs = true
+        javaScriptCanOpenWindowsAutomatically = false
+        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        mediaPlaybackRequiresUserGesture = false
+        loadsImagesAutomatically = true
+        blockNetworkLoads = false
+        setSupportMultipleWindows(false)
+        setSupportZoom(true)
+        builtInZoomControls = true
+        displayZoomControls = false
+        textZoom = 100
+        cacheMode = WebSettings.LOAD_NO_CACHE
+        defaultTextEncodingName = "utf-8"
+        useWideViewPort = true
+        loadWithOverviewMode = false
+    }
+}
+
+private fun prepareLivePreviewEntry(
+    rootDirectory: File,
+    files: List<WebFile>,
+    activeFile: WebFile,
+): File {
+    val root = rootDirectory.canonicalFile
+    // 1. Save all project files to disk so assets like images are available
+    files.forEach { file ->
+        val target = File(file.filePath).canonicalFile
+        if (isSameOrInside(root, target)) {
+            target.parentFile?.mkdirs()
+            saveFileContent(target.absolutePath, file.content)
+        }
+    }
+
+    // 2. Identify the base HTML
+    val activeExtension = fileExtension(activeFile.name)
+    val baseHtml = when {
+        activeExtension in htmlFileExtensions -> activeFile.content
+        activeExtension in cssFileExtensions -> {
+            val indexFile = nearestIndexWebFile(root, files, File(activeFile.filePath))
+            indexFile?.content ?: generatedShellHtml(activeFile)
+        }
+        activeExtension in javascriptFileExtensions -> {
+            val indexFile = nearestIndexWebFile(root, files, File(activeFile.filePath))
+            indexFile?.content ?: generatedShellHtml(activeFile)
+        }
+        else -> generatedShellHtml(activeFile)
+    }
+
+    // 3. Adopt GameCoded "Inlining" logic - Bundle all project CSS and JS into this one HTML string
+    val bundledHtml = bundleProjectAssets(baseHtml, files, activeFile)
+
+    // 4. Inject responsive baseline (from IdeActivity.kt)
+    val finalHtml = injectResponsiveBaseline(bundledHtml)
+
+    // 5. Write the final bundled HTML to a temp preview file and return it
+    val previewDir = File(root, ".pocketcodedweb/preview").apply { mkdirs() }
+    val entryFile = File(previewDir, "index.html")
+    entryFile.writeText(finalHtml)
+    return entryFile
+}
+
+private fun bundleProjectAssets(html: String, files: List<WebFile>, activeFile: WebFile): String {
+    val cssBlock = files
+        .filter { fileExtension(it.name) in cssFileExtensions }
+        .joinToString("\n\n") { "/* ${it.name} */\n${it.content}" }
+        .trim()
+
+    val jsBlock = files
+        .filter { fileExtension(it.name) in javascriptFileExtensions }
+        .joinToString("\n\n") { "// ${it.name}\n${it.content}" }
+        .replace("</script", "<\\/script", ignoreCase = true)
+        .trim()
+
+    var result = html
+    if (cssBlock.isNotBlank()) {
+        result = injectIntoHeadEnd(result, "\n<style id=\"pcw-bundled-css\">\n$cssBlock\n</style>\n")
+    }
+    if (jsBlock.isNotBlank()) {
+        result = injectIntoBodyEnd(result, "\n<script id=\"pcw-bundled-js\">\n$jsBlock\n</script>\n")
+    }
+    return result
+}
+
+private fun injectIntoHeadStart(html: String, content: String): String {
+    val headOpen = Regex("""(?is)<head\b[^>]*>""").find(html)
+    return if (headOpen != null) {
+        html.replaceRange(headOpen.range.last + 1, headOpen.range.last + 1, content)
+    } else if (html.contains("<html", ignoreCase = true)) {
+        html.replace(Regex("<html([^>]*)>", RegexOption.IGNORE_CASE), "<html$1><head>$content</head>")
+    } else {
+        "<!DOCTYPE html><html><head>$content</head><body>$html</body></html>"
+    }
+}
+
+private fun injectLivePreviewFitController(webView: WebView) {
+    webView.evaluateJavascript(livePreviewFitControllerScript(), null)
+}
+
+private fun livePreviewFitControllerScript(): String {
+    return """
+        (function () {
+            if (window.__pcwLivePreviewFitInstalled) {
+                if (typeof window.__pcwLivePreviewApplyFit === "function") {
+                    window.__pcwLivePreviewApplyFit();
+                }
+                return;
+            }
+            window.__pcwLivePreviewFitInstalled = true;
+
+            var previousTarget = null;
+            var scheduledFrame = 0;
+
+            function addViewportMeta() {
+                if (document.querySelector("meta[name='viewport']")) return;
+                var meta = document.createElement("meta");
+                meta.name = "viewport";
+                meta.content = "width=device-width, initial-scale=1.0, viewport-fit=cover";
+                (document.head || document.documentElement).appendChild(meta);
+            }
+
+            function addPreviewStyle() {
+                if (document.getElementById("pcw-live-preview-fit-style")) return;
+                var style = document.createElement("style");
+                style.id = "pcw-live-preview-fit-style";
+                style.textContent = [
+                    "html{min-width:0;-webkit-text-size-adjust:100%;}",
+                    "body{min-width:0;}",
+                    "img,video,canvas,svg,iframe{max-width:100%;}",
+                    "[data-pcw-preview-fit-target='true']{will-change:transform;}"
+                ].join("\n");
+                (document.head || document.documentElement).appendChild(style);
+            }
+
+            function visibleElement(element) {
+                if (!element || element.nodeType !== 1) return false;
+                if (element === document.body || element === document.documentElement) return false;
+                if (/^(SCRIPT|STYLE|META|LINK|TITLE|TEMPLATE)$/i.test(element.tagName)) return false;
+                var style = window.getComputedStyle(element);
+                if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+                var rect = element.getBoundingClientRect();
+                return rect.width > 2 && rect.height > 2;
+            }
+
+            function descriptor(element) {
+                return ((element.id || "") + " " + (element.className || "") + " " + element.tagName).toLowerCase();
+            }
+
+            function hasGameWords(element) {
+                var text = descriptor(element);
+                return text.indexOf("game") >= 0 ||
+                    text.indexOf("canvas") >= 0 ||
+                    text.indexOf("stage") >= 0 ||
+                    text.indexOf("screen") >= 0 ||
+                    text.indexOf("app") >= 0 ||
+                    text.indexOf("root") >= 0;
+            }
+
+            function candidateScore(element) {
+                if (!element) return 0;
+                var text = descriptor(element);
+                var score = 0;
+                if (element.hasAttribute("data-preview-fit") || element.hasAttribute("data-pcw-fit")) score += 100;
+                if (text.indexOf("game") >= 0) score += 12;
+                if (text.indexOf("canvas") >= 0) score += 10;
+                if (text.indexOf("stage") >= 0) score += 8;
+                if (text.indexOf("screen") >= 0) score += 6;
+                if (text.indexOf("app") >= 0 || text.indexOf("root") >= 0) score += 4;
+                if (element.querySelector && element.querySelector("canvas, svg, iframe")) score += 14;
+                if (/^(CANVAS|SVG|IFRAME)$/i.test(element.tagName)) score += 18;
+                var rect = element.getBoundingClientRect();
+                score += Math.min(10, Math.round((rect.width * rect.height) / 60000));
+                return score;
+            }
+
+            function bestVisibleCandidate(selector) {
+                return Array.prototype.slice.call(document.querySelectorAll(selector))
+                    .filter(visibleElement)
+                    .sort(function (left, right) {
+                        return candidateScore(right) - candidateScore(left);
+                    })[0] || null;
+            }
+
+            function visibleBodyChildren() {
+                return Array.prototype.slice.call((document.body && document.body.children) || [])
+                    .filter(visibleElement);
+            }
+
+            function findFitTarget() {
+                var body = document.body;
+                if (!body || body.dataset.pcwNoFit === "true" || document.documentElement.dataset.pcwNoFit === "true") return null;
+
+                var explicit = bestVisibleCandidate("[data-preview-fit], [data-pcw-fit]");
+                if (explicit && explicit !== body && explicit !== document.documentElement) return explicit;
+
+                var canvas = bestVisibleCandidate("canvas, svg, iframe");
+                if (canvas) {
+                    var parent = canvas.parentElement;
+                    if (parent && parent !== body && parent !== document.documentElement && visibleElement(parent)) {
+                        if (hasGameWords(parent) || parent.children.length <= 8) return parent;
+                    }
+                    return canvas;
+                }
+
+                var selector = [
+                    "#game",
+                    "#game-container",
+                    "#gameContainer",
+                    "#gameCanvas",
+                    "#canvas",
+                    "#app",
+                    "#root",
+                    ".game",
+                    ".game-container",
+                    ".gameContainer",
+                    ".canvas-container",
+                    ".stage",
+                    ".screen",
+                    ".app",
+                    ".root"
+                ].join(",");
+                var named = bestVisibleCandidate(selector);
+                if (named && named !== body && named !== document.documentElement && candidateScore(named) >= 8) return named;
+
+                var children = visibleBodyChildren();
+                if (children.length === 1 && candidateScore(children[0]) >= 4) return children[0];
+                return null;
+            }
+
+            function rememberStyle(element) {
+                if (!element || element.dataset.pcwPreviewOriginalStyleSet === "true") return;
+                element.dataset.pcwPreviewOriginalStyle = element.getAttribute("style") || "";
+                element.dataset.pcwPreviewOriginalStyleSet = "true";
+            }
+
+            function restoreStyle(element) {
+                if (!element || element.dataset.pcwPreviewOriginalStyleSet !== "true") return;
+                var original = element.dataset.pcwPreviewOriginalStyle || "";
+                if (original) {
+                    element.setAttribute("style", original);
+                } else {
+                    element.removeAttribute("style");
+                }
+                delete element.dataset.pcwPreviewOriginalStyle;
+                delete element.dataset.pcwPreviewOriginalStyleSet;
+                delete element.dataset.pcwPreviewFitTarget;
+            }
+
+            function viewportSize() {
+                var visual = window.visualViewport;
+                return {
+                    width: Math.max(1, Math.floor((visual && visual.width) || window.innerWidth || document.documentElement.clientWidth || 1)),
+                    height: Math.max(1, Math.floor((visual && visual.height) || window.innerHeight || document.documentElement.clientHeight || 1))
+                };
+            }
+
+            function naturalSize(target) {
+                restoreStyle(target);
+                var rect = target.getBoundingClientRect();
+                return {
+                    width: Math.max(rect.width, target.scrollWidth || 0, target.offsetWidth || 0),
+                    height: Math.max(rect.height, target.scrollHeight || 0, target.offsetHeight || 0)
+                };
+            }
+
+            function shouldFit(target) {
+                if (!target || target === document.body || target === document.documentElement) return false;
+                if (target.hasAttribute("data-preview-fit") || target.hasAttribute("data-pcw-fit")) return true;
+                if (/^(CANVAS|SVG|IFRAME)$/i.test(target.tagName)) return true;
+                if (target.querySelector && target.querySelector("canvas, svg, iframe")) return true;
+                if (hasGameWords(target)) return true;
+                return visibleBodyChildren().length === 1 && candidateScore(target) >= 4;
+            }
+
+            function applyFit() {
+                addViewportMeta();
+                addPreviewStyle();
+
+                var target = findFitTarget();
+                if (!shouldFit(target)) {
+                    if (previousTarget) restoreStyle(previousTarget);
+                    previousTarget = null;
+                    return;
+                }
+
+                if (previousTarget && previousTarget !== target) restoreStyle(previousTarget);
+                previousTarget = target;
+
+                var size = naturalSize(target);
+                if (size.width <= 2 || size.height <= 2) return;
+
+                var viewport = viewportSize();
+                var padding = viewport.width >= 900 ? 24 : (viewport.width >= 600 ? 16 : 8);
+                var availableWidth = Math.max(1, viewport.width - padding * 2);
+                var availableHeight = Math.max(1, viewport.height - padding * 2);
+                var maxScale = viewport.width >= 900 ? 1.75 : (viewport.width >= 600 ? 1.45 : 1.15);
+                var scale = Math.min(maxScale, availableWidth / size.width, availableHeight / size.height);
+                if (!isFinite(scale) || scale <= 0) scale = 1;
+                scale = Math.max(0.1, scale);
+
+                rememberStyle(target);
+                target.dataset.pcwPreviewFitTarget = "true";
+                target.style.position = "fixed";
+                target.style.left = Math.max(padding, Math.round((viewport.width - size.width * scale) / 2)) + "px";
+                target.style.top = Math.max(padding, Math.round((viewport.height - size.height * scale) / 2)) + "px";
+                target.style.width = size.width + "px";
+                target.style.height = size.height + "px";
+                target.style.maxWidth = "none";
+                target.style.maxHeight = "none";
+                target.style.margin = "0";
+                target.style.transformOrigin = "top left";
+                target.style.transform = "scale(" + scale + ")";
+                target.style.zIndex = "2147483000";
+            }
+
+            function scheduleFit() {
+                if (scheduledFrame) cancelAnimationFrame(scheduledFrame);
+                scheduledFrame = requestAnimationFrame(function () {
+                    scheduledFrame = requestAnimationFrame(applyFit);
+                });
+            }
+
+            window.__pcwLivePreviewApplyFit = scheduleFit;
+            scheduleFit();
+            setTimeout(scheduleFit, 120);
+            setTimeout(scheduleFit, 450);
+            setTimeout(scheduleFit, 1200);
+            window.addEventListener("load", scheduleFit);
+            window.addEventListener("resize", scheduleFit);
+            window.addEventListener("orientationchange", scheduleFit);
+            if (window.visualViewport) {
+                window.visualViewport.addEventListener("resize", scheduleFit);
+                window.visualViewport.addEventListener("scroll", scheduleFit);
+            }
+            try {
+                new MutationObserver(function () {
+                    scheduleFit();
+                }).observe(document.documentElement, { childList: true, subtree: true });
+            } catch (error) {}
+        })();
+    """.trimIndent()
+}
+
+private fun injectResponsiveBaseline(html: String): String {
+    val baseline = """
+        <style id="pcw-responsive-baseline">
+            html, body {
+                width: 100%;
+                min-height: 100%;
+            }
+            body {
+                margin: 0 !important;
+                padding: clamp(12px, 2.5vw, 24px) !important;
+                font-size: clamp(15px, 1.9vw, 18px);
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                background: #ffffff;
+                color: #111827;
+            }
+            img, video, iframe, canvas, svg {
+                max-width: 100% !important;
+                height: auto !important;
+            }
+            main, section, article, header, footer, nav, form, table, figure, blockquote, .preview-card {
+                max-width: 100% !important;
+                width: 100%;
+                margin-left: auto;
+                margin-right: auto;
+            }
+            pre, code {
+                white-space: pre-wrap;
+                word-break: break-word;
+            }
+        </style>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    """.trimIndent()
+
+    return injectIntoHeadStart(html, baseline)
+}
+
+private fun generatedShellHtml(activeFile: WebFile): String {
+    return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>${escapeHtml(activeFile.name)} Preview</title>
+        </head>
+        <body>
+            <main>
+                <h1>${escapeHtml(activeFile.name)}</h1>
+                <p>This is a generated shell for previewing your project assets.</p>
+                <div id="app"></div>
+            </main>
+        </body>
+        </html>
+    """.trimIndent()
+}
+
+private fun injectIntoHeadEnd(html: String, content: String): String {
+    val headEnd = Regex("""(?is)</head\b[^>]*>""").find(html)
+    return if (headEnd != null) {
+        html.replaceRange(headEnd.range.first, headEnd.range.first, content)
+    } else {
+        html + content
+    }
+}
+
+private fun injectIntoBodyEnd(html: String, content: String): String {
+    val bodyEnd = Regex("""(?is)</body\b[^>]*>""").find(html)
+    return if (bodyEnd != null) {
+        html.replaceRange(bodyEnd.range.first, bodyEnd.range.first, content)
+    } else {
+        html + content
+    }
+}
+
+private fun livePreviewScriptTagFor(file: WebFile, safeUrl: String): String {
+    return if (fileExtension(file.name) == "mjs") {
+        """<script type="module" src="$safeUrl"></script>"""
+    } else {
+        """<script src="$safeUrl"></script>"""
+    }
+}
+
+private fun livePreviewStatusHtml(message: String): String {
+    val safeMessage = escapeHtml(message)
+    return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Preview</title>
+            <style>
+                html, body {
+                    height: 100%;
+                    margin: 0;
+                    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                    background: #ffffff;
+                    color: #111827;
+                }
+                body {
+                    display: grid;
+                    place-items: center;
+                    padding: 24px;
+                    box-sizing: border-box;
+                }
+            </style>
+        </head>
+        <body>$safeMessage</body>
+        </html>
+    """.trimIndent()
+}
+
+private fun loadLivePreviewUrl(webView: WebView, previewUrl: String) {
+    webView.stopLoading()
+    webView.clearHistory()
+    webView.clearCache(true)
+    webView.loadUrl("about:blank")
+    webView.post {
+        webView.loadUrl(previewUrl)
     }
 }
 
@@ -3718,26 +4604,26 @@ private fun highlightHtml(source: String, palette: WebPalette): AnnotatedString 
     append(source)
     if (source.isEmpty()) return@buildAnnotatedString
     val dark = palette.text == Color.White
-    
+
     // Comments
     applyRegexColor(this, source, HTML_COMMENT_REGEX, palette.subtleText, italic = true)
-    
+
     // Doctype
     applyRegexColor(this, source, HTML_DOCTYPE_REGEX, if (dark) Color(0xFFFF7AB6) else Color(0xFFB4236E), bold = true)
-    
+
     // Tag Brackets
     applyRegexColor(this, source, HTML_TAG_BRACKETS_REGEX, palette.text.copy(alpha = 0.7f))
-    
+
     // Tag Names
     applyRegexGroupColor(this, source, HTML_TAG_NAME_REGEX, 1, if (dark) Color(0xFF569CD6) else Color(0xFF264F78), bold = true)
-    
+
     // Attribute Names
     applyRegexGroupColor(this, source, HTML_ATTR_NAME_CORE_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080), bold = true)
     applyRegexGroupColor(this, source, HTML_ATTR_NAME_GENERIC_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
-    
+
     // Attribute Values (Strings)
     applyRegexColor(this, source, HTML_ATTR_VALUE_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
-    
+
     // Entities
     applyRegexColor(this, source, HTML_ENTITY_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
 }
@@ -3746,29 +4632,29 @@ private fun highlightCss(source: String, palette: WebPalette): AnnotatedString =
     append(source)
     if (source.isEmpty()) return@buildAnnotatedString
     val dark = palette.text == Color.White
-    
+
     // Comments
     applyRegexColor(this, source, CSS_COMMENT_REGEX, palette.subtleText, italic = true)
-    
+
     // At-rules
     applyRegexColor(this, source, CSS_AT_RULE_REGEX, if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0))
-    
+
     // Selectors
     applyRegexColor(this, source, CSS_SELECTOR_ID_CLASS_REGEX, if (dark) Color(0xFFD7BA7D) else Color(0xFF795E26))
     applyRegexGroupColor(this, source, CSS_SELECTOR_BLOCK_REGEX, 1, if (dark) Color(0xFFD7BA7D) else Color(0xFF795E26))
-    
+
     // Properties
     applyRegexGroupColor(this, source, CSS_PROPERTY_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
-    
+
     // Values - Hex Colors
     applyRegexColor(this, source, CSS_COLOR_HEX_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
-    
+
     // Values - Numbers and Units
     applyRegexColor(this, source, CSS_NUMBER_UNIT_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
-    
+
     // Values - Strings
     applyRegexColor(this, source, CSS_STRING_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
-    
+
     // Values - Keywords
     applyRegexColor(this, source, CSS_KEYWORD_REGEX, if (dark) Color(0xFF569CD6) else Color(0xFF0451A5))
 }
@@ -3777,30 +4663,30 @@ private fun highlightJs(source: String, palette: WebPalette): AnnotatedString = 
     append(source)
     if (source.isEmpty()) return@buildAnnotatedString
     val dark = palette.text == Color.White
-    
+
     // Comments
     applyRegexColor(this, source, JS_COMMENT_REGEX, palette.subtleText, italic = true)
-    
+
     // Strings
     applyRegexColor(this, source, JS_STRING_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
-    
+
     // Keywords
     val jsKeywordsPattern = "\\b(${javascriptKeywords.joinToString("|")})\\b"
     applyRegexColor(this, source, Regex(jsKeywordsPattern), if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0), bold = true)
-    
+
     // Booleans/Null
     applyRegexColor(this, source, JS_BOOLEAN_NULL_REGEX, if (dark) Color(0xFF569CD6) else Color(0xFF0451A5), bold = true)
-    
+
     // Builtins/Globals
     val jsBuiltinsPattern = "\\b(${javascriptBuiltins.joinToString("|")})\\b"
     applyRegexColor(this, source, Regex(jsBuiltinsPattern), if (dark) Color(0xFF4EC9B0) else Color(0xFF267F99))
-    
+
     // Numbers
     applyRegexColor(this, source, JS_NUMBER_REGEX, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
-    
+
     // Member access (Properties)
     applyRegexGroupColor(this, source, JS_MEMBER_ACCESS_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
-    
+
     // Function calls & Methods
     JS_FUNC_CALL_REGEX.findAll(source).forEach { match ->
         val group = match.groups[1] ?: match.groups[2] ?: return@forEach
@@ -3816,13 +4702,13 @@ private fun highlightJson(source: String, palette: WebPalette): AnnotatedString 
     append(source)
     if (source.isEmpty()) return@buildAnnotatedString
     val dark = palette.text == Color.White
-    
+
     // Keys
     applyRegexGroupColor(this, source, JSON_KEY_REGEX, 0, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
-    
+
     // Values - Strings
     applyRegexGroupColor(this, source, JSON_STRING_VALUE_REGEX, 1, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
-    
+
     // Values - Numbers/Booleans/Null
     applyRegexGroupColor(this, source, JSON_LITERAL_VALUE_REGEX, 1, if (dark) Color(0xFFB5CEA8) else Color(0xFF098658))
 }
@@ -3902,7 +4788,7 @@ private fun isInsideCssRuleBlock(beforeCursor: String): Boolean {
 private fun isCssDeclarationValueCompletion(beforeCursor: String): Boolean {
     if (!isInsideCssRuleBlock(beforeCursor)) return false
     return cssLineBeforeCursor(beforeCursor).contains(":") &&
-        cssLineBeforeCursor(beforeCursor).substringAfterLast(':').none { it == ';' || it == '{' || it == '}' }
+            cssLineBeforeCursor(beforeCursor).substringAfterLast(':').none { it == ';' || it == '{' || it == '}' }
 }
 
 internal fun completionContextAt(text: String, rawCursor: Int, fileName: String): CompletionContext? {
@@ -3998,7 +4884,7 @@ internal fun webCompletionsForContext(
         context.trigger == "tag" && language == WebEditorLanguage.Html -> htmlCompletionItems
         language == WebEditorLanguage.Html -> userDefinedHtmlCompletions(source) + htmlCompletionItems
         language == WebEditorLanguage.Css -> cssContextualCompletions(source, context.replaceStart)
-        language == WebEditorLanguage.JavaScript -> userDefinedJsCompletions(source) + jsCompletionItems
+        language == WebEditorLanguage.JavaScript -> userDefinedJsCompletions(source) + jsCompletionItems + jsLibraryCompletionItems
         language == WebEditorLanguage.Json -> jsonCompletionItems
         else -> emptyList()
     }
@@ -4018,7 +4904,7 @@ private fun completionMatchesPrefix(item: CompletionItem, prefix: String): Boole
         .map { it.lowercase() }
         .any { value ->
             value.startsWith(prefix) ||
-                value.trimCompletionPrefixSymbols().startsWith(normalizedPrefix)
+                    value.trimCompletionPrefixSymbols().startsWith(normalizedPrefix)
         }
 }
 
@@ -4102,6 +4988,11 @@ private val htmlCompletionItems = listOf(
     CompletionItem("meta:viewport", "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">", "metadata"),
     CompletionItem("script:src", "<script src=\"script.js\"></script>", "script"),
     CompletionItem("script:module", "<script type=\"module\" src=\"script.js\"></script>", "script"),
+    CompletionItem("script:importmap", "<script type=\"importmap\">\n{\n    \"imports\": {\n        \"three\": \"./libs/three.module.js\"\n    }\n}\n</script>", "libraries", 70),
+    CompletionItem("lib:tailwind", "<link rel=\"stylesheet\" href=\"vendor/tailwind.css\">", "libraries"),
+    CompletionItem("lib:bootstrap", "<link href=\"vendor/bootstrap.min.css\" rel=\"stylesheet\">\n<script src=\"vendor/bootstrap.bundle.min.js\"></script>", "libraries"),
+    CompletionItem("lib:react-root", "<div id=\"root\"></div>\n<script type=\"module\">\n    import React from \"react\";\n    import { createRoot } from \"react-dom/client\";\n</script>", "libraries", 108),
+    CompletionItem("lib:vue-app", "<div id=\"app\">{{ message }}</div>\n<script type=\"module\">\n    import { createApp } from \"vue\";\n</script>", "libraries", 92),
 )
 
 private val htmlGlobalAttributeCompletions = listOf(
@@ -4122,14 +5013,14 @@ private val htmlGlobalAttributeCompletions = listOf(
 
 private val htmlTagAttributeCompletions = mapOf(
     "a" to listOf(
-    CompletionItem("href", "href=\"\"", "attribute", 6),
+        CompletionItem("href", "href=\"\"", "attribute", 6),
         CompletionItem("target", "target=\"_blank\"", "attribute"),
         CompletionItem("rel", "rel=\"noopener\"", "attribute"),
         CompletionItem("download", "download", "attribute"),
     ),
     "img" to listOf(
-    CompletionItem("src", "src=\"\"", "attribute", 5),
-    CompletionItem("alt", "alt=\"\"", "attribute", 5),
+        CompletionItem("src", "src=\"\"", "attribute", 5),
+        CompletionItem("alt", "alt=\"\"", "attribute", 5),
         CompletionItem("loading", "loading=\"lazy\"", "attribute"),
         CompletionItem("decoding", "decoding=\"async\"", "attribute"),
         CompletionItem("width", "width=\"\"", "attribute", 7),
@@ -4158,15 +5049,15 @@ private val htmlTagAttributeCompletions = mapOf(
         CompletionItem("charset", "charset=\"UTF-8\"", "attribute"),
     ),
     "button" to listOf(
-    CompletionItem("type", "type=\"button\"", "attribute"),
+        CompletionItem("type", "type=\"button\"", "attribute"),
         CompletionItem("disabled", "disabled", "attribute"),
         CompletionItem("aria-pressed", "aria-pressed=\"false\"", "attribute", 14),
     ),
     "input" to listOf(
         CompletionItem("type", "type=\"text\"", "attribute"),
-    CompletionItem("name", "name=\"\"", "attribute", 6),
-    CompletionItem("value", "value=\"\"", "attribute", 7),
-    CompletionItem("placeholder", "placeholder=\"\"", "attribute", 13),
+        CompletionItem("name", "name=\"\"", "attribute", 6),
+        CompletionItem("value", "value=\"\"", "attribute", 7),
+        CompletionItem("placeholder", "placeholder=\"\"", "attribute", 13),
         CompletionItem("required", "required", "attribute"),
         CompletionItem("checked", "checked", "attribute"),
         CompletionItem("autocomplete", "autocomplete=\"\"", "attribute", 14),
@@ -4459,6 +5350,38 @@ private val jsCompletionItems = listOf(
     CompletionItem("parseInt", "parseInt(value, 10)", "function", 9),
 )
 
+private val jsLibraryCompletionItems = listOf(
+    CompletionItem("React", "React", "library"),
+    CompletionItem("ReactDOM", "ReactDOM", "library"),
+    CompletionItem("createRoot", "createRoot(document.getElementById('root'))", "react", 11),
+    CompletionItem("Vue", "Vue", "library"),
+    CompletionItem("createApp", "createApp({\n    data: () => ({})\n}).mount('#app')", "vue", 10),
+    CompletionItem("THREE", "THREE", "library"),
+    CompletionItem("gsap", "gsap", "library"),
+    CompletionItem("anime", "anime", "library"),
+    CompletionItem("axios", "axios", "library"),
+    CompletionItem("_", "_", "lodash"),
+    CompletionItem("d3", "d3", "library"),
+    CompletionItem("Chart", "Chart", "library"),
+    CompletionItem("dayjs", "dayjs", "library"),
+    CompletionItem("firebase", "firebase", "library"),
+    CompletionItem("supabase", "supabase", "library"),
+    CompletionItem("p5", "p5", "library"),
+    CompletionItem("Phaser", "Phaser", "library"),
+    CompletionItem("PIXI", "PIXI", "library"),
+    CompletionItem("BABYLON", "BABYLON", "library"),
+    CompletionItem("Howl", "Howl", "library"),
+    CompletionItem("Tone", "Tone", "library"),
+    CompletionItem("$", "$", "jquery"),
+    CompletionItem("jQuery", "jQuery", "jquery"),
+    CompletionItem("bootstrap", "bootstrap", "library"),
+    CompletionItem("import React", "import React from \"react\";\nimport { createRoot } from \"react-dom/client\";", "snippet"),
+    CompletionItem("import Vue", "import { createApp } from \"vue\";", "snippet"),
+    CompletionItem("import THREE", "import * as THREE from \"three\";", "snippet"),
+    CompletionItem("import gsap", "import gsap from \"gsap\";", "snippet"),
+    CompletionItem("import axios", "import axios from \"axios\";", "snippet"),
+)
+
 private val jsDocumentCompletions = listOf(
     CompletionItem("querySelector()", "querySelector('')", "dom", 15),
     CompletionItem("querySelectorAll()", "querySelectorAll('')", "dom", 18),
@@ -4681,6 +5604,93 @@ private val jsElementCompletions = listOf(
     CompletionItem("remove()", "remove()", "dom", 7),
 )
 
+private val jsReactCompletions = listOf(
+    CompletionItem("createElement()", "createElement('div', null)", "react", 14),
+    CompletionItem("useState()", "useState(initialValue)", "react", 9),
+    CompletionItem("useEffect()", "useEffect(() => {\n    \n}, [])", "react", 17),
+    CompletionItem("useMemo()", "useMemo(() => value, [])", "react", 8),
+    CompletionItem("useRef()", "useRef(null)", "react", 7),
+    CompletionItem("Fragment", "Fragment", "react"),
+)
+
+private val jsReactDomCompletions = listOf(
+    CompletionItem("createRoot()", "createRoot(document.getElementById('root'))", "react", 11),
+    CompletionItem("render()", "render()", "react", 7),
+)
+
+private val jsVueCompletions = listOf(
+    CompletionItem("createApp()", "createApp({}).mount('#app')", "vue", 10),
+    CompletionItem("ref()", "ref()", "vue", 4),
+    CompletionItem("reactive()", "reactive({})", "vue", 9),
+    CompletionItem("computed()", "computed(() => value)", "vue", 9),
+    CompletionItem("watch()", "watch(source, callback)", "vue", 6),
+)
+
+private val jsThreeCompletions = listOf(
+    CompletionItem("Scene()", "Scene()", "three", 6),
+    CompletionItem("PerspectiveCamera()", "PerspectiveCamera(75, innerWidth / innerHeight, 0.1, 1000)", "three", 18),
+    CompletionItem("WebGLRenderer()", "WebGLRenderer({ canvas })", "three", 14),
+    CompletionItem("Mesh()", "Mesh(geometry, material)", "three", 5),
+    CompletionItem("BoxGeometry()", "BoxGeometry(1, 1, 1)", "three", 12),
+    CompletionItem("MeshBasicMaterial()", "MeshBasicMaterial({ color: 0xffffff })", "three", 18),
+)
+
+private val jsAnimationCompletions = listOf(
+    CompletionItem("to()", "to(target, { duration: 0.5 })", "animation", 3),
+    CompletionItem("from()", "from(target, { duration: 0.5 })", "animation", 5),
+    CompletionItem("fromTo()", "fromTo(target, fromVars, toVars)", "animation", 7),
+    CompletionItem("timeline()", "timeline()", "animation", 10),
+)
+
+private val jsHttpCompletions = listOf(
+    CompletionItem("get()", "get('')", "http", 5),
+    CompletionItem("post()", "post('', {})", "http", 6),
+    CompletionItem("put()", "put('', {})", "http", 5),
+    CompletionItem("delete()", "delete('')", "http", 8),
+)
+
+private val jsChartCompletions = listOf(
+    CompletionItem("Chart()", "Chart(ctx, { type: 'bar', data: {} })", "chart", 6),
+    CompletionItem("register()", "register()", "chart", 9),
+)
+
+private val jsD3Completions = listOf(
+    CompletionItem("select()", "select('')", "d3", 8),
+    CompletionItem("selectAll()", "selectAll('')", "d3", 11),
+    CompletionItem("scaleLinear()", "scaleLinear()", "d3", 12),
+    CompletionItem("axisBottom()", "axisBottom(scale)", "d3", 11),
+    CompletionItem("json()", "json('')", "d3", 6),
+)
+
+private val jsJqueryCompletions = listOf(
+    CompletionItem("on()", "on('click', () => {})", "jquery", 4),
+    CompletionItem("addClass()", "addClass('')", "jquery", 10),
+    CompletionItem("removeClass()", "removeClass('')", "jquery", 13),
+    CompletionItem("css()", "css('', '')", "jquery", 5),
+    CompletionItem("html()", "html('')", "jquery", 6),
+    CompletionItem("ajax()", "ajax({ url: '' })", "jquery", 6),
+)
+
+private val jsLodashCompletions = listOf(
+    CompletionItem("map()", "map(collection, iteratee)", "lodash", 4),
+    CompletionItem("filter()", "filter(collection, predicate)", "lodash", 7),
+    CompletionItem("debounce()", "debounce(func, 250)", "lodash", 9),
+    CompletionItem("throttle()", "throttle(func, 250)", "lodash", 9),
+    CompletionItem("cloneDeep()", "cloneDeep(value)", "lodash", 10),
+)
+
+private val jsFirebaseCompletions = listOf(
+    CompletionItem("initializeApp()", "initializeApp(firebaseConfig)", "firebase", 14),
+    CompletionItem("getAuth()", "getAuth(app)", "firebase", 8),
+    CompletionItem("getFirestore()", "getFirestore(app)", "firebase", 13),
+)
+
+private val jsSupabaseCompletions = listOf(
+    CompletionItem("createClient()", "createClient(url, anonKey)", "supabase", 13),
+    CompletionItem("from()", "from('table')", "supabase", 5),
+    CompletionItem("auth", "auth", "supabase"),
+)
+
 private val jsonCompletionItems = listOf(
     CompletionItem("\"name\"", "\"name\": \"\"", "field", 9),
     CompletionItem("\"version\"", "\"version\": \"1.0.0\"", "field"),
@@ -4841,6 +5851,18 @@ private fun jsDotCompletionsForType(type: String?): List<CompletionItem> {
         "dataset" -> jsDatasetCompletions
         "element" -> jsElementCompletions
         "style" -> jsStyleCompletions
+        "react" -> jsReactCompletions
+        "reactDom" -> jsReactDomCompletions
+        "vue" -> jsVueCompletions
+        "three" -> jsThreeCompletions
+        "animation" -> jsAnimationCompletions
+        "http" -> jsHttpCompletions
+        "chart" -> jsChartCompletions
+        "d3" -> jsD3Completions
+        "jquery" -> jsJqueryCompletions
+        "lodash" -> jsLodashCompletions
+        "firebase" -> jsFirebaseCompletions
+        "supabase" -> jsSupabaseCompletions
         "classList" -> listOf(
             CompletionItem("add()", "add('')", "dom", 5),
             CompletionItem("remove()", "remove('')", "dom", 8),
@@ -4926,6 +5948,18 @@ private fun inferJsDotTargetType(source: String, dotIndex: Int): String? {
     if (beforeDot.endsWith("Math")) return "math"
     if (beforeDot.endsWith("style")) return "style"
     if (beforeDot.endsWith("dataset")) return "dataset"
+    if (beforeDot.endsWith("React")) return "react"
+    if (beforeDot.endsWith("ReactDOM")) return "reactDom"
+    if (beforeDot.endsWith("Vue")) return "vue"
+    if (beforeDot.endsWith("THREE")) return "three"
+    if (beforeDot.endsWith("gsap") || beforeDot.endsWith("anime")) return "animation"
+    if (beforeDot.endsWith("axios")) return "http"
+    if (beforeDot.endsWith("Chart")) return "chart"
+    if (beforeDot.endsWith("d3")) return "d3"
+    if (beforeDot.endsWith("$") || beforeDot.endsWith("jQuery")) return "jquery"
+    if (beforeDot.endsWith("_")) return "lodash"
+    if (beforeDot.endsWith("firebase")) return "firebase"
+    if (beforeDot.endsWith("supabase")) return "supabase"
     if (beforeDot.endsWith("headers")) return "headers"
     if (beforeDot.endsWith("searchParams")) return "searchParams"
     if (beforeDot.endsWith("target") || beforeDot.endsWith("currentTarget")) return "element"
@@ -5158,7 +6192,7 @@ private fun inspectHtmlSource(source: String): List<CodeDiagnostic> {
     val stack = mutableListOf<Pair<String, Int>>()
     val scanSource = maskEmbeddedHtmlContent(source)
     val ids = mutableSetOf<String>()
-    
+
     Regex("""<!--[\s\S]*?-->|<[^>]+>""").findAll(scanSource).forEach { match ->
         val token = match.value
         if (token.startsWith("<!--")) return@forEach
@@ -5168,7 +6202,7 @@ private fun inspectHtmlSource(source: String): List<CodeDiagnostic> {
             ?.getOrNull(1)
             ?.lowercase()
             ?: return@forEach
-        
+
         // Check for duplicate IDs
         Regex("""\sid\s*=\s*["']([^"']+)["']""").find(token)?.let { idMatch ->
             val id = idMatch.groupValues[1]
@@ -5196,18 +6230,18 @@ private fun inspectHtmlSource(source: String): List<CodeDiagnostic> {
             }
             !selfClosing -> stack += tagName to match.range.first
         }
-        
+
         // Image alt check
         if (tagName == "img" && !token.contains("alt=", ignoreCase = true)) {
             diagnostics += diagnosticAt(source, match.range.first, match.range.last + 1, "warning", "Images should have an 'alt' attribute for accessibility.")
         }
 
         Regex("""\s([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*([^"'\s>][^\s>]*)""")
-            .findAll(token)
+            .findAll(maskHtmlQuotedAttributeValues(token))
             .forEach { attr ->
                 val start = match.range.first + attr.range.first
                 diagnostics += diagnosticAt(source, start, start + attr.value.length, "warning", "Quote attribute values for predictable HTML parsing.")
-        }
+            }
     }
     diagnostics += inspectEmbeddedWebBlocks(source)
     stack.asReversed().forEach { (tag, start) ->
@@ -5249,6 +6283,27 @@ private fun maskEmbeddedHtmlContent(source: String): String {
     return String(chars)
 }
 
+private fun maskHtmlQuotedAttributeValues(token: String): String {
+    if ('"' !in token && '\'' !in token) return token
+    val chars = token.toCharArray()
+    var quote: Char? = null
+    var index = 0
+    while (index < chars.size) {
+        val char = chars[index]
+        if (quote == null) {
+            if ((char == '"' || char == '\'') && index > 0 && token.substring(0, index).trimEnd().endsWith("=")) {
+                quote = char
+            }
+        } else if (char == quote) {
+            quote = null
+        } else if (char != '\n') {
+            chars[index] = ' '
+        }
+        index += 1
+    }
+    return String(chars)
+}
+
 private fun inspectEmbeddedWebBlocks(source: String): List<CodeDiagnostic> {
     return embeddedWebBlocks(source).flatMap { block ->
         val content = source.substring(block.start, block.end)
@@ -5272,20 +6327,28 @@ private fun inspectEmbeddedWebBlocks(source: String): List<CodeDiagnostic> {
 private fun inspectCssSource(source: String): List<CodeDiagnostic> {
     val diagnostics = mutableListOf<CodeDiagnostic>()
     diagnostics += delimiterDiagnostics(source, allowLineComments = false)
-    
-    // Check for duplicate properties in the same block
-    // This is simplified but effective for most common cases
+
     Regex("""([^{}]*)\{([^}]*)\}""").findAll(source).forEach { match ->
-        val blockContent = match.groupValues[2]
+        val blockGroup = match.groups[2] ?: return@forEach
+        val blockContent = blockGroup.value
+        val blockStart = blockGroup.range.first
         val props = mutableSetOf<String>()
-        Regex("""\b([A-Za-z-]+)\s*:""").findAll(blockContent).forEach { propMatch ->
-            val prop = propMatch.groupValues[1].lowercase()
-            if (prop in props) {
-                val start = match.range.first + match.groupValues[1].length + 1 + propMatch.range.first
-                diagnostics += diagnosticAt(source, start, start + prop.length, "warning", "Duplicate property '$prop' in CSS rule.")
-            } else {
-                props += prop
+        var lineOffset = 0
+        blockContent.lines().forEach { line ->
+            val propMatch = Regex("""^\s*(--[A-Za-z0-9_-]+|[A-Za-z-][A-Za-z0-9-]*)\s*:""").find(line)
+            if (propMatch != null) {
+                val prop = propMatch.groupValues[1].lowercase()
+                val propertyStart = blockStart + lineOffset + (propMatch.groups[1]?.range?.first ?: propMatch.range.first)
+                if (prop in props) {
+                    diagnostics += diagnosticAt(source, propertyStart, propertyStart + prop.length, "warning", "Duplicate property '$prop' in CSS rule.")
+                } else {
+                    props += prop
+                }
+                if (!prop.startsWith("--") && prop !in knownCssProperties) {
+                    diagnostics += diagnosticAt(source, propertyStart, propertyStart + prop.length, "warning", "Unknown or unsupported CSS property '$prop'.")
+                }
             }
+            lineOffset += line.length + 1
         }
     }
 
@@ -5293,12 +6356,6 @@ private fun inspectCssSource(source: String): List<CodeDiagnostic> {
         val length = match.value.length
         if (length !in setOf(4, 5, 7, 9)) {
             diagnostics += diagnosticAt(source, match.range.first, match.range.last + 1, "error", "Hex colors must be #RGB, #RGBA, #RRGGBB, or #RRGGBBAA.")
-        }
-    }
-    Regex("""(?m)^\s*([A-Za-z-]+)\s*:""").findAll(source).forEach { match ->
-        val property = match.groupValues[1].lowercase()
-        if (!property.startsWith("--") && property !in knownCssProperties) {
-            diagnostics += diagnosticAt(source, match.range.first, match.range.last + 1, "warning", "Unknown or unsupported CSS property '$property'.")
         }
     }
     source.lines().fold(0) { offset, line ->
@@ -5338,7 +6395,7 @@ private fun inspectJavaScriptSource(source: String): List<CodeDiagnostic> {
                 diagnostics += diagnosticAt(source, match.range.first, match.range.last + 1, "warning", "Did you mean '$correction'?")
             }
     }
-    
+
     // Check for debugger and eval
     Regex("""\bdebugger\b""").findAll(source).forEach { match ->
         diagnostics += diagnosticAt(source, match.range.first, match.range.last + 1, "warning", "Remove 'debugger' statements before production.")
@@ -5357,7 +6414,7 @@ private fun inspectJavaScriptSource(source: String): List<CodeDiagnostic> {
             declared[name] = match.range.first
         }
     }
-    
+
     // Check for duplicate keys in objects
     Regex("""\{\s*([A-Za-z_$][\w$]*)\s*:""").findAll(source).forEach { _ ->
         // This is complex for regex, but we can do a per-line basic check for small objects
@@ -5375,7 +6432,7 @@ private fun inspectJavaScriptSource(source: String): List<CodeDiagnostic> {
         val code = line.substringBefore("//")
         val trimmed = code.trim()
         val lineStart = offset + line.indexOf(code).coerceAtLeast(0)
-        
+
         if (danglingKeyword.containsMatchIn(trimmed)) {
             val before = source.substring(0, offset).trimEnd()
             if (!before.endsWith("}")) {
@@ -5654,19 +6711,27 @@ private val htmlVoidTags = setOf(
 private val knownCssProperties = setOf(
     "align-content", "align-items", "align-self", "animation", "animation-delay", "animation-duration",
     "animation-fill-mode", "animation-name", "animation-timing-function", "appearance", "aspect-ratio",
-    "background", "background-color", "background-image", "background-position", "background-repeat", "background-size",
-    "border", "border-color",
-    "border-radius", "border-style", "border-width", "bottom", "box-shadow", "box-sizing", "color", "column-gap",
+    "backdrop-filter", "background", "background-attachment", "background-blend-mode", "background-clip",
+    "background-color", "background-image", "background-position", "background-repeat", "background-size",
+    "border", "border-bottom", "border-bottom-color", "border-bottom-left-radius", "border-bottom-right-radius",
+    "border-bottom-style", "border-bottom-width", "border-color", "border-image", "border-left", "border-left-color",
+    "border-left-style", "border-left-width", "border-radius", "border-right", "border-right-color",
+    "border-right-style", "border-right-width", "border-style", "border-top", "border-top-color",
+    "border-top-left-radius", "border-top-right-radius", "border-top-style", "border-top-width", "border-width",
+    "bottom", "box-shadow", "box-sizing", "clip-path", "color", "column-gap",
     "container", "container-name", "container-type", "content", "cursor", "display", "filter", "flex", "flex-basis",
     "flex-direction", "flex-grow", "flex-shrink", "flex-wrap",
-    "font", "font-family", "font-size", "font-style", "font-weight", "gap", "grid", "grid-area", "grid-column", "grid-row",
+    "font", "font-family", "font-feature-settings", "font-size", "font-style", "font-variant", "font-weight",
+    "gap", "grid", "grid-area", "grid-column", "grid-row",
     "grid-template-columns", "grid-template-rows", "height", "inset", "justify-content", "left", "letter-spacing",
     "line-height", "margin", "margin-bottom", "margin-left", "margin-right", "margin-top", "max-height",
-    "max-width", "min-height", "min-width", "object-fit", "opacity", "order", "outline", "outline-color", "outline-offset",
+    "max-width", "min-height", "min-width", "mix-blend-mode", "object-fit", "object-position", "opacity",
+    "order", "outline", "outline-color", "outline-offset",
     "outline-style", "outline-width", "overflow", "overflow-x", "overflow-y",
     "padding", "padding-bottom", "padding-left", "padding-right", "padding-top", "place-items", "pointer-events",
-    "position", "right", "row-gap", "scroll-behavior", "text-align", "text-decoration", "text-transform", "top",
-    "transform", "transform-origin", "transition", "transition-delay", "transition-duration", "transition-property",
+    "position", "right", "row-gap", "scroll-behavior", "scroll-snap-align", "scroll-snap-type", "text-align",
+    "text-decoration", "text-overflow", "text-shadow", "text-transform", "top", "touch-action",
+    "transform", "transform-origin", "transform-style", "transition", "transition-delay", "transition-duration", "transition-property",
     "transition-timing-function", "translate", "user-select", "visibility", "white-space", "width", "z-index",
 )
 
@@ -5691,17 +6756,17 @@ private fun looksLikeJavaScriptStatement(trimmed: String): Boolean {
     if (trimmed.startsWith("function ")) return false
     if (trimmed.startsWith("else") || trimmed.startsWith("catch") || trimmed.startsWith("finally")) return false
     return Regex("""^(const|let|var|return|throw|await|break|continue)\b""").containsMatchIn(trimmed) ||
-        Regex("""^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[[^\]]+])*\s*(?:=|\+=|-=|\*=|/=|\+\+|--|\()""").containsMatchIn(trimmed)
+            Regex("""^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*|\[[^\]]+])*\s*(?:=|\+=|-=|\*=|/=|\+\+|--|\()""").containsMatchIn(trimmed)
 }
 
 private fun hasJavaScriptStatementTerminator(trimmed: String): Boolean {
     return trimmed.endsWith(";") ||
-        trimmed.endsWith("{") ||
-        trimmed.endsWith("}") ||
-        trimmed.endsWith(",") ||
-        trimmed.endsWith(":") ||
-        trimmed.endsWith("=>") ||
-        trimmed.endsWith(")")
+            trimmed.endsWith("{") ||
+            trimmed.endsWith("}") ||
+            trimmed.endsWith(",") ||
+            trimmed.endsWith(":") ||
+            trimmed.endsWith("=>") ||
+            trimmed.endsWith(")")
 }
 
 private val webCompletionSyntaxes = mapOf(
@@ -5943,10 +7008,13 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
 
                 Files: ls, tree, pwd, cd <dir>, cat <file>, touch <file>, mkdir <dir>, rm <path>, mv <from> <to>, cp <from> <to>
                 Web: preview, run, serve, lint, validate, format <file>
+                Libraries: libs, libraries, lib <name>
                 Versions: web --version, html --version, css --version, js --version, git --version
                 Utilities: echo <text>, clear, cls, help
             """.trimIndent()
         )
+        "libs", "libraries" -> WebShellResult(output = webLibraryTerminalHelp())
+        "lib", "library", "cdn" -> WebShellResult(output = webLibrarySnippet(args.getOrNull(1)))
         "version" -> WebShellResult(output = "PocketCoded Web 1.0\nHTML, CSS and JavaScript preview engine")
         "web", "html", "css", "js", "javascript" -> {
             if (args.any { it == "--version" || it == "-v" }) {
@@ -6056,6 +7124,151 @@ private fun appendShellResult(result: WebShellResult): String {
         if (result.output.isNotBlank()) append(result.output.trimEnd()).append('\n')
         if (result.error.isNotBlank()) append("Error: ").append(result.error.trimEnd()).append('\n')
     }.trimEnd()
+}
+
+private fun webLibraryTerminalHelp(): String {
+    val names = webLibrarySnippets().keys.sorted().joinToString(", ")
+    val packageNames = commonLibraryPackageNames.sorted().joinToString(", ")
+    return """
+        Offline library support
+
+        Local libraries:
+        - Put files in assets/, libs/, vendor/, or node_modules/ and reference them with normal relative paths.
+        - Examples: <script src="libs/p5.min.js"></script>, <link rel="stylesheet" href="vendor/bootstrap.css">
+
+        ES modules:
+        - Bare imports in module scripts are mapped only when a local package/file exists.
+        - Examples: import * as THREE from "three"; import axios from "axios";
+        - Add packages under node_modules/ or local ESM files under libs/, vendor/, or assets/.
+        - The live preview blocks internet requests so it keeps working offline.
+
+        Snippets:
+        - lib <name>
+        - Available snippets: $names
+
+        Recognized package names:
+        $packageNames
+    """.trimIndent()
+}
+
+private fun webLibrarySnippet(rawName: String?): String {
+    val snippets = webLibrarySnippets()
+    val name = rawName?.lowercase()?.trim().orEmpty()
+    if (name.isBlank()) {
+        return "Usage: lib <name>\nAvailable: ${snippets.keys.sorted().joinToString(", ")}"
+    }
+    return snippets[name]
+        ?: "No snippet named '$name'. Available: ${snippets.keys.sorted().joinToString(", ")}"
+}
+
+private fun webLibrarySnippets(): Map<String, String> {
+    return mapOf(
+        "react" to """
+            <div id="root"></div>
+            <script type="importmap">
+            { "imports": { "react": "./libs/react.js", "react-dom/client": "./libs/react-dom-client.js" } }
+            </script>
+            <script type="module">
+                import React from "react";
+                import { createRoot } from "react-dom/client";
+
+                createRoot(document.getElementById("root")).render(
+                    React.createElement("h1", null, "Hello React")
+                );
+            </script>
+        """.trimIndent(),
+        "vue" to """
+            <div id="app">{{ message }}</div>
+            <script type="importmap">
+            { "imports": { "vue": "./libs/vue.esm-browser.js" } }
+            </script>
+            <script type="module">
+                import { createApp } from "vue";
+
+                createApp({
+                    data: () => ({ message: "Hello Vue" })
+                }).mount("#app");
+            </script>
+        """.trimIndent(),
+        "three" to """
+            <canvas id="scene"></canvas>
+            <script type="importmap">
+            { "imports": { "three": "./libs/three.module.js" } }
+            </script>
+            <script type="module">
+                import * as THREE from "three";
+
+                const renderer = new THREE.WebGLRenderer({ canvas: document.querySelector("#scene") });
+                renderer.setSize(innerWidth, innerHeight);
+            </script>
+        """.trimIndent(),
+        "bootstrap" to """
+            <link href="vendor/bootstrap.min.css" rel="stylesheet">
+            <script src="vendor/bootstrap.bundle.min.js"></script>
+        """.trimIndent(),
+        "tailwind" to """
+            <link rel="stylesheet" href="vendor/tailwind.css">
+        """.trimIndent(),
+        "gsap" to """
+            <script type="importmap">
+            { "imports": { "gsap": "./libs/gsap.js" } }
+            </script>
+            <script type="module">
+                import gsap from "gsap";
+                gsap.to(".box", { x: 120, duration: 0.8 });
+            </script>
+        """.trimIndent(),
+        "axios" to """
+            <script type="importmap">
+            { "imports": { "axios": "./libs/axios.js" } }
+            </script>
+            <script type="module">
+                import axios from "axios";
+                const response = await axios.get("./data.json");
+                console.log(response.data);
+            </script>
+        """.trimIndent(),
+        "chart" to """
+            <canvas id="chart"></canvas>
+            <script type="importmap">
+            { "imports": { "chart.js/auto": "./libs/chart.js" } }
+            </script>
+            <script type="module">
+                import Chart from "chart.js/auto";
+                new Chart(document.getElementById("chart"), {
+                    type: "bar",
+                    data: { labels: ["A", "B"], datasets: [{ data: [1, 2] }] }
+                });
+            </script>
+        """.trimIndent(),
+        "jquery" to """
+            <script src="libs/jquery.min.js"></script>
+        """.trimIndent(),
+        "p5" to """
+            <script src="libs/p5.min.js"></script>
+            <script>
+                function setup() {
+                    createCanvas(400, 400);
+                }
+
+                function draw() {
+                    background(20);
+                    circle(mouseX, mouseY, 40);
+                }
+            </script>
+        """.trimIndent(),
+        "phaser" to """
+            <script src="libs/phaser.min.js"></script>
+            <script>
+                const game = new Phaser.Game({
+                    type: Phaser.AUTO,
+                    width: 800,
+                    height: 600,
+                    scene: { create() { this.add.text(20, 20, "Hello Phaser"); } }
+                });
+            </script>
+        """.trimIndent(),
+    )
 }
 
 private fun appendTerminalOutput(existing: String, addition: String): String {
@@ -6168,35 +7381,77 @@ private fun treeDirectory(root: File, start: File): String {
 }
 
 private fun auditWebProject(root: File): String {
-    val files = loadWebFiles(root)
+    return auditWebFiles(root, loadWebFiles(root), includeOkMessage = true)
+}
+
+private fun previewDiagnosticsForTerminal(root: File, files: List<WebFile>): String {
+    val diagnostics = auditWebFiles(root, files, includeOkMessage = false)
+    return diagnostics
+        .takeIf { it.isNotBlank() }
+        ?.prependIndent("[preview] ")
+        .orEmpty()
+}
+
+private fun auditWebFiles(root: File, files: List<WebFile>, includeOkMessage: Boolean): String {
     val messages = mutableListOf<String>()
-    val index = File(root, "index.html")
-    if (!index.isFile) messages += "warning: index.html is missing. Preview will use the active file or a generated shell."
+    val hasIndex = files.any { samePath(File(it.filePath).absolutePath, File(root, "index.html").absolutePath) }
+    if (!hasIndex) messages += "warning: index.html is missing. Preview will use the active file or a generated shell."
     files.forEach { file ->
         val text = file.content
+        val relativeFile = relativeWorkspacePath(root, File(file.filePath))
         inspectWebSource(file.name, text).forEach { diagnostic ->
-            messages += "${diagnostic.severity}: ${file.name}:${diagnostic.line}:${diagnostic.column}: ${diagnostic.message}"
+            messages += "${diagnostic.severity}: $relativeFile:${diagnostic.line}:${diagnostic.column}: ${diagnostic.message}"
         }
         when (fileExtension(file.name)) {
             "html", "htm" -> {
                 if (!text.contains("<meta name=\"viewport\"", ignoreCase = true)) {
-                    messages += "warning: ${file.name}: add a viewport meta tag for mobile layouts."
+                    messages += "warning: $relativeFile: add a viewport meta tag for mobile layouts."
                 }
                 Regex("""(?:href|src)=["']([^"']+)["']""").findAll(text).forEach { match ->
                     val ref = match.groupValues[1]
-                    if (!ref.startsWith("http") && !ref.startsWith("#") && !ref.startsWith("data:")) {
-                        val target = File(File(file.filePath).parentFile ?: root, ref)
-                        if (!target.exists()) messages += "error: ${file.name}: missing linked file $ref"
+                    if (isRemotePreviewReference(ref)) {
+                        messages += "warning: $relativeFile: external preview dependency is blocked offline: $ref"
+                    } else if (isLocalPreviewReference(ref)) {
+                        val target = resolvePreviewFile(root, File(file.filePath), ref)
+                        if (target == null) {
+                            messages += "error: $relativeFile: missing linked file $ref"
+                        }
                     }
                 }
             }
-            "css", "js", "mjs" -> {
+            "css", "js", "mjs", "cjs", "jsx" -> {
                 val balance = braceBalance(text)
-                if (balance != 0) messages += "warning: ${file.name}: brace balance is $balance"
+                if (balance != 0) messages += "warning: $relativeFile: brace balance is $balance"
+                if (fileExtension(file.name) == "css") {
+                    Regex("""url\(\s*(['"]?)(.*?)\1\s*\)""").findAll(text).forEach { match ->
+                        val ref = match.groupValues[2].trim()
+                        if (isRemotePreviewReference(ref)) {
+                            messages += "warning: $relativeFile: external CSS asset is blocked offline: $ref"
+                        } else if (isLocalPreviewReference(ref) && resolvePreviewFile(root, File(file.filePath), ref) == null) {
+                            messages += "error: $relativeFile: missing CSS asset $ref"
+                        }
+                    }
+                }
+                if (fileExtension(file.name) in javascriptFileExtensions) {
+                    jsImportSpecifierRegex.findAll(text).forEach { match ->
+                        val specifier = match.groupValues.getOrNull(1)
+                            ?.ifBlank { match.groupValues.getOrNull(2).orEmpty() }
+                            ?.trim()
+                            .orEmpty()
+                        when {
+                            isRemotePreviewReference(specifier) -> {
+                                messages += "warning: $relativeFile: external JavaScript import is blocked offline: $specifier"
+                            }
+                            isBareImportSpecifier(specifier) && localEsmUrlForSpecifier(root, specifier) == null -> {
+                                messages += "warning: $relativeFile: package '$specifier' is not available offline. Add it under node_modules/, libs/, vendor/, or assets/."
+                            }
+                        }
+                    }
+                }
             }
         }
     }
-    if (messages.isEmpty()) return "OK\nNo obvious Web project issues found."
+    if (messages.isEmpty() && includeOkMessage) return "OK\nNo obvious Web project issues found."
     return messages.joinToString("\n")
 }
 
@@ -6219,72 +7474,257 @@ private fun formatWebSource(name: String, source: String): String {
     }
 }
 
-private fun buildPreviewHtml(rootDirectory: File, files: List<WebFile>, activeFile: WebFile): String {
-    val active = File(activeFile.filePath)
-    val source = when (fileExtension(activeFile.name)) {
-        "html", "htm", "svg" -> activeFile.content
-        "css" -> {
-            val indexFile = files.firstOrNull { it.name == "index.html" && samePath(it.parentDirectoryPath(rootDirectory), rootDirectory.absolutePath) }
-            val indexContent = indexFile?.content ?: runCatching { File(rootDirectory, "index.html").readText() }.getOrNull()
-            
-            if (indexContent != null) indexContent else """
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <link rel="stylesheet" href="${relativeWorkspacePath(rootDirectory, active)}">
-                    <title>${activeFile.name}</title>
-                </head>
-                <body>
-                    <main class="preview-stage">
-                        <h1>${rootDirectory.name}</h1>
-                        <p>Previewing ${activeFile.name}</p>
-                    </main>
-                </body>
-                </html>
-            """.trimIndent()
-        }
-        "js", "mjs" -> {
-            val indexFile = files.firstOrNull { it.name == "index.html" && samePath(it.parentDirectoryPath(rootDirectory), rootDirectory.absolutePath) }
-            val indexContent = indexFile?.content ?: runCatching { File(rootDirectory, "index.html").readText() }.getOrNull()
-            
-            if (indexContent != null) indexContent else """
-                <!DOCTYPE html>
-                <html lang="en">
-                <head>
-                    <meta charset="UTF-8">
-                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                    <title>${activeFile.name}</title>
-                </head>
-                <body>
-                    <main id="app"></main>
-                    <script src="${relativeWorkspacePath(rootDirectory, active)}"></script>
-                </body>
-                </html>
-            """.trimIndent()
-        }
-        else -> "<pre>${escapeHtml(activeFile.content)}</pre>"
-    }
-    return injectPreviewBaseline(source)
+private fun isBareImportSpecifier(specifier: String): Boolean {
+    val value = specifier.trim()
+    return value.isNotBlank() &&
+            !value.startsWith("./") &&
+            !value.startsWith("../") &&
+            !value.startsWith("/") &&
+            !value.startsWith("http://") &&
+            !value.startsWith("https://") &&
+            !value.startsWith("data:") &&
+            !value.startsWith("blob:") &&
+            !value.contains(":")
 }
 
-private fun injectPreviewBaseline(html: String): String {
-    val baseline = """
-        <style id="pcw-preview-baseline">
-            html, body { width: 100%; min-height: 100%; margin: 0; padding: 0; }
-            body { padding: 12px; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; box-sizing: border-box; }
-            img, video, iframe, canvas, svg { max-width: 100%; height: auto; }
-            pre, code { white-space: pre-wrap; word-break: break-word; }
-            * { box-sizing: inherit; }
-        </style>
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    """.trimIndent()
-    return when {
-        html.contains("<head>", ignoreCase = true) -> html.replace("<head>", "<head>$baseline", ignoreCase = true)
-        html.contains("<html", ignoreCase = true) -> html.replace(Regex("<html([^>]*)>", RegexOption.IGNORE_CASE), "<html$1><head>$baseline</head>")
-        else -> "<!DOCTYPE html><html><head>$baseline</head><body>$html</body></html>"
+private fun localEsmUrlForSpecifier(rootDirectory: File, specifier: String): String? {
+    return localNodeModuleEntry(rootDirectory, specifier)
+        ?: localVendorLibraryEntry(rootDirectory, specifier)
+}
+
+private fun localNodeModuleEntry(rootDirectory: File, specifier: String): String? {
+    val cleanSpecifier = specifier.trim().removePrefix("/")
+    if (cleanSpecifier.isBlank()) return null
+    val parts = cleanSpecifier.split('/').filter { it.isNotBlank() }
+    if (parts.isEmpty()) return null
+    val packageName = if (parts.first().startsWith("@") && parts.size >= 2) {
+        "${parts[0]}/${parts[1]}"
+    } else {
+        parts[0]
     }
+    val packagePartCount = packageName.count { it == '/' } + 1
+    val subPath = parts.drop(packagePartCount).joinToString("/")
+    val packageDirectory = File(rootDirectory, "node_modules/${packageName.replace('/', File.separatorChar)}")
+    if (!packageDirectory.isDirectory || !isSameOrInside(rootDirectory, packageDirectory)) return null
+
+    if (subPath.isNotBlank()) {
+        javaScriptModuleCandidates(File(packageDirectory, subPath)).firstOrNull { it.isFile }?.let { candidate ->
+            return previewLocalUrl(rootDirectory, candidate)
+        }
+    }
+
+    val packageJson = File(packageDirectory, "package.json")
+    if (packageJson.isFile) {
+        val json = runCatching { JSONObject(packageJson.readText()) }.getOrNull()
+        listOf("module", "browser", "jsnext:main", "main")
+            .mapNotNull { field ->
+                val value = json?.opt(field)
+                when (value) {
+                    is String -> value
+                    is JSONObject -> value.optString("module").ifBlank { value.optString("default") }
+                    else -> null
+                }
+            }
+            .flatMap { entry -> javaScriptModuleCandidates(File(packageDirectory, entry)) }
+            .firstOrNull { it.isFile }
+            ?.let { candidate -> return previewLocalUrl(rootDirectory, candidate) }
+    }
+
+    listOf(
+        "dist/$packageName.esm.js",
+        "dist/$packageName.module.js",
+        "dist/${packageName.substringAfterLast('/')}.esm.js",
+        "dist/${packageName.substringAfterLast('/')}.module.js",
+        "dist/index.esm.js",
+        "dist/index.module.js",
+        "index.mjs",
+        "index.js",
+    )
+        .flatMap { entry -> javaScriptModuleCandidates(File(packageDirectory, entry)) }
+        .firstOrNull { it.isFile }
+        ?.let { candidate -> return previewLocalUrl(rootDirectory, candidate) }
+
+    return null
+}
+
+private fun localVendorLibraryEntry(rootDirectory: File, specifier: String): String? {
+    val cleanSpecifier = specifier.trim().removePrefix("/")
+    val libraryName = cleanSpecifier
+        .substringAfterLast('/')
+        .removePrefix("@")
+        .replace(Regex("""[^A-Za-z0-9_.-]"""), "-")
+        .ifBlank { return null }
+    val directoryNames = listOf("libs", "lib", "vendor", "assets")
+    val fileNames = listOf(
+        "$libraryName.module.js",
+        "$libraryName.esm.js",
+        "$libraryName.mjs",
+        "$libraryName.min.js",
+        "$libraryName.js",
+        "index.mjs",
+        "index.js",
+    )
+    directoryNames.forEach { directoryName ->
+        val directory = File(rootDirectory, directoryName)
+        if (!directory.isDirectory) return@forEach
+        val directMatches = fileNames.map { File(directory, it) }
+        val nestedMatches = fileNames.map { File(File(directory, libraryName), it) }
+        (directMatches + nestedMatches)
+            .flatMap(::javaScriptModuleCandidates)
+            .firstOrNull { it.isFile && isSameOrInside(rootDirectory, it) }
+            ?.let { candidate -> return previewLocalUrl(rootDirectory, candidate) }
+    }
+    return null
+}
+
+private fun javaScriptModuleCandidates(candidate: File): List<File> {
+    val hasExtension = candidate.extension.isNotBlank()
+    val baseCandidates = if (hasExtension) {
+        listOf(candidate)
+    } else {
+        listOf(
+            candidate,
+            File("${candidate.path}.mjs"),
+            File("${candidate.path}.js"),
+            File("${candidate.path}.min.js"),
+        )
+    }
+    return baseCandidates + listOf(
+        File(candidate, "index.mjs"),
+        File(candidate, "index.js"),
+    )
+}
+
+private fun previewLocalUrl(rootDirectory: File, file: File): String? {
+    val target = runCatching { file.canonicalFile }.getOrNull() ?: return null
+    if (!target.isFile || !isSameOrInside(rootDirectory, target)) return null
+    return Uri.fromFile(target).toString()
+}
+
+private fun resolvePreviewFile(
+    rootDirectory: File,
+    sourceOwner: File,
+    reference: String,
+): File? {
+    return previewReferenceCandidates(rootDirectory, sourceOwner, reference)
+        .firstOrNull { candidate ->
+            isSameOrInside(rootDirectory, candidate) && candidate.isFile
+        }
+}
+
+private fun previewReferenceCandidates(
+    rootDirectory: File,
+    sourceOwner: File,
+    reference: String,
+): List<File> {
+    if (!isLocalPreviewReference(reference)) return emptyList()
+    val cleanReference = reference
+        .substringBefore('#')
+        .substringBefore('?')
+        .trim()
+        .replace('\\', '/')
+        .removePrefix("./")
+        .trimStart('/')
+    if (cleanReference.isBlank()) return emptyList()
+    val ownerDirectory = if (sourceOwner.isDirectory) sourceOwner else sourceOwner.parentFile ?: rootDirectory
+    return listOf(
+        File(ownerDirectory, cleanReference),
+        File(rootDirectory, cleanReference),
+    ).mapNotNull { candidate ->
+        runCatching { candidate.canonicalFile }.getOrNull()
+    }
+}
+
+private fun rootIndexWebFile(rootDirectory: File, files: List<WebFile>): WebFile? {
+    return files.firstOrNull {
+        it.name.lowercase() in setOf("index.html", "index.htm") &&
+                samePath(it.parentDirectoryPath(rootDirectory), rootDirectory.absolutePath)
+    }
+}
+
+private fun nearestIndexWebFile(rootDirectory: File, files: List<WebFile>, fromFile: File): WebFile? {
+    val root = runCatching { rootDirectory.canonicalFile }.getOrDefault(rootDirectory)
+    val startDirectory = runCatching {
+        (if (fromFile.isDirectory) fromFile else fromFile.parentFile ?: rootDirectory).canonicalFile
+    }.getOrDefault(rootDirectory)
+    var directory: File? = startDirectory
+    while (directory != null && isSameOrInside(root, directory)) {
+        val currentDirectory = directory
+        files.firstOrNull { file ->
+            file.name.lowercase() in setOf("index.html", "index.htm") &&
+                    samePath(file.parentDirectoryPath(rootDirectory), currentDirectory.absolutePath)
+        }?.let { return it }
+        if (samePath(currentDirectory.absolutePath, root.absolutePath)) break
+        directory = currentDirectory.parentFile
+    }
+    return rootIndexWebFile(rootDirectory, files)
+}
+
+private fun isLocalPreviewReference(reference: String): Boolean {
+    val value = reference.trim()
+    if (value.isBlank() || value.startsWith("#")) return false
+    val lower = value.lowercase()
+    return !(
+            lower.startsWith("http://") ||
+                    lower.startsWith("https://") ||
+                    lower.startsWith("data:") ||
+                    lower.startsWith("blob:") ||
+                    lower.startsWith("mailto:") ||
+                    lower.startsWith("tel:") ||
+                    lower.startsWith("//")
+            )
+}
+
+private fun isRemotePreviewReference(reference: String): Boolean {
+    val value = reference.trim().lowercase()
+    return value.startsWith("http://") || value.startsWith("https://") || value.startsWith("//")
+}
+
+private fun escapeHtmlAttribute(value: String): String {
+    return escapeHtml(value).replace("\"", "&quot;")
+}
+
+private fun formatPreviewRuntimeMessage(
+    level: String,
+    message: String,
+    source: String,
+    line: Int,
+    column: Int,
+): String {
+    val normalizedLevel = when (level.lowercase()) {
+        "error" -> "error"
+        "warning", "warn" -> "warning"
+        "debug" -> "debug"
+        "tip" -> "info"
+        else -> level.lowercase().ifBlank { "log" }
+    }
+    val sourceLabel = previewSourceLabel(source)
+    val location = buildString {
+        if (sourceLabel.isNotBlank()) append(sourceLabel)
+        if (line > 0) {
+            if (isNotEmpty()) append(':')
+            append(line)
+            if (column > 0) append(':').append(column)
+        }
+    }
+    return buildString {
+        append("[preview:")
+        append(normalizedLevel)
+        append("] ")
+        if (location.isNotBlank()) append(location).append(" - ")
+        append(message.ifBlank { "Runtime message" })
+    }
+}
+
+private fun previewSourceLabel(source: String): String {
+    val clean = source
+        .substringBefore('?')
+        .substringBefore('#')
+        .trim()
+    if (clean.isBlank() || clean == "about:blank") return ""
+    return clean
+        .substringAfterLast('/')
+        .ifBlank { clean }
 }
 
 private fun buildAiCopilotPrompt(
@@ -6308,17 +7748,31 @@ private fun buildAiCopilotPrompt(
         remaining -= content.length
     }
     val terminalContext = terminalText.takeLast(AI_TERMINAL_CONTEXT_LIMIT)
+    val projectTree = files
+        .sortedBy { relativeWorkspacePath(rootDirectory, File(it.filePath)) }
+        .joinToString("\n") { "- ${relativeWorkspacePath(rootDirectory, File(it.filePath))}" }
     return """
         You are the built-in copilot for PocketCoded Web, an offline-first Android IDE for HTML, CSS, and JavaScript.
-        Help with the user's Web project. Prefer concise explanations and concrete code.
-        If you want the app to offer an action, include one JSON block at the end.
+        You can read the project files included below. You can propose real file edits; the app will apply them after the user approves.
+        Do not say you cannot access or edit files when the needed file content is included in this prompt.
+        Prefer concise Copilot-style responses: short summary first, then changed files or commands.
+        If the user asks you to create, edit, replace, delete, or fix files, include machine-readable changes before the explanation.
+        For large file edits, prefer plain file blocks over JSON so the response is not cut off or filled with escaped newlines.
 
-        Supported action JSON:
+        Preferred file edit format:
+        <file path="script.js">
+        ...complete file content...
+        </file>
+
+        Supported compact action JSON:
         {"action":"run_terminal","command":"lint"}
         {"action":"replace_active_file","content":"...full file content..."}
         {"action":"apply_files","files":[{"path":"index.html","operation":"write","content":"..."},{"path":"old.js","operation":"delete"}]}
 
         Active file: ${relativeWorkspacePath(rootDirectory, File(activeFile.filePath))}
+
+        Project file tree:
+        $projectTree
 
         Project files:
         $fileContext
@@ -6346,7 +7800,7 @@ private fun callGeminiDirectly(modelId: String, prompt: String, apiKey: String):
             "generationConfig",
             JSONObject()
                 .put("temperature", 0.25)
-                .put("maxOutputTokens", 4096)
+                .put("maxOutputTokens", AI_MAX_OUTPUT_TOKENS)
         )
         .toString()
     val connection = (url.openConnection() as HttpURLConnection).apply {
@@ -6395,40 +7849,196 @@ private fun friendlyGeminiError(message: String): String {
     }
 }
 
-private fun suggestedActionFromAiText(text: String): AiSuggestedAction? {
+private fun suggestedActionFromAiText(text: String, activeFile: WebFile? = null): AiSuggestedAction? {
     jsonObjectTexts(text).forEach { rawJson ->
         val json = runCatching { JSONObject(rawJson) }.getOrNull() ?: return@forEach
-        val action = json.optString("action").ifBlank { json.optString("type") }.lowercase()
-        when (action) {
-            "run_terminal", "terminal", "command" -> {
-                val command = json.optString("command")
-                if (command.isNotBlank()) return AiSuggestedAction.RunTerminalCommand(command)
-            }
-            "replace_active_file", "replace" -> {
-                val content = json.optString("content").ifBlank { json.optString("code") }
-                if (content.isNotBlank()) return AiSuggestedAction.ReplaceActiveFile(content)
-            }
-            "apply_files", "files" -> {
-                val files = json.optJSONArray("files") ?: json.optJSONArray("changes") ?: JSONArray()
-                val changes = mutableListOf<AiProjectFileChange>()
-                for (i in 0 until files.length()) {
-                    val item = files.optJSONObject(i) ?: continue
-                    val path = item.optString("path").ifBlank { item.optString("file") }
-                    if (path.isBlank()) continue
-                    val operation = when (item.optString("operation").ifBlank { item.optString("action") }.lowercase()) {
-                        "delete", "remove" -> AiProjectFileOperation.Delete
-                        else -> AiProjectFileOperation.Write
-                    }
-                    changes += AiProjectFileChange(operation, path, item.optString("content").ifBlank { item.optString("code") })
-                }
-                if (changes.isNotEmpty()) return AiSuggestedAction.ApplyProjectFileChanges(changes)
-            }
-        }
+        suggestedActionFromJson(json)?.let { return it }
     }
     Regex("(?is)<terminal>(.*?)</terminal>").find(text)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }?.let {
         return AiSuggestedAction.RunTerminalCommand(it)
     }
+    taggedFileChangesFromAiText(text).takeIf { it.isNotEmpty() }?.let {
+        return AiSuggestedAction.ApplyProjectFileChanges(it)
+    }
+    markdownFileChangesFromAiText(text).takeIf { it.isNotEmpty() }?.let {
+        return AiSuggestedAction.ApplyProjectFileChanges(it)
+    }
+    singleCodeBlockReplacement(text, activeFile)?.let {
+        return it
+    }
     return null
+}
+
+private fun suggestedActionFromJson(json: JSONObject): AiSuggestedAction? {
+    val action = json.optString("action").ifBlank { json.optString("type") }.lowercase()
+    val files = json.optJSONArray("files") ?: json.optJSONArray("changes")
+    return when {
+        action in setOf("run_terminal", "terminal", "command", "run_command") -> {
+            val command = json.optString("command").ifBlank { json.optString("terminal") }
+            command.takeIf { it.isNotBlank() }?.let { AiSuggestedAction.RunTerminalCommand(it) }
+        }
+        action in setOf("replace_active_file", "replace", "replace_file") -> {
+            val content = json.optString("content").ifBlank { json.optString("code") }
+            content.takeIf { it.isNotBlank() }?.let { AiSuggestedAction.ReplaceActiveFile(it) }
+        }
+        action in setOf("apply_files", "files", "edit_files", "write_files") || files != null -> {
+            val changes = aiFileChangesFromJsonArray(files ?: JSONArray())
+            changes.takeIf { it.isNotEmpty() }?.let { AiSuggestedAction.ApplyProjectFileChanges(it) }
+        }
+        else -> null
+    }
+}
+
+private fun aiFileChangesFromJsonArray(files: JSONArray): List<AiProjectFileChange> {
+    val changes = mutableListOf<AiProjectFileChange>()
+    for (i in 0 until files.length()) {
+        val item = files.optJSONObject(i) ?: continue
+        val path = item.optString("path").ifBlank { item.optString("file") }.trim()
+        if (path.isBlank()) continue
+        val operation = when (item.optString("operation").ifBlank { item.optString("action") }.lowercase()) {
+            "delete", "remove" -> AiProjectFileOperation.Delete
+            else -> AiProjectFileOperation.Write
+        }
+        changes += AiProjectFileChange(
+            operation = operation,
+            path = path,
+            content = item.optString("content").ifBlank { item.optString("code") },
+        )
+    }
+    return changes
+}
+
+private fun taggedFileChangesFromAiText(text: String): List<AiProjectFileChange> {
+    return Regex("""(?is)<file\s+[^>]*path\s*=\s*(["'])(.*?)\1[^>]*>(.*?)</file>""")
+        .findAll(text)
+        .mapNotNull { match ->
+            val path = match.groupValues.getOrNull(2)?.trim().orEmpty()
+            val content = match.groupValues.getOrNull(3)?.trim('\n', '\r').orEmpty()
+            path.takeIf { it.isNotBlank() }?.let {
+                AiProjectFileChange(AiProjectFileOperation.Write, it, content)
+            }
+        }
+        .distinctBy { it.path }
+        .toList()
+}
+
+private fun markdownFileChangesFromAiText(text: String): List<AiProjectFileChange> {
+    return markdownCodeBlocksFromAiText(text)
+        .mapNotNull { block ->
+            val path = editablePathFromAiText(block.language)
+                ?: editablePathFromAiText(block.prefix)
+                ?: return@mapNotNull null
+            AiProjectFileChange(
+                operation = AiProjectFileOperation.Write,
+                path = path,
+                content = block.code.trim('\n', '\r'),
+            )
+        }
+        .distinctBy { it.path }
+}
+
+private fun singleCodeBlockReplacement(text: String, activeFile: WebFile?): AiSuggestedAction? {
+    activeFile ?: return null
+    val blocks = markdownCodeBlocksFromAiText(text)
+    if (blocks.size != 1) return null
+    val lower = text.lowercase()
+    val looksLikeReplacement = listOf(
+        "replace active file",
+        "updated active file",
+        "full file",
+        "replace the file",
+        "here is the updated",
+    ).any { lower.contains(it) }
+    return if (looksLikeReplacement) {
+        AiSuggestedAction.ReplaceActiveFile(blocks.first().code.trim('\n', '\r'))
+    } else {
+        null
+    }
+}
+
+private fun markdownCodeBlocksFromAiText(text: String): List<AiCodeBlock> {
+    return Regex("""(?is)```([A-Za-z0-9_+#./-]*)\s*\n(.*?)```""")
+        .findAll(text)
+        .map { match ->
+            val prefixStart = (match.range.first - 240).coerceAtLeast(0)
+            AiCodeBlock(
+                prefix = text.substring(prefixStart, match.range.first),
+                language = match.groupValues.getOrNull(1).orEmpty(),
+                code = match.groupValues.getOrNull(2).orEmpty(),
+            )
+        }
+        .toList()
+}
+
+private fun editablePathFromAiText(text: String): String? {
+    return aiEditableFilePathRegex
+        .find(text.replace('\\', '/'))
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.trim()
+}
+
+private fun aiVisibleResponseText(text: String): String {
+    var cleaned = Regex("```(?:json)?\\s*([\\s\\S]*?)```", RegexOption.IGNORE_CASE)
+        .replace(text) { match ->
+            val body = match.groupValues.getOrNull(1).orEmpty().trim()
+            if (body.startsWith("{") && isAiActionJsonText(body)) "" else match.value
+        }
+    cleaned = removeUnclosedAiActionFence(cleaned)
+    cleaned = Regex("""(?is)<file\s+[^>]*path\s*=\s*(["'])(.*?)\1[^>]*>(.*?)</file>""")
+        .replace(cleaned, "")
+    cleaned = Regex("""(?is)<file\s+[^>]*path\s*=\s*(["'])(.*?)\1[^>]*>.*$""")
+        .replace(cleaned, "")
+    cleaned = Regex("""(?is)```([A-Za-z0-9_+#./-]*)\s*\n(.*?)```""")
+        .replace(cleaned) { match ->
+            val prefixStart = (match.range.first - 240).coerceAtLeast(0)
+            val prefix = cleaned.substring(prefixStart, match.range.first)
+            val hasFilePath = editablePathFromAiText(match.groupValues.getOrNull(1).orEmpty()) != null ||
+                    editablePathFromAiText(prefix) != null
+            if (hasFilePath) "" else match.value
+        }
+    val firstJson = cleaned.indexOf('{')
+    val lastJson = cleaned.lastIndexOf('}')
+    if (firstJson >= 0 && lastJson > firstJson) {
+        val candidate = cleaned.substring(firstJson, lastJson + 1).trim()
+        if (isAiActionJsonText(candidate)) {
+            cleaned = cleaned.removeRange(firstJson, lastJson + 1)
+        }
+    }
+    val possiblePartialJson = cleaned.indexOf('{')
+    if (possiblePartialJson >= 0 && looksLikeAiActionPayload(cleaned.substring(possiblePartialJson))) {
+        cleaned = cleaned.substring(0, possiblePartialJson)
+    }
+    return cleaned
+        .lines()
+        .joinToString("\n") { it.trimEnd() }
+        .replace(Regex("\n{3,}"), "\n\n")
+        .trim()
+}
+
+private fun removeUnclosedAiActionFence(text: String): String {
+    val fenceStart = text.lastIndexOf("```")
+    if (fenceStart < 0) return text
+    val afterFence = text.substring(fenceStart + 3)
+    if ("```" in afterFence) return text
+    return if (looksLikeAiActionPayload(afterFence)) text.substring(0, fenceStart) else text
+}
+
+private fun looksLikeAiActionPayload(text: String): Boolean {
+    val lower = text.lowercase()
+    return listOf(
+        "\"action\"",
+        "\"apply_files\"",
+        "\"replace_active_file\"",
+        "\"files\"",
+        "<file ",
+    ).any { lower.contains(it) }
+}
+
+private fun isAiActionJsonText(text: String): Boolean {
+    return runCatching {
+        suggestedActionFromJson(JSONObject(text)) != null
+    }.getOrDefault(false)
 }
 
 private fun jsonObjectTexts(text: String): List<String> {
@@ -6594,16 +8204,16 @@ private fun buildExplorerEntries(
         if (normalizedSearch.isBlank()) return true
         val localFile = File(file.filePath)
         return file.name.contains(normalizedSearch, ignoreCase = true) ||
-            relativeWorkspacePath(rootDirectory, localFile).contains(normalizedSearch, ignoreCase = true)
+                relativeWorkspacePath(rootDirectory, localFile).contains(normalizedSearch, ignoreCase = true)
     }
 
     fun directoryMatches(directory: File): Boolean {
         if (normalizedSearch.isBlank()) return true
         return directory.name.contains(normalizedSearch, ignoreCase = true) ||
-            files.any { file ->
-                val localFile = File(file.filePath)
-                isSameOrInside(directory, localFile) && fileMatches(file)
-            }
+                files.any { file ->
+                    val localFile = File(file.filePath)
+                    isSameOrInside(directory, localFile) && fileMatches(file)
+                }
     }
 
     fun appendDirectory(directory: File, depth: Int) {
@@ -6696,6 +8306,12 @@ private fun nextUntitledFileName(files: List<WebFile>): String {
 private fun isEditableWebFile(file: File): Boolean {
     return file.extension.lowercase() in editableWebExtensions
 }
+
+private fun looksLikeHtmlSource(source: String): Boolean =
+    source.contains("</") ||
+            source.contains("<html", ignoreCase = true) ||
+            source.contains("<!doctype", ignoreCase = true) ||
+            Regex("<[A-Za-z][\\w:-]*(\\s|>|/)").containsMatchIn(source)
 
 private fun isProjectIgnoredDirectory(file: File): Boolean {
     return file.name in workspaceMetadataNames || file.name.equals("node_modules", ignoreCase = true)
@@ -6877,8 +8493,8 @@ private fun saveWebIdeSession(context: Context, rootDirectory: File, session: We
         putBoolean(PREF_EXPLORER_VISIBLE, session.explorerVisible)
         putString(PREF_FILE_SEARCH, session.fileSearch)
         putString(PREF_TERMINAL_INPUT, session.terminalInput)
-        putString(PREF_TERMINAL_TEXT, session.terminalText.takeLast(80_000))
-        session.fullScreenMode?.let { putString(PREF_FULL_SCREEN_MODE, it.name) } ?: remove(PREF_FULL_SCREEN_MODE)
+        remove(PREF_TERMINAL_TEXT)
+        remove(PREF_FULL_SCREEN_MODE)
         session.userAiApiKey?.let { putString(PREF_USER_AI_API_KEY, it) } ?: remove(PREF_USER_AI_API_KEY)
     }
 }
