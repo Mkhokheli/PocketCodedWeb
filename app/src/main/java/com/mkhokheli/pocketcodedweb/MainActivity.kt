@@ -129,6 +129,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
@@ -165,9 +166,15 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.File
+import java.io.FileOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
+import java.net.URLEncoder
+import java.util.LinkedHashMap
+import java.util.zip.GZIPInputStream
 import kotlin.math.min
 
 private const val IDE_PREFS_NAME = "web_ide"
@@ -193,17 +200,23 @@ private const val EDITOR_SAVE_DEBOUNCE_MS = 1_000L
 private const val DIAGNOSTIC_IDLE_DELAY_MS = 220L
 private const val SYNTAX_HIGHLIGHT_IDLE_DELAY_MS = 80L
 private const val CURSOR_REVEAL_DELAY_MS = 45L
+private const val LSP_COMPLETION_DEBOUNCE_MS = 45L
+private const val LSP_CACHE_ENTRY_LIMIT = 32
 private const val LIVE_DIAGNOSTIC_CHAR_LIMIT = 180_000
 private const val LIVE_SYNTAX_HIGHLIGHT_CHAR_LIMIT = 120_000
+private const val NPM_REGISTRY_URL = "https://registry.npmjs.org"
+private const val NPM_MAX_PACKAGE_DOWNLOAD_BYTES = 30_000_000L
+private const val NPM_MAX_INSTALL_PACKAGES = 160
+private const val NPM_MAX_DEPENDENCY_DEPTH = 7
 
 private val htmlFileExtensions = setOf("html", "htm", "svg")
 private val cssFileExtensions = setOf("css")
-private val javascriptFileExtensions = setOf("js", "mjs", "cjs", "jsx")
+private val javascriptFileExtensions = setOf("js", "mjs", "cjs", "jsx", "ts", "tsx")
 private val editableWebExtensions = htmlFileExtensions + cssFileExtensions + javascriptFileExtensions + setOf("json", "md", "txt")
 private val defaultWebFileNames = listOf("index.html", "style.css", "script.js")
 private val workspaceMetadataNames = setOf(".git", ".ssh", ".pocketcodedweb")
 private val aiEditableFilePathRegex =
-    Regex("""(?i)(?:^|[`'"\s(:-])([A-Za-z0-9_. -]+(?:/[A-Za-z0-9_. -]+)*\.(?:html|htm|css|js|mjs|cjs|jsx|json|md|txt|svg))(?=$|[`'")\s:,-])""")
+    Regex("""(?i)(?:^|[`'"\s(:-])([A-Za-z0-9_. -]+(?:/[A-Za-z0-9_. -]+)*\.(?:html|htm|css|js|mjs|cjs|jsx|ts|tsx|json|md|txt|svg))(?=$|[`'")\s:,-])""")
 private val jsImportSpecifierRegex =
     Regex("""(?m)\b(?:import|export)\s+(?:[^'"]*?\s+from\s*)?["']([^"']+)["']|import\s*\(\s*["']([^"']+)["']\s*\)""")
 private val commonLibraryPackageNames = listOf(
@@ -473,6 +486,52 @@ private data class AiCodeBlock(
     val language: String,
     val code: String,
 )
+
+private data class NpmPackageSpec(
+    val name: String,
+    val requestedVersion: String = "latest",
+)
+
+private data class NpmResolvedPackage(
+    val name: String,
+    val version: String,
+    val tarballUrl: String,
+    val integrity: String,
+    val dependencies: Map<String, String>,
+)
+
+private data class NpmInstallOptions(
+    val packages: List<NpmPackageSpec>,
+    val saveDev: Boolean = false,
+    val noSave: Boolean = false,
+)
+
+private data class PackageExecutableRequest(
+    val command: String,
+    val packageSpec: NpmPackageSpec?,
+    val args: List<String>,
+    val noInstall: Boolean = false,
+)
+
+private data class Semver(
+    val major: Int,
+    val minor: Int,
+    val patch: Int,
+) : Comparable<Semver> {
+    override fun compareTo(other: Semver): Int {
+        return compareValuesBy(this, other, Semver::major, Semver::minor, Semver::patch)
+    }
+}
+
+private class NpmInstallState(
+    val rootDirectory: File,
+    val metadataCache: MutableMap<String, JSONObject> = mutableMapOf(),
+    val installedByName: MutableMap<String, String> = mutableMapOf(),
+    val lockPackages: JSONObject = JSONObject(),
+    val messages: MutableList<String> = mutableListOf(),
+) {
+    var installCount: Int = 0
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1001,6 +1060,7 @@ private fun WebIdeApp(
         userAiApiKey,
         expandedFolderPaths.size,
     ) {
+        delay(2000L) // Debounce session saving to reduce IO overhead
         saveWebIdeSession(
             context = context,
             rootDirectory = rootDirectory,
@@ -1606,11 +1666,19 @@ private fun ExplorerPanel(
             buildExplorerEntries(rootDirectory, files, expandedFolderPaths.toList(), search)
         }
 
-        Column(
+        LazyColumn(
             verticalArrangement = Arrangement.spacedBy(5.dp),
-            modifier = Modifier.verticalScroll(rememberScrollState()),
+            modifier = Modifier.fillMaxSize(),
         ) {
-            entries.forEach { entry ->
+            items(
+                items = entries,
+                key = { entry -> 
+                    when (entry) {
+                        is ExplorerEntry.Directory -> "dir:${entry.target.path}"
+                        is ExplorerEntry.SourceFile -> "file:${entry.file.id}"
+                    }
+                }
+            ) { entry ->
                 when (entry) {
                     is ExplorerEntry.Directory -> ExplorerFolderRow(
                         folder = entry.target,
@@ -1979,13 +2047,11 @@ private fun SmartCodeEditor(
     var diagnostics by remember(file.id) { mutableStateOf<List<CodeDiagnostic>>(emptyList()) }
     var completionResult by remember(file.id) { mutableStateOf(EditorCompletionResult()) }
     var editorVisualResult by remember(file.id) {
-        val initial = highlightWebSource(file.name, file.content, palette)
-        mutableStateOf(EditorVisualResult(file.content, initial))
+        mutableStateOf(WebLanguageServices.highlight(file.name, file.content, palette, emptyList()))
     }
     var textMetrics by remember(file.id) {
         mutableStateOf(editorTextMetrics(file.content, cap = 1_600))
     }
-    var pendingCursorReveal by remember(file.id) { mutableLongStateOf(0L) }
     LaunchedEffect(file.id, file.content) {
         if (file.content != editorValue.text) {
             val cursor = min(editorValue.selection.start, file.content.length).coerceAtLeast(0)
@@ -1998,19 +2064,10 @@ private fun SmartCodeEditor(
         val snapshot = editorValue.text
         val cursor = editorValue.selection.start
         val fileName = file.name
+        val fileOnDisk = File(file.filePath)
+        delay(LSP_COMPLETION_DEBOUNCE_MS)
         val result = withContext(Dispatchers.Default) {
-            val context = completionContextAt(snapshot, cursor, fileName)
-            EditorCompletionResult(
-                context = context,
-                items = context?.let { webCompletionsForContext(fileName, snapshot, it) }.orEmpty(),
-                source = snapshot,
-                cursor = cursor,
-                signatureHelp = if (shouldComputeSignatureHelp(snapshot, cursor)) {
-                    webSignatureHelpAt(fileName, snapshot, cursor)
-                } else {
-                    null
-                },
-            )
+            WebLanguageServices.completion(fileOnDisk, fileName, snapshot, cursor)
         }
         if (snapshot == editorValue.text && cursor == editorValue.selection.start) {
             completionResult = result
@@ -2036,8 +2093,9 @@ private fun SmartCodeEditor(
             return@LaunchedEffect
         }
         delay(DIAGNOSTIC_IDLE_DELAY_MS)
+        val fileOnDisk = File(file.filePath)
         val inspected = withContext(Dispatchers.Default) {
-            inspectWebSource(file.name, snapshot)
+            WebLanguageServices.diagnostics(fileOnDisk, file.name, snapshot)
         }
         if (snapshot == editorValue.text) {
             diagnostics = inspected
@@ -2052,16 +2110,11 @@ private fun SmartCodeEditor(
             return@LaunchedEffect
         }
         delay(SYNTAX_HIGHLIGHT_IDLE_DELAY_MS)
-        val visualText = withContext(Dispatchers.Default) {
-            addDiagnosticStyles(
-                source = snapshot,
-                highlighted = highlightWebSource(fileName, snapshot, palette),
-                palette = palette,
-                diagnostics = snapshotDiagnostics,
-            )
+        val visualResult = withContext(Dispatchers.Default) {
+            WebLanguageServices.highlight(fileName, snapshot, palette, snapshotDiagnostics)
         }
         if (snapshot == editorValue.text) {
-            editorVisualResult = EditorVisualResult(snapshot, visualText)
+            editorVisualResult = visualResult
         }
     }
     LaunchedEffect(editorValue.text) {
@@ -2075,23 +2128,62 @@ private fun SmartCodeEditor(
     }
     val editorVerticalScroll = rememberScrollState()
     val editorHorizontalScroll = rememberScrollState()
-    val cursorBringIntoViewRequester = remember { BringIntoViewRequester() }
-
+    val density = LocalDensity.current
+    var editorViewportHeightPx by remember(file.id) { mutableStateOf(0) }
+    var editorViewportWidthPx by remember(file.id) { mutableStateOf(0) }
     var lastTextLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
 
-    LaunchedEffect(pendingCursorReveal) {
-        if (pendingCursorReveal > 0L) {
-            delay(CURSOR_REVEAL_DELAY_MS)
-            cursorBringIntoViewRequester.bringIntoView()
+    suspend fun revealCursorInEditor() {
+        val layout = lastTextLayoutResult ?: return
+        if (layout.layoutInput.text.text != editorValue.text) return
+        if (editorViewportHeightPx <= 0 || editorViewportWidthPx <= 0) return
+
+        val cursor = editorValue.selection.start.coerceIn(0, layout.layoutInput.text.length)
+        val cursorRect = layout.getCursorRect(cursor)
+        val topComfortPx = with(density) { 32.dp.toPx() }
+        val bottomComfortPx = with(density) { if (completionSurfaceVisible) 86.dp.toPx() else 34.dp.toPx() }
+        val leftComfortPx = with(density) { 24.dp.toPx() }
+        val rightComfortPx = with(density) { 44.dp.toPx() }
+
+        val visibleTop = editorVerticalScroll.value + topComfortPx
+        val visibleBottom = editorVerticalScroll.value + editorViewportHeightPx - bottomComfortPx
+        val nextVerticalScroll = when {
+            cursorRect.bottom > visibleBottom ->
+                (cursorRect.bottom - editorViewportHeightPx + bottomComfortPx).toInt()
+            cursorRect.top < visibleTop ->
+                (cursorRect.top - topComfortPx).toInt()
+            else -> null
+        }?.coerceIn(0, editorVerticalScroll.maxValue)
+
+        if (nextVerticalScroll != null && nextVerticalScroll != editorVerticalScroll.value) {
+            editorVerticalScroll.scrollTo(nextVerticalScroll)
+        }
+
+        val visibleLeft = editorHorizontalScroll.value + leftComfortPx
+        val visibleRight = editorHorizontalScroll.value + editorViewportWidthPx - rightComfortPx
+        val nextHorizontalScroll = when {
+            cursorRect.right > visibleRight ->
+                (cursorRect.right - editorViewportWidthPx + rightComfortPx).toInt()
+            cursorRect.left < visibleLeft ->
+                (cursorRect.left - leftComfortPx).toInt()
+            else -> null
+        }?.coerceIn(0, editorHorizontalScroll.maxValue)
+
+        if (nextHorizontalScroll != null && nextHorizontalScroll != editorHorizontalScroll.value) {
+            editorHorizontalScroll.scrollTo(nextHorizontalScroll)
         }
     }
 
-    LaunchedEffect(completionSurfaceVisible) {
-        if (completionSurfaceVisible) {
-            // Trigger a scroll to ensure cursor is above the newly shown suggestion bar
-            delay(CURSOR_REVEAL_DELAY_MS)
-            cursorBringIntoViewRequester.bringIntoView()
-        }
+    LaunchedEffect(
+        editorValue.text,
+        editorValue.selection,
+        completionSurfaceVisible,
+        lastTextLayoutResult,
+        editorViewportHeightPx,
+        editorViewportWidthPx,
+    ) {
+        delay(CURSOR_REVEAL_DELAY_MS)
+        revealCursorInEditor()
     }
 
     val lineCount = textMetrics.lineCount
@@ -2109,25 +2201,24 @@ private fun SmartCodeEditor(
         fontSize = 14.sp,
         lineHeight = 20.sp,
     )
-    val density = LocalDensity.current
     val showQuickKeys = showKeyboardAccessory && WindowInsets.ime.getBottom(density) > 0
-    val editorVisualTransformation = remember(editorVisualResult) {
-        WebSyntaxTransformation(editorVisualResult.source, editorVisualResult.text)
+    val editorBottomComfort = if (completionSurfaceVisible) 72.dp else 16.dp
+    val editorVisualTransformation = remember(editorVisualResult, file.name, palette) {
+        WebSyntaxTransformation(
+            source = editorVisualResult.source,
+            transformed = editorVisualResult.text,
+            fileName = file.name,
+            palette = palette,
+        )
     }
     fun selectCompletion(item: CompletionItem) {
         val context = completionResult.context ?: return
         if (completionResult.source != editorValue.text || completionResult.cursor != editorValue.selection.start) return
-        val previousText = editorValue.text
         val inserted = applyCompletion(editorValue, context, item)
         editorValue = inserted
         completionResult = EditorCompletionResult()
         suppressCompletionsForText = inserted.text
         completionsVisible = false
-        val insertedStart = context.replaceStart.coerceIn(0, inserted.text.length)
-        val insertedEnd = inserted.selection.start.coerceIn(insertedStart, inserted.text.length)
-        if (previousText != inserted.text && '\n' in inserted.text.substring(insertedStart, insertedEnd)) {
-            pendingCursorReveal += 1L
-        }
         onCodeChange(inserted.text)
     }
 
@@ -2165,6 +2256,10 @@ private fun SmartCodeEditor(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxHeight()
+                    .onSizeChanged {
+                        editorViewportWidthPx = it.width
+                        editorViewportHeightPx = it.height
+                    }
                     .horizontalScroll(editorHorizontalScroll),
             ) {
                 Box(
@@ -2189,27 +2284,19 @@ private fun SmartCodeEditor(
                             val updatedValue = applySmartWebEditorChange(previousValue, requestedValue, file.name)
 
                             if (textChanged) {
-                                // Fast-pass synchronous highlight to prevent flashing white
-                                val fastVisual = highlightWebSource(file.name, updatedValue.text, palette)
-                                editorVisualResult = EditorVisualResult(updatedValue.text, fastVisual)
+                                editorVisualResult = WebLanguageServices.highlight(
+                                    fileName = file.name,
+                                    source = updatedValue.text,
+                                    palette = palette,
+                                    diagnostics = emptyList(),
+                                )
                             }
 
-                            val insertedSegment = if (textChanged && updatedValue.selection.collapsed) {
-                                val start = minOf(previousValue.selection.start, previousValue.selection.end)
-                                    .coerceIn(0, updatedValue.text.length)
-                                val end = updatedValue.selection.start.coerceIn(start, updatedValue.text.length)
-                                updatedValue.text.substring(start, end)
-                            } else {
-                                ""
-                            }
                             editorValue = updatedValue
                             if (textChanged) {
                                 suppressCompletionsForText = null
                                 completionResult = EditorCompletionResult()
                                 completionsVisible = false
-                                if ('\n' in insertedSegment) {
-                                    pendingCursorReveal += 1L
-                                }
                             } else if (requestedValue.selection != previousValue.selection) {
                                 completionsVisible = false
                             }
@@ -2221,29 +2308,11 @@ private fun SmartCodeEditor(
                         textStyle = codeStyle,
                         cursorBrush = SolidColor(palette.accent),
                         visualTransformation = editorVisualTransformation,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = editorBottomComfort),
                     )
 
-                    // Cursor snap placeholder
-                    val cursorRect = lastTextLayoutResult?.let { layout ->
-                        if (layout.layoutInput.text.text == editorValue.text) {
-                            val cursor = editorValue.selection.start.coerceIn(0, layout.layoutInput.text.length)
-                            layout.getCursorRect(cursor)
-                        } else null
-                    }
-                    if (cursorRect != null) {
-                        val cursorTargetTop = with(density) { cursorRect.top.toDp() } - 24.dp
-                        Box(
-                            modifier = Modifier
-                                .bringIntoViewRequester(cursorBringIntoViewRequester)
-                                .width(1.dp)
-                                .height(if (completionSurfaceVisible) 180.dp else 112.dp)
-                                .offset(
-                                    x = with(density) { cursorRect.left.toDp() },
-                                    y = maxOf(0.dp, cursorTargetTop),
-                                )
-                        )
-                    }
                     val currentSignatureHelp = completionResult.signatureHelp
                         ?.takeIf {
                             completionResult.source == editorValue.text &&
@@ -3758,7 +3827,11 @@ private fun prepareLivePreviewEntry(
     }
 
     // 3. Adopt GameCoded "Inlining" logic - Bundle all project CSS and JS into this one HTML string
-    val bundledHtml = bundleProjectAssets(baseHtml, files, activeFile)
+    val bundledHtml = if (baseHtml.contains("<html", ignoreCase = true) || looksLikeHtmlSource(baseHtml)) {
+        inlinePreviewProjectAssets(root, files, File(activeFile.filePath), baseHtml)
+    } else {
+        bundleProjectAssets(baseHtml, files, activeFile)
+    }
 
     // 4. Inject responsive baseline (from IdeActivity.kt)
     val finalHtml = injectResponsiveBaseline(bundledHtml)
@@ -3782,14 +3855,83 @@ private fun bundleProjectAssets(html: String, files: List<WebFile>, activeFile: 
         .replace("</script", "<\\/script", ignoreCase = true)
         .trim()
 
+    val needsTranspilation = files.any { 
+        fileExtension(it.name) in setOf("ts", "tsx", "jsx") || 
+        (fileExtension(it.name) in javascriptFileExtensions && Regex("""(?m)^\s*(import|export)\b""").containsMatchIn(it.content))
+    }
+
     var result = html
     if (cssBlock.isNotBlank()) {
-        result = injectIntoHeadEnd(result, "\n<style id=\"pcw-bundled-css\">\n$cssBlock\n</style>\n")
+        result = injectIntoHeadEnd(result, "\n<style id=\"pcw-bundled-css\" data-pcw-source=\"project-css\">\n$cssBlock\n</style>\n")
     }
     if (jsBlock.isNotBlank()) {
-        result = injectIntoBodyEnd(result, "\n<script id=\"pcw-bundled-js\">\n$jsBlock\n</script>\n")
+        val scriptType = if (needsTranspilation) "text/babel" else "text/javascript"
+        val babelPresets = if (needsTranspilation) " data-presets=\"react,typescript,env\"" else ""
+        
+        if (needsTranspilation && !result.contains("babel.min.js")) {
+            val babelScript = "\n<script src=\"https://unpkg.com/@babel/standalone@7.23.11/babel.min.js\"></script>\n"
+            result = injectIntoHeadStart(result, babelScript)
+        }
+        
+        result = injectIntoBodyEnd(result, "\n<script id=\"pcw-bundled-js\" type=\"$scriptType\"$babelPresets data-pcw-source=\"project-js\">\n$jsBlock\n</script>\n")
     }
     return result
+}
+
+private fun inlinePreviewProjectAssets(
+    rootDirectory: File,
+    files: List<WebFile>,
+    sourceOwner: File,
+    html: String,
+): String {
+    val withStyles = Regex("""(?is)<link\b[^>]*>""").replace(html) { match ->
+        val tag = match.value
+        val rel = htmlAttributeValue(tag, "rel").orEmpty()
+        val href = htmlAttributeValue(tag, "href") ?: return@replace tag
+        if (!rel.contains("stylesheet", ignoreCase = true)) return@replace tag
+        val file = resolvePreviewFile(rootDirectory, sourceOwner, href)?.let { target ->
+            files.firstOrNull { samePath(it.filePath, target.absolutePath) }
+        } ?: return@replace tag
+        if (fileExtension(file.name) !in cssFileExtensions) return@replace tag
+        """<style id="pcw-inlined-${file.name}" data-pcw-source="${escapeHtmlAttribute(href)}">
+${file.content}
+</style>"""
+    }
+    return Regex("""(?is)<script\b([^>]*)>(.*?)</script>""").replace(withStyles) { match ->
+        val attributes = match.groupValues[1]
+        val src = htmlAttributeValue(attributes, "src") ?: return@replace match.value
+        val file = resolvePreviewFile(rootDirectory, sourceOwner, src)?.let { target ->
+            files.firstOrNull { samePath(it.filePath, target.absolutePath) }
+        } ?: return@replace match.value
+        if (fileExtension(file.name) !in javascriptFileExtensions) return@replace match.value
+        val cleanedAttributes = removeHtmlAttribute(attributes, "src")
+        val needsTranspilation = fileExtension(file.name) in setOf("ts", "tsx", "jsx") || 
+            Regex("""(?m)^\s*(import|export)\b""").containsMatchIn(file.content)
+        val type = if (needsTranspilation) " type=\"text/babel\" data-presets=\"react,typescript,env\"" else cleanedAttributes
+        val escapedContent = file.content.replace("</script", "<\\/script", ignoreCase = true)
+        """<script$type data-pcw-source="${escapeHtmlAttribute(src)}">
+$escapedContent
+//# sourceURL=${relativeWorkspacePath(rootDirectory, File(file.filePath))}
+</script>"""
+    }
+}
+
+private fun htmlAttributeValue(tagText: String, attributeName: String): String? {
+    val escapedName = Regex.escape(attributeName)
+    return Regex("""(?is)\b$escapedName\s*=\s*(["'])(.*?)\1""")
+        .find(tagText)
+        ?.groupValues
+        ?.getOrNull(2)
+        ?: Regex("""(?is)\b$escapedName\s*=\s*([^\s"'=<>`]+)""")
+            .find(tagText)
+            ?.groupValues
+            ?.getOrNull(1)
+}
+
+private fun removeHtmlAttribute(tagText: String, attributeName: String): String {
+    val escapedName = Regex.escape(attributeName)
+    return Regex("""(?is)\s*\b$escapedName\s*=\s*(?:"[^"]*"|'[^']*'|[^\s"'=<>`]+)""")
+        .replace(tagText, "")
 }
 
 private fun injectIntoHeadStart(html: String, content: String): String {
@@ -4446,13 +4588,185 @@ private fun HorizontalRule(palette: WebPalette) {
     Box(Modifier.fillMaxWidth().height(1.dp).background(palette.divider))
 }
 
+private object OfflineWebLspServer {
+    private val completionCache = SmallLruCache<String, EditorCompletionResult>(LSP_CACHE_ENTRY_LIMIT)
+    private val diagnosticsCache = SmallLruCache<String, List<CodeDiagnostic>>(LSP_CACHE_ENTRY_LIMIT)
+    private val highlightCache = SmallLruCache<String, EditorVisualResult>(LSP_CACHE_ENTRY_LIMIT)
+    private val formatCache = SmallLruCache<String, String>(LSP_CACHE_ENTRY_LIMIT)
+
+    fun status(): String {
+        return buildString {
+            append("Offline LSP: active")
+            append('\n').append("Languages: ").append(offlineLspSupportedLanguageSummary())
+            append('\n').append("Capabilities: completion, diagnostics, formatting, syntax highlighting, signature help")
+            append('\n').append("Network: not required")
+        }
+    }
+
+    fun completion(file: File, fileName: String, source: String, rawCursor: Int): EditorCompletionResult {
+        val cursor = rawCursor.coerceIn(0, source.length)
+        val key = "offline-completion|$fileName|${source.length}|${source.hashCode()}|$cursor"
+        return completionCache.getOrPutValue(key) {
+            val context = completionContextAt(source, cursor, fileName)
+            EditorCompletionResult(
+                context = context,
+                items = context?.let { webCompletionsForContext(fileName, source, it) }.orEmpty(),
+                source = source,
+                cursor = cursor,
+                signatureHelp = if (shouldComputeSignatureHelp(source, cursor)) {
+                    webSignatureHelpAt(fileName, source, cursor)
+                } else {
+                    null
+                },
+            )
+        }
+    }
+
+    fun diagnostics(file: File, fileName: String, source: String): List<CodeDiagnostic> {
+        val key = "offline-diagnostics|$fileName|${source.length}|${source.hashCode()}"
+        return diagnosticsCache.getOrPutValue(key) {
+            inspectWebSource(fileName, source)
+        }
+    }
+
+    fun highlight(
+        fileName: String,
+        source: String,
+        palette: WebPalette,
+        diagnostics: List<CodeDiagnostic>,
+    ): EditorVisualResult {
+        val key = "offline-highlight|$fileName|${source.length}|${source.hashCode()}|${palette.hashCode()}|${diagnostics.hashCode()}"
+        return highlightCache.getOrPutValue(key) {
+            EditorVisualResult(
+                source = source,
+                text = addDiagnosticStyles(
+                    source = source,
+                    highlighted = highlightWebSource(fileName, source, palette),
+                    palette = palette,
+                    diagnostics = diagnostics,
+                ),
+            )
+        }
+    }
+
+    fun format(file: File, fileName: String, source: String): String {
+        val key = "offline-format|$fileName|${source.length}|${source.hashCode()}"
+        return formatCache.getOrPutValue(key) {
+            formatWebSource(fileName, source)
+        }
+    }
+}
+
+private object WebLanguageServices {
+    fun completion(file: File, fileName: String, source: String, rawCursor: Int): EditorCompletionResult {
+        val cursor = rawCursor.coerceIn(0, source.length)
+        val externalItems = ExternalLspManager.completions(file, fileName, source, cursor)
+        if (!externalItems.isNullOrEmpty()) {
+            return EditorCompletionResult(
+                context = completionContextAt(source, cursor, fileName) ?: plainCompletionContextAt(source, cursor),
+                items = externalItems,
+                source = source,
+                cursor = cursor,
+                signatureHelp = if (shouldComputeSignatureHelp(source, cursor)) {
+                    webSignatureHelpAt(fileName, source, cursor)
+                } else {
+                    null
+                },
+            )
+        }
+        return OfflineWebLspServer.completion(file, fileName, source, cursor)
+    }
+
+    fun diagnostics(file: File, fileName: String, source: String): List<CodeDiagnostic> {
+        return ExternalLspManager.diagnostics(file, fileName, source)
+            ?: OfflineWebLspServer.diagnostics(file, fileName, source)
+    }
+
+    fun highlight(
+        fileName: String,
+        source: String,
+        palette: WebPalette,
+        diagnostics: List<CodeDiagnostic>,
+    ): EditorVisualResult {
+        return OfflineWebLspServer.highlight(fileName, source, palette, diagnostics)
+    }
+
+    fun format(file: File, fileName: String, source: String): String {
+        return ExternalLspManager.format(file, fileName, source)
+            ?: OfflineWebLspServer.format(file, fileName, source)
+    }
+
+    fun status(): String {
+        return buildString {
+            append(OfflineWebLspServer.status())
+            append("\n\n")
+            append(ExternalLspManager.status())
+        }
+    }
+}
+
+private fun offlineLspSupportedLanguageSummary(): String {
+    return listOf(
+        "HTML/HTM/SVG",
+        "CSS",
+        "JavaScript/JSX/MJS/CJS",
+        "TypeScript/TSX",
+        "JSON",
+        "Markdown/Text as plaintext",
+    ).joinToString(", ")
+}
+
+private class SmallLruCache<K, V>(
+    private val maxEntries: Int,
+) : LinkedHashMap<K, V>(maxEntries, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean {
+        return size > maxEntries
+    }
+
+    fun getOrPutValue(key: K, producer: () -> V): V {
+        synchronized(this) {
+            get(key)?.let { return it }
+        }
+        val value = producer()
+        synchronized(this) {
+            put(key, value)
+        }
+        return value
+    }
+}
+
+private fun plainCompletionContextAt(source: String, rawCursor: Int): CompletionContext {
+    val cursor = rawCursor.coerceIn(0, source.length)
+    var start = cursor
+    while (start > 0) {
+        val char = source[start - 1]
+        if (!char.isLetterOrDigit() && char != '_' && char != '$' && char != '-') break
+        start -= 1
+    }
+    return CompletionContext(
+        prefix = source.substring(start, cursor),
+        replaceStart = start,
+        replaceEnd = cursor,
+    )
+}
+
 private class WebSyntaxTransformation(
     private val source: String,
     private val transformed: AnnotatedString,
+    private val fileName: String,
+    private val palette: WebPalette,
 ) : VisualTransformation {
     override fun filter(text: AnnotatedString): TransformedText {
+        val displayText = if (text.text == source) {
+            transformed
+        } else if (text.text.length <= LIVE_SYNTAX_HIGHLIGHT_CHAR_LIMIT) {
+            // Only perform fast-pass if small, otherwise use unstyled for speed
+            highlightWebSource(fileName, text.text, palette)
+        } else {
+            AnnotatedString(text.text, SpanStyle(color = palette.text))
+        }
         return TransformedText(
-            if (text.text == source) transformed else AnnotatedString(text.text),
+            displayText,
             OffsetMapping.Identity,
         )
     }
@@ -4670,15 +4984,19 @@ private fun highlightJs(source: String, palette: WebPalette): AnnotatedString = 
     // Strings
     applyRegexColor(this, source, JS_STRING_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
 
-    // Keywords
-    val jsKeywordsPattern = "\\b(${javascriptKeywords.joinToString("|")})\\b"
+    // Keywords (including TS)
+    val tsKeywords = setOf("type", "interface", "enum", "as", "readonly", "private", "protected", "public", "namespace", "abstract", "declare", "module")
+    val allKeywords = javascriptKeywords + tsKeywords
+    val jsKeywordsPattern = "\\b(${allKeywords.joinToString("|")})\\b"
     applyRegexColor(this, source, Regex(jsKeywordsPattern), if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0), bold = true)
 
     // Booleans/Null
     applyRegexColor(this, source, JS_BOOLEAN_NULL_REGEX, if (dark) Color(0xFF569CD6) else Color(0xFF0451A5), bold = true)
 
     // Builtins/Globals
-    val jsBuiltinsPattern = "\\b(${javascriptBuiltins.joinToString("|")})\\b"
+    val tsBuiltins = setOf("any", "number", "string", "boolean", "void", "never", "unknown", "object", "Record", "Partial", "Pick", "Omit")
+    val allBuiltins = javascriptBuiltins + tsBuiltins
+    val jsBuiltinsPattern = "\\b(${allBuiltins.joinToString("|")})\\b"
     applyRegexColor(this, source, Regex(jsBuiltinsPattern), if (dark) Color(0xFF4EC9B0) else Color(0xFF267F99))
 
     // Numbers
@@ -4943,6 +5261,52 @@ private fun applyCompletion(value: TextFieldValue, context: CompletionContext, i
 
 private fun CompletionItem.completionKey(): String {
     return "$label|$insertText|$detail"
+}
+
+internal fun completionExplanation(item: CompletionItem): String {
+    return when {
+        item.detail == "closing tag" -> "Closes the matching HTML element."
+        item.detail.contains("element", ignoreCase = true) -> "HTML element suggestion."
+        item.detail.contains("attribute", ignoreCase = true) -> "HTML attribute suggestion."
+        item.detail.contains("css", ignoreCase = true) -> "CSS suggestion for styling the current rule."
+        item.detail.contains("array", ignoreCase = true) -> "JavaScript array helper."
+        item.detail.contains("dom", ignoreCase = true) -> "Browser DOM API suggestion."
+        item.detail.contains("function", ignoreCase = true) -> "JavaScript function suggestion."
+        item.detail.contains("field", ignoreCase = true) -> "JSON field suggestion."
+        item.detail.isNotBlank() -> "${item.detail.replaceFirstChar { it.uppercase() }} suggestion."
+        else -> "Code completion suggestion."
+    }
+}
+
+internal fun completionSyntax(item: CompletionItem): String {
+    val lookupLabel = completionLookupLabel(item.label)
+    val directKey = "$lookupLabel|${item.detail}"
+    val labelKey = "${item.label}|${item.detail}"
+    return webCompletionSyntaxes[directKey]
+        ?: webCompletionSyntaxes[labelKey]
+        ?: item.insertText.takeIf { it.isNotBlank() }
+        ?: item.label
+}
+
+internal fun completionExample(item: CompletionItem): String {
+    return when {
+        item.detail == "closing tag" -> "</${completionLookupLabel(item.label)}>"
+        item.detail.contains("css", ignoreCase = true) -> completionSyntax(item)
+        item.detail.contains("field", ignoreCase = true) -> "{\n  ${item.insertText}\n}"
+        item.insertText.isNotBlank() -> item.insertText
+        else -> item.label
+    }
+}
+
+private fun completionLookupLabel(label: String): String {
+    return label
+        .trim()
+        .removePrefix("<")
+        .removePrefix("/")
+        .removeSuffix(">")
+        .removeSuffix("()")
+        .removeSurrounding("\"")
+        .substringBefore("(")
 }
 
 private val htmlCompletionItems = listOf(
@@ -5348,6 +5712,13 @@ private val jsCompletionItems = listOf(
     CompletionItem("setInterval", "setInterval(() => {\n    \n}, 1000)", "function", 20),
     CompletionItem("requestAnimationFrame", "requestAnimationFrame(() => {\n    \n})", "function", 30),
     CompletionItem("parseInt", "parseInt(value, 10)", "function", 9),
+    CompletionItem("useState", "const [state, setState] = useState(initialValue);", "react hook", 13),
+    CompletionItem("useEffect", "useEffect(() => {\n    \n}, []);", "react hook", 16),
+    CompletionItem("useRef", "const ref = useRef(null);", "react hook", 12),
+    CompletionItem("useMemo", "const memo = useMemo(() => value, []);", "react hook", 13),
+    CompletionItem("interface", "interface Name {\n    \n}", "typescript", 10),
+    CompletionItem("type", "type Name = ", "typescript", 5),
+    CompletionItem("enum", "enum Name {\n    \n}", "typescript", 5),
 )
 
 private val jsLibraryCompletionItems = listOf(
@@ -6025,6 +6396,10 @@ private fun webSignatureHelpAt(fileName: String, source: String, rawCursor: Int)
             "rgba" -> "rgba(red, green, blue, alpha)"
             "repeat" -> "repeat(count, track-size)"
             "var" -> "var(--custom-property, fallback)"
+            "useState" -> "useState(initialState)"
+            "useEffect" -> "useEffect(effect, deps?)"
+            "useMemo" -> "useMemo(factory, deps?)"
+            "useRef" -> "useRef(initialValue)"
             else -> null
         }
 }
@@ -6344,7 +6719,7 @@ private fun inspectCssSource(source: String): List<CodeDiagnostic> {
                 } else {
                     props += prop
                 }
-                if (!prop.startsWith("--") && prop !in knownCssProperties) {
+                if (!prop.startsWith("--") && !isVendorPrefixed(prop) && prop !in knownCssProperties) {
                     diagnostics += diagnosticAt(source, propertyStart, propertyStart + prop.length, "warning", "Unknown or unsupported CSS property '$prop'.")
                 }
             }
@@ -6358,8 +6733,13 @@ private fun inspectCssSource(source: String): List<CodeDiagnostic> {
             diagnostics += diagnosticAt(source, match.range.first, match.range.last + 1, "error", "Hex colors must be #RGB, #RGBA, #RRGGBB, or #RRGGBBAA.")
         }
     }
+    
+    // Improved semicolon detection
     source.lines().fold(0) { offset, line ->
-        val trimmed = line.trim()
+        val code = line.substringBefore("/*").substringBefore("//")
+        val trimmed = code.trim()
+        val lineStart = offset + line.indexOf(code).coerceAtLeast(0)
+        
         val declarationWithoutColon = Regex("""^[A-Za-z-]+\s+[^:;{}]+;?$""").matches(trimmed)
         if (
             declarationWithoutColon &&
@@ -6367,18 +6747,17 @@ private fun inspectCssSource(source: String): List<CodeDiagnostic> {
             !trimmed.startsWith("from ") &&
             !trimmed.startsWith("to ")
         ) {
-            diagnostics += diagnosticAt(source, offset + line.indexOf(trimmed), offset + line.length, "error", "CSS declarations need a colon between the property and value.")
+            diagnostics += diagnosticAt(source, lineStart, offset + line.length, "error", "CSS declarations need a colon between the property and value.")
         }
+        
         if (
             trimmed.contains(":") &&
             !trimmed.endsWith(";") &&
             !trimmed.endsWith("{") &&
             !trimmed.endsWith("}") &&
-            !trimmed.startsWith("@") &&
-            !trimmed.startsWith("/*") &&
-            !trimmed.endsWith("*/")
+            !trimmed.startsWith("@")
         ) {
-            diagnostics += diagnosticAt(source, offset + line.indexOf(trimmed), offset + line.length, "warning", "CSS declarations usually end with a semicolon.")
+            diagnostics += diagnosticAt(source, lineStart, offset + line.length, "warning", "CSS declarations usually end with a semicolon.")
         }
         offset + line.length + 1
     }
@@ -6724,16 +7103,20 @@ private val knownCssProperties = setOf(
     "font", "font-family", "font-feature-settings", "font-size", "font-style", "font-variant", "font-weight",
     "gap", "grid", "grid-area", "grid-column", "grid-row",
     "grid-template-columns", "grid-template-rows", "height", "inset", "justify-content", "left", "letter-spacing",
-    "line-height", "margin", "margin-bottom", "margin-left", "margin-right", "margin-top", "max-height",
+    "line-height", "list-style", "list-style-image", "list-style-position", "list-style-type", "margin", "margin-bottom", "margin-left", "margin-right", "margin-top", "max-height",
     "max-width", "min-height", "min-width", "mix-blend-mode", "object-fit", "object-position", "opacity",
     "order", "outline", "outline-color", "outline-offset",
     "outline-style", "outline-width", "overflow", "overflow-x", "overflow-y",
     "padding", "padding-bottom", "padding-left", "padding-right", "padding-top", "place-items", "pointer-events",
-    "position", "right", "row-gap", "scroll-behavior", "scroll-snap-align", "scroll-snap-type", "text-align",
+    "position", "right", "row-gap", "scroll-behavior", "scroll-snap-align", "scroll-snap-type", "text-align", "text-fill-color",
     "text-decoration", "text-overflow", "text-shadow", "text-transform", "top", "touch-action",
     "transform", "transform-origin", "transform-style", "transition", "transition-delay", "transition-duration", "transition-property",
     "transition-timing-function", "translate", "user-select", "visibility", "white-space", "width", "z-index",
 )
+
+private fun isVendorPrefixed(prop: String): Boolean {
+    return prop.startsWith("-webkit-") || prop.startsWith("-moz-") || prop.startsWith("-ms-") || prop.startsWith("-o-")
+}
 
 private val jsCommonIdentifierTypos = mapOf(
     "docuemnt" to "document",
@@ -7008,8 +7391,10 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
 
                 Files: ls, tree, pwd, cd <dir>, cat <file>, touch <file>, mkdir <dir>, rm <path>, mv <from> <to>, cp <from> <to>
                 Web: preview, run, serve, lint, validate, format <file>
+                Packages: npm/pnpm/yarn install <pkg>, npx <tool>, pnpm dlx <tool>, yarn dlx <tool>
+                LSP: offline by default; lsp status, lsp stdio <server> [args...], lsp tcp <host> <port>, lsp stop
                 Libraries: libs, libraries, lib <name>
-                Versions: web --version, html --version, css --version, js --version, git --version
+                Versions: web --version, html --version, css --version, js --version, lsp --version, npm/pnpm/yarn/npx --version, git --version
                 Utilities: echo <text>, clear, cls, help
             """.trimIndent()
         )
@@ -7100,11 +7485,19 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
             val target = resolveTerminalPath(root, working, args.getOrNull(1).orEmpty())
                 ?: return WebShellResult(error = "format: outside project")
             if (!target.isFile || !isEditableWebFile(target)) return WebShellResult(error = "format: expected an editable Web file")
-            val formatted = formatWebSource(target.name, target.readText())
+            val formatted = WebLanguageServices.format(target, target.name, target.readText())
             target.writeText(formatted)
             WebShellResult(output = "Formatted ${relativeWorkspacePath(root, target)}", workspaceChanged = true)
         }
         "node", "js" -> {
+            if (args.getOrNull(1) == "-e") {
+                val code = args.drop(2).joinToString(" ")
+                return if (code.isBlank()) {
+                    WebShellResult(error = "$executable -e: expected JavaScript code")
+                } else {
+                    WebShellResult(runJs = code)
+                }
+            }
             val target = resolveTerminalPath(root, working, args.getOrNull(1).orEmpty())
                 ?: return WebShellResult(error = "$executable: outside project")
             if (!target.isFile || fileExtension(target.name) !in javascriptFileExtensions) {
@@ -7112,11 +7505,1401 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
             }
             WebShellResult(output = "", runJs = target.readText())
         }
-        "npm" -> WebShellResult(
-            error = "npm is not bundled in PocketCoded Web. Use node/js <file> to run scripts."
-        )
+        "npm" -> executeNpmCommand(args, root, working)
+        "npx" -> executeNpxCommand(args, root, working)
+        "pnpm" -> executePnpmCommand(args, root, working)
+        "yarn" -> executeYarnCommand(args, root, working)
+        "lsp" -> executeLspCommand(args, root)
         else -> WebShellResult(error = "Command not found: $executable. Run help to see available commands.")
     }
+}
+
+private fun executeLspCommand(args: List<String>, root: File): WebShellResult {
+    val subcommand = args.getOrNull(1)?.lowercase().orEmpty()
+    return when (subcommand) {
+        "", "help", "-h", "--help" -> WebShellResult(output = lspTerminalHelp())
+        "version", "--version", "-v" -> WebShellResult(output = "Offline Web LSP + Language Server Protocol 3.x external client (PocketCoded Web)")
+        "status" -> WebShellResult(output = WebLanguageServices.status())
+        "stop", "shutdown", "exit" -> WebShellResult(output = ExternalLspManager.stop())
+        "stdio", "start" -> {
+            val command = args.drop(2)
+            if (command.isEmpty()) {
+                WebShellResult(error = "lsp $subcommand: expected a language-server command.")
+            } else {
+                WebShellResult(output = ExternalLspManager.startStdio(command, root))
+            }
+        }
+        "tcp", "connect" -> {
+            val host = args.getOrNull(2).orEmpty()
+            val port = args.getOrNull(3)?.toIntOrNull()
+            when {
+                host.isBlank() -> WebShellResult(error = "lsp $subcommand: expected a host.")
+                port == null -> WebShellResult(error = "lsp $subcommand: expected a numeric port.")
+                else -> WebShellResult(output = ExternalLspManager.connectTcp(host, port, root))
+            }
+        }
+        else -> WebShellResult(error = "lsp: unsupported command '$subcommand'. Run lsp help.")
+    }
+}
+
+private fun lspTerminalHelp(): String {
+    return """
+        Offline LSP
+
+        lsp status
+        lsp stop
+        lsp stdio <server-command> [args...]
+        lsp tcp <host> <port>
+
+        Examples:
+        lsp stdio typescript-language-server --stdio
+        lsp stdio vscode-html-language-server --stdio
+        lsp tcp 192.168.1.20 2087
+
+        The editor always has an offline LSP for HTML, CSS, JavaScript, TypeScript, JSON, Markdown, and plain text. If an external server is connected, it can override completions, diagnostics, and formatting while it is active. Stdio requires the server executable to be available to this Android app process; TCP works with servers running in Termux or on another reachable machine.
+    """.trimIndent()
+}
+
+private fun executeNpmCommand(args: List<String>, root: File, working: File): WebShellResult {
+    if (args.any { it == "--version" || it == "-v" }) {
+        return WebShellResult(output = "npm 10.8.0-compatible (PocketCoded Web package manager)")
+    }
+    val subcommand = args.getOrNull(1)?.lowercase().orEmpty()
+    return when (subcommand) {
+        "", "help", "-h", "--help" -> WebShellResult(output = npmTerminalHelp())
+        "init" -> createOrUpdatePackageJson(root, force = args.any { it == "-y" || it == "--yes" })
+        "install", "i", "add" -> installNpmPackages(root, parseNpmInstallOptions(args.drop(2)))
+        "ci" -> cleanInstallNpmPackages(root)
+        "update" -> installNpmPackages(root, parseNpmInstallOptions(emptyList()))
+        "uninstall", "remove", "rm", "un" -> uninstallNpmPackages(root, args.drop(2))
+        "list", "ls", "la", "ll" -> listNpmPackages(root)
+        "run", "run-script" -> runNpmScript(root, working, args.drop(2))
+        "start", "test", "stop", "restart" -> runNpmScript(root, working, listOf(subcommand))
+        "exec", "x" -> executePackageExecutableCommand(args.drop(2), root, working, installMissing = false, runner = "npm exec")
+        "create" -> executeCreatePackageCommand(args.drop(2), root, working, runner = "npm create")
+        "scripts" -> WebShellResult(output = npmScriptsText(root))
+        "view", "info", "show" -> viewNpmPackage(args.drop(2))
+        "audit" -> WebShellResult(
+            output = "PocketCoded Web does not bundle npm audit. Review package sources before installing and keep dependencies minimal."
+        )
+        "cache" -> WebShellResult(output = "Package metadata is cached only for the current install command.")
+        else -> WebShellResult(error = "npm: unsupported command '$subcommand'. Run npm help.")
+    }
+}
+
+private fun executeNpxCommand(args: List<String>, root: File, working: File): WebShellResult {
+    if (args.any { it == "--version" || it == "-v" }) {
+        return WebShellResult(output = "npx 10.8.0-compatible (PocketCoded Web package runner)")
+    }
+    val subcommand = args.getOrNull(1)?.lowercase().orEmpty()
+    return when (subcommand) {
+        "", "help", "-h", "--help" -> WebShellResult(output = packageRunnerHelp("npx"))
+        else -> executePackageExecutableCommand(args.drop(1), root, working, installMissing = true, runner = "npx")
+    }
+}
+
+private fun executePnpmCommand(args: List<String>, root: File, working: File): WebShellResult {
+    if (args.any { it == "--version" || it == "-v" }) {
+        return WebShellResult(output = "pnpm 9.15.0-compatible (PocketCoded Web package manager)")
+    }
+    val subcommand = args.getOrNull(1)?.lowercase().orEmpty()
+    return when (subcommand) {
+        "", "help", "-h", "--help" -> WebShellResult(output = packageManagerHelp("pnpm"))
+        "install", "i", "add" -> packageManagerResult(root, "pnpm", installNpmPackages(root, parseNpmInstallOptions(args.drop(2))))
+        "ci" -> packageManagerResult(root, "pnpm", cleanInstallNpmPackages(root))
+        "update", "up", "upgrade" -> packageManagerResult(root, "pnpm", installNpmPackages(root, parseNpmInstallOptions(args.drop(2))))
+        "uninstall", "remove", "rm", "un" -> packageManagerResult(root, "pnpm", uninstallNpmPackages(root, args.drop(2)))
+        "list", "ls", "la", "ll" -> listNpmPackages(root)
+        "run", "run-script" -> runNpmScript(root, working, args.drop(2))
+        "exec" -> executePackageExecutableCommand(args.drop(2), root, working, installMissing = false, runner = "pnpm exec")
+        "dlx" -> executePackageExecutableCommand(args.drop(2), root, working, installMissing = true, runner = "pnpm dlx")
+        "create" -> executeCreatePackageCommand(args.drop(2), root, working, runner = "pnpm create")
+        "dev", "start", "test", "build", "lint", "preview", "serve" -> runNpmScript(root, working, listOf(subcommand))
+        else -> {
+            when {
+                hasPackageScript(root, subcommand) -> runNpmScript(root, working, listOf(subcommand))
+                else -> WebShellResult(error = "pnpm: unsupported command '$subcommand'. Run pnpm help.")
+            }
+        }
+    }
+}
+
+private fun executeYarnCommand(args: List<String>, root: File, working: File): WebShellResult {
+    if (args.any { it == "--version" || it == "-v" }) {
+        return WebShellResult(output = "yarn 4.5.0-compatible (PocketCoded Web package manager)")
+    }
+    val subcommand = args.getOrNull(1)?.lowercase().orEmpty()
+    return when (subcommand) {
+        "", "install" -> packageManagerResult(root, "yarn", installNpmPackages(root, parseNpmInstallOptions(args.drop(2))))
+        "help", "-h", "--help" -> WebShellResult(output = packageManagerHelp("yarn"))
+        "add" -> packageManagerResult(root, "yarn", installNpmPackages(root, parseNpmInstallOptions(args.drop(2))))
+        "upgrade", "up", "update" -> packageManagerResult(root, "yarn", installNpmPackages(root, parseNpmInstallOptions(args.drop(2))))
+        "remove", "uninstall" -> packageManagerResult(root, "yarn", uninstallNpmPackages(root, args.drop(2)))
+        "list", "why" -> listNpmPackages(root)
+        "run", "run-script" -> runNpmScript(root, working, args.drop(2))
+        "exec" -> executePackageExecutableCommand(args.drop(2), root, working, installMissing = false, runner = "yarn exec")
+        "dlx" -> executePackageExecutableCommand(args.drop(2), root, working, installMissing = true, runner = "yarn dlx")
+        "create" -> executeCreatePackageCommand(args.drop(2), root, working, runner = "yarn create")
+        "dev", "start", "test", "build", "lint", "preview", "serve" -> runNpmScript(root, working, listOf(subcommand))
+        else -> {
+            when {
+                hasPackageScript(root, subcommand) -> runNpmScript(root, working, listOf(subcommand))
+                else -> executePackageExecutableCommand(args.drop(1), root, working, installMissing = false, runner = "yarn")
+            }
+        }
+    }
+}
+
+private fun npmTerminalHelp(): String {
+    return """
+        PocketCoded Web npm support
+
+        Project:
+        - npm init -y
+        - npm install
+        - npm ci
+        - npm install react three @scope/package@1.2.3
+        - npm install -D typescript
+        - npm uninstall react
+        - npm list
+        - pnpm add three
+        - yarn add lodash-es
+
+        Scripts:
+        - npm run
+        - npm run start
+        - npm start
+        - npm test
+        - npm run lint
+        - pnpm dev
+        - yarn build
+
+        Package runners:
+        - npx vite
+        - npx prettier --write index.html
+        - pnpm dlx eslint .
+        - yarn dlx create-vite demo
+
+        Notes:
+        - npm, pnpm, yarn, and npx are built-in compatibility commands backed by PocketCoded Web's package manager.
+        - Packages are downloaded from the npm registry into local node_modules.
+        - Browser/ESM packages can be imported in preview with bare imports such as import * as THREE from "three".
+        - Common Web CLIs are translated to built-in preview, lint, format, and scaffold actions.
+        - Native Node CLIs, postinstall scripts, and binary tools are not executed on Android.
+    """.trimIndent()
+}
+
+private fun packageManagerHelp(manager: String): String {
+    val addCommand = if (manager == "yarn") "yarn add three" else "$manager add three"
+    return """
+        PocketCoded Web $manager support
+
+        Project:
+        - $manager install
+        - $addCommand
+        - $manager remove three
+        - $manager list
+
+        Scripts and tools:
+        - $manager dev
+        - $manager run build
+        - $manager exec vite
+        - $manager dlx prettier --write index.html
+        - $manager create vite demo
+
+        Notes:
+        - $manager is implemented as a built-in compatibility layer over PocketCoded Web's local node_modules.
+        - Browser/ESM packages work best in the live preview.
+    """.trimIndent()
+}
+
+private fun packageRunnerHelp(runner: String): String {
+    return """
+        PocketCoded Web $runner support
+
+        Examples:
+        - $runner vite
+        - $runner prettier --write index.html
+        - $runner eslint .
+        - $runner create-vite demo
+
+        Notes:
+        - Missing packages are downloaded from the npm registry before running.
+        - Common frontend CLIs are handled by built-in preview, lint, format, and scaffold actions.
+        - Native Node-only binaries are detected and reported when Android cannot execute them directly.
+    """.trimIndent()
+}
+
+private fun packageManagerResult(root: File, manager: String, result: WebShellResult): WebShellResult {
+    if (!result.workspaceChanged) return result
+    val lockMessage = runCatching { syncPackageManagerLockfile(root, manager) }.getOrNull().orEmpty()
+    return result.copy(
+        output = listOf(result.output, lockMessage)
+            .filter { it.isNotBlank() }
+            .joinToString("\n"),
+    )
+}
+
+private fun executePackageExecutableCommand(
+    rawArgs: List<String>,
+    root: File,
+    working: File,
+    installMissing: Boolean,
+    runner: String,
+): WebShellResult {
+    val request = parsePackageExecutableRequest(rawArgs)
+        ?: return WebShellResult(error = "$runner: expected a package or executable name")
+    val packageSpec = request.packageSpec
+    val installResult = if (
+        installMissing &&
+        !request.noInstall &&
+        packageSpec != null &&
+        !isBuiltInPackageExecutable(request.command) &&
+        !isNpmPackageInstalled(root, packageSpec.name)
+    ) {
+        installNpmPackages(root, NpmInstallOptions(packages = listOf(packageSpec), noSave = true))
+    } else {
+        WebShellResult()
+    }
+    if (installResult.error.isNotBlank()) {
+        return installResult.copy(error = "$runner: ${installResult.error}")
+    }
+
+    val runResult = runPackageExecutable(
+        command = request.command,
+        args = request.args,
+        root = root,
+        working = working,
+        runner = runner,
+        packageName = packageSpec?.name,
+    )
+    return runResult.copy(
+        output = listOf(
+            "$runner ${listOf(request.command).plus(request.args).joinToString(" ")}",
+            installResult.output,
+            runResult.output,
+        ).filter { it.isNotBlank() }.joinToString("\n"),
+        workspaceChanged = runResult.workspaceChanged || installResult.workspaceChanged,
+    )
+}
+
+private fun executeCreatePackageCommand(
+    rawArgs: List<String>,
+    root: File,
+    working: File,
+    runner: String,
+): WebShellResult {
+    val createTarget = rawArgs.firstOrNull { !it.startsWith("-") }
+        ?: return WebShellResult(error = "$runner: expected a template name, for example '$runner vite my-app'")
+    val rest = rawArgs.dropWhile { it != createTarget }.drop(1)
+    val packageToken = createPackageToken(createTarget)
+    return executePackageExecutableCommand(
+        rawArgs = listOf(packageToken) + rest,
+        root = root,
+        working = working,
+        installMissing = true,
+        runner = runner,
+    )
+}
+
+private fun parsePackageExecutableRequest(rawArgs: List<String>): PackageExecutableRequest? {
+    val packageSpecs = mutableListOf<NpmPackageSpec>()
+    var noInstall = false
+    var commandToken: String? = null
+    var commandArgs = emptyList<String>()
+    var index = 0
+    while (index < rawArgs.size) {
+        val arg = rawArgs[index]
+        when {
+            arg == "-y" || arg == "--yes" -> Unit
+            arg == "--no-install" -> noInstall = true
+            arg == "-p" || arg == "--package" -> {
+                index += 1
+                rawArgs.getOrNull(index)?.let(::parseNpmPackageSpec)?.let(packageSpecs::add)
+            }
+            arg.startsWith("--package=") -> {
+                parseNpmPackageSpec(arg.substringAfter('='))?.let(packageSpecs::add)
+            }
+            arg == "--registry" || arg == "--cache" || arg == "--tag" || arg == "--userconfig" -> index += 1
+            arg.startsWith("--registry=") || arg.startsWith("--cache=") || arg.startsWith("--tag=") -> Unit
+            arg.startsWith("-") -> Unit
+            else -> {
+                commandToken = arg
+                commandArgs = rawArgs.drop(index + 1)
+                break
+            }
+        }
+        index += 1
+    }
+
+    val explicitPackage = packageSpecs.firstOrNull()
+    val inferredPackage = commandToken?.let(::parseNpmPackageSpec)
+    val packageSpec = explicitPackage ?: inferredPackage
+    val command = when {
+        commandToken != null -> inferredPackage?.name?.let(::packageBinaryName) ?: commandToken.orEmpty()
+        explicitPackage != null -> packageBinaryName(explicitPackage.name)
+        else -> return null
+    }
+    return PackageExecutableRequest(
+        command = normalizePackageExecutableName(command),
+        packageSpec = packageSpec,
+        args = commandArgs,
+        noInstall = noInstall,
+    )
+}
+
+private fun createPackageToken(rawTemplate: String): String {
+    val parsed = parseNpmPackageSpec(rawTemplate)
+    val name = parsed?.name ?: rawTemplate.trim().lowercase()
+    val version = parsed?.requestedVersion?.takeIf { it.isNotBlank() && it != "latest" }
+    val createName = when (name) {
+        "vite" -> "create-vite"
+        "react", "react-app" -> "create-react-app"
+        "next", "next-app" -> "create-next-app"
+        "astro" -> "create-astro"
+        else -> if (name.startsWith("create-") || name.contains("/create-")) name else "create-$name"
+    }
+    return if (version == null) createName else "$createName@$version"
+}
+
+private fun runPackageExecutable(
+    command: String,
+    args: List<String>,
+    root: File,
+    working: File,
+    runner: String,
+    packageName: String?,
+): WebShellResult {
+    runKnownPackageExecutable(command, args, root, working, runner)?.let { return it }
+    val localBinary = findLocalPackageBinary(root, command, packageName)
+    return if (localBinary != null) {
+        WebShellResult(
+            error = "$runner: '$command' is installed at ${relativeWorkspacePath(root, localBinary)}, but it requires a desktop Node CLI runtime. PocketCoded Web can run browser packages and common Web tooling through built-in adapters."
+        )
+    } else {
+        WebShellResult(
+            error = "$runner: '$command' is not installed or not supported by the built-in mobile runner."
+        )
+    }
+}
+
+private fun isBuiltInPackageExecutable(command: String): Boolean {
+    return normalizePackageExecutableName(command) in setOf(
+        "vite", "webpack", "webpack-cli", "parcel", "astro", "next", "nuxt",
+        "serve", "http-server", "live-server", "browser-sync", "snowpack",
+        "eslint", "stylelint", "htmlhint", "jshint", "biome", "oxlint",
+        "prettier", "tsc", "typescript", "vue-tsc",
+        "rollup", "esbuild", "babel", "babel-cli", "swc", "tsup",
+        "create-vite", "@vitejs/create-vite", "create-react-app", "create-next-app", "create-astro",
+        "npm", "pnpm", "yarn",
+    )
+}
+
+private fun runKnownPackageExecutable(
+    command: String,
+    args: List<String>,
+    root: File,
+    working: File,
+    runner: String,
+): WebShellResult? {
+    val normalized = normalizePackageExecutableName(command)
+    return when (normalized) {
+        "vite", "webpack", "webpack-cli", "parcel", "astro", "next", "nuxt",
+        "serve", "http-server", "live-server", "browser-sync", "snowpack" -> {
+            WebShellResult(
+                output = "$normalized normally starts a Node dev server. PocketCoded Web is opening its built-in live preview with local node_modules support instead.",
+                openPreview = true,
+            )
+        }
+        "eslint", "stylelint", "htmlhint", "jshint", "biome", "oxlint" -> {
+            WebShellResult(output = auditWebProject(root))
+        }
+        "prettier" -> runPrettierCompatibleCommand(args, root, working)
+        "tsc", "typescript", "vue-tsc" -> {
+            if (args.any { it == "--version" || it == "-v" }) {
+                WebShellResult(output = "TypeScript-compatible checks (PocketCoded Web built-in)")
+            } else {
+                WebShellResult(
+                    output = listOf(
+                        "TypeScript no-emit check handled by PocketCoded Web diagnostics.",
+                        auditWebProject(root),
+                    ).joinToString("\n")
+                )
+            }
+        }
+        "rollup", "esbuild", "babel", "babel-cli", "swc", "tsup" -> {
+            WebShellResult(
+                output = "$normalized build commands are mapped to the live preview pipeline on Android.",
+                openPreview = true,
+            )
+        }
+        "create-vite", "@vitejs/create-vite", "create-react-app", "create-next-app", "create-astro" -> {
+            scaffoldWebStarter(normalized, args, root, working, runner)
+        }
+        "npm" -> executeNpmCommand(listOf("npm") + args, root, working)
+        "pnpm" -> executePnpmCommand(listOf("pnpm") + args, root, working)
+        "yarn" -> executeYarnCommand(listOf("yarn") + args, root, working)
+        else -> null
+    }
+}
+
+private fun runPrettierCompatibleCommand(args: List<String>, root: File, working: File): WebShellResult {
+    if (args.any { it == "--version" || it == "-v" }) {
+        return WebShellResult(output = "Prettier-compatible formatter (PocketCoded Web built-in)")
+    }
+    val write = args.any { it == "--write" || it == "-w" }
+    val targets = editableTargetsFromToolArgs(args, root, working)
+    if (!write) {
+        return WebShellResult(
+            output = "Prettier check completed. Add --write to format ${if (targets.size == 1) targets.first().name else "${targets.size} files"}."
+        )
+    }
+    if (targets.isEmpty()) return WebShellResult(output = "No editable Web files matched.")
+    targets.forEach { target ->
+        target.writeText(WebLanguageServices.format(target, target.name, target.readText()))
+    }
+    return WebShellResult(
+        output = "Formatted ${targets.size} file${if (targets.size == 1) "" else "s"}.",
+        workspaceChanged = true,
+    )
+}
+
+private fun editableTargetsFromToolArgs(args: List<String>, root: File, working: File): List<File> {
+    val pathTokens = args
+        .filterNot { it.startsWith("-") }
+        .filterNot { it == "." || it == "./" }
+        .filterNot { it.contains("=") }
+    val resolved = pathTokens
+        .mapNotNull { token -> resolveTerminalPath(root, working, token) }
+        .flatMap { target ->
+            when {
+                target.isFile && isEditableWebFile(target) -> listOf(target)
+                target.isDirectory -> editableFilesUnder(target)
+                else -> emptyList()
+            }
+        }
+    return (if (resolved.isNotEmpty()) resolved else editableFilesUnder(root))
+        .distinctBy { it.absolutePath }
+        .take(200)
+}
+
+private fun editableFilesUnder(directory: File): List<File> {
+    return directory.walkTopDown()
+        .onEnter { child -> !isProjectIgnoredDirectory(child) }
+        .filter { it.isFile && isEditableWebFile(it) }
+        .toList()
+}
+
+private fun scaffoldWebStarter(
+    command: String,
+    args: List<String>,
+    root: File,
+    working: File,
+    runner: String,
+): WebShellResult {
+    val targetName = args.firstOrNull { !it.startsWith("-") } ?: "."
+    val targetDirectory = resolveTerminalPath(root, working, targetName)
+        ?: return WebShellResult(error = "$runner: target directory must stay inside this project")
+    if (targetDirectory.exists() && targetDirectory.listFiles().orEmpty().isNotEmpty()) {
+        return WebShellResult(error = "$runner: ${relativeWorkspacePath(root, targetDirectory)} is not empty")
+    }
+    targetDirectory.mkdirs()
+
+    val projectName = if (targetName == "." || targetName == "./") root.name else targetDirectory.name
+    val useReact = command == "create-react-app" || args.any { it.contains("react", ignoreCase = true) }
+    File(targetDirectory, "package.json").writeText(scaffoldPackageJson(projectName, useReact))
+    File(targetDirectory, "index.html").writeText(scaffoldIndexHtml(projectName, useReact))
+    File(targetDirectory, "src").mkdirs()
+    File(targetDirectory, "src/style.css").writeText(scaffoldCss())
+    File(targetDirectory, "src/main.${if (useReact) "jsx" else "js"}").writeText(scaffoldMainJs(useReact))
+
+    return WebShellResult(
+        output = buildString {
+            append("Created ").append(relativeWorkspacePath(root, targetDirectory)).append(" with a PocketCoded Web-compatible starter.")
+            if (useReact) append("\nRun npm install, pnpm install, or yarn install before previewing the React template.")
+        },
+        workspaceChanged = true,
+    )
+}
+
+private fun scaffoldPackageJson(projectName: String, useReact: Boolean): String {
+    val scripts = JSONObject()
+        .put("dev", "preview")
+        .put("start", "preview")
+        .put("build", "preview")
+        .put("lint", "lint")
+    val json = JSONObject()
+        .put("name", sanitizeNpmPackageName(projectName))
+        .put("version", "1.0.0")
+        .put("private", true)
+        .put("type", "module")
+        .put("scripts", scripts)
+    if (useReact) {
+        json.put("dependencies", JSONObject().put("react", "^19.0.0").put("react-dom", "^19.0.0"))
+    }
+    return json.toString(2) + "\n"
+}
+
+private fun scaffoldIndexHtml(projectName: String, useReact: Boolean): String {
+    val entryFile = if (useReact) "./src/main.jsx" else "./src/main.js"
+    return """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>${escapeHtml(projectName)}</title>
+            <link rel="stylesheet" href="./src/style.css">
+        </head>
+        <body>
+            <main id="app"></main>
+            <script type="module" src="$entryFile"></script>
+        </body>
+        </html>
+    """.trimIndent() + "\n"
+}
+
+private fun scaffoldCss(): String {
+    return """
+        :root {
+            color-scheme: light dark;
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            background: #f7f7fb;
+            color: #151821;
+        }
+
+        #app {
+            width: min(920px, calc(100vw - 32px));
+        }
+    """.trimIndent() + "\n"
+}
+
+private fun scaffoldMainJs(useReact: Boolean): String {
+    return if (useReact) {
+        """
+            import React from "react";
+            import { createRoot } from "react-dom/client";
+
+            function App() {
+                return <h1>PocketCoded Web React starter</h1>;
+            }
+
+            createRoot(document.getElementById("app")).render(<App />);
+        """.trimIndent() + "\n"
+    } else {
+        """
+            const app = document.getElementById("app");
+
+            app.innerHTML = `
+                <h1>PocketCoded Web starter</h1>
+                <p>Edit src/main.js and press Run Code.</p>
+            `;
+        """.trimIndent() + "\n"
+    }
+}
+
+private fun hasPackageScript(root: File, scriptName: String): Boolean {
+    val packageJson = runCatching { JSONObject(File(root, "package.json").readText()) }.getOrNull()
+    return packageJson?.optJSONObject("scripts")?.has(scriptName) == true
+}
+
+private fun isNpmPackageInstalled(root: File, packageName: String): Boolean {
+    return readInstalledPackageVersion(npmPackageDirectory(root, packageName)) != null
+}
+
+private fun findLocalPackageBinary(root: File, command: String, packageName: String?): File? {
+    val normalizedCommand = normalizePackageExecutableName(command)
+    val packageDirectories = if (packageName != null) {
+        listOf(npmPackageDirectory(root, packageName))
+    } else {
+        installedNpmPackageDirectories(root)
+    }
+    return packageDirectories
+        .asSequence()
+        .flatMap { packageDirectory -> packageBinCommands(packageDirectory).asSequence() }
+        .firstOrNull { (binName, _) -> normalizePackageExecutableName(binName) == normalizedCommand }
+        ?.value
+}
+
+private fun packageBinCommands(packageDirectory: File): Map<String, File> {
+    val packageJson = File(packageDirectory, "package.json")
+    if (!packageJson.isFile) return emptyMap()
+    val json = runCatching { JSONObject(packageJson.readText()) }.getOrNull() ?: return emptyMap()
+    return when (val bin = json.opt("bin")) {
+        is String -> mapOf(packageBinaryName(json.optString("name").ifBlank { packageDirectory.name }) to File(packageDirectory, bin))
+        is JSONObject -> buildMap {
+            bin.keys().forEach { key ->
+                bin.optString(key).takeIf { it.isNotBlank() }?.let { relativePath ->
+                    put(key, File(packageDirectory, relativePath))
+                }
+            }
+        }
+        else -> emptyMap()
+    }
+}
+
+private fun installedNpmPackageDirectories(root: File): List<File> {
+    val nodeModules = File(root, "node_modules")
+    if (!nodeModules.isDirectory) return emptyList()
+    return nodeModules.listFiles().orEmpty().flatMap { entry ->
+        if (entry.name.startsWith("@") && entry.isDirectory) {
+            entry.listFiles().orEmpty().filter { it.isDirectory }
+        } else {
+            listOf(entry).filter { it.isDirectory }
+        }
+    }
+}
+
+private fun packageBinaryName(packageName: String): String {
+    return packageName.substringAfterLast('/').removePrefix("@")
+}
+
+private fun normalizePackageExecutableName(command: String): String {
+    return command
+        .trim()
+        .removeSuffix(".cmd")
+        .removeSuffix(".bin")
+        .removeSuffix(".js")
+        .substringAfterLast('/')
+        .lowercase()
+}
+
+private fun syncPackageManagerLockfile(root: File, manager: String): String {
+    return when (manager) {
+        "pnpm" -> {
+            writePnpmLockfile(root)
+            "Wrote pnpm-lock.yaml"
+        }
+        "yarn" -> {
+            writeYarnLockfile(root)
+            "Wrote yarn.lock"
+        }
+        else -> ""
+    }
+}
+
+private fun writePnpmLockfile(root: File) {
+    val packageJson = runCatching { JSONObject(File(root, "package.json").readText()) }.getOrNull() ?: JSONObject()
+    val installed = installedNpmPackages(root)
+    File(root, "pnpm-lock.yaml").writeText(
+        buildString {
+            append("lockfileVersion: '9.0'\n\n")
+            append("importers:\n")
+            append("  .:\n")
+            appendPnpmDependencySection("dependencies", packageJson, installed)
+            appendPnpmDependencySection("devDependencies", packageJson, installed)
+            append("\npackages:\n")
+            installed.toSortedMap().forEach { (name, version) ->
+                append("  /").append(name).append('@').append(version).append(":\n")
+                append("    resolution: {integrity: pocketcoded-web}\n")
+            }
+        }
+    )
+}
+
+private fun StringBuilder.appendPnpmDependencySection(
+    sectionName: String,
+    packageJson: JSONObject,
+    installed: Map<String, String>,
+) {
+    val dependencies = jsonObjectToStringMap(packageJson.optJSONObject(sectionName))
+    if (dependencies.isEmpty()) return
+    append("    ").append(sectionName).append(":\n")
+    dependencies.toSortedMap().forEach { (name, range) ->
+        append("      ").append(name).append(":\n")
+        append("        specifier: ").append(range).append('\n')
+        append("        version: ").append(installed[name] ?: range).append('\n')
+    }
+}
+
+private fun writeYarnLockfile(root: File) {
+    val packageJson = runCatching { JSONObject(File(root, "package.json").readText()) }.getOrNull() ?: JSONObject()
+    val installed = installedNpmPackages(root)
+    val dependencies = listOf("dependencies", "devDependencies", "optionalDependencies")
+        .flatMap { section -> jsonObjectToStringMap(packageJson.optJSONObject(section)).entries }
+        .distinctBy { it.key }
+        .sortedBy { it.key }
+    File(root, "yarn.lock").writeText(
+        buildString {
+            append("# This file is generated by PocketCoded Web's built-in Yarn-compatible manager.\n\n")
+            dependencies.forEach { (name, range) ->
+                val version = installed[name] ?: range
+                append('"').append(name).append('@').append(range).append('"').append(":\n")
+                append("  version \"").append(version).append("\"\n")
+                append("  resolved \"https://registry.npmjs.org/").append(name).append("/-/").append(name.substringAfterLast('/')).append('-').append(version).append(".tgz\"\n\n")
+            }
+        }
+    )
+}
+
+private fun parseNpmInstallOptions(rawArgs: List<String>): NpmInstallOptions {
+    val packages = mutableListOf<NpmPackageSpec>()
+    var saveDev = false
+    var noSave = false
+    var index = 0
+    while (index < rawArgs.size) {
+        val arg = rawArgs[index]
+        when {
+            arg == "-D" || arg == "--save-dev" || arg == "--dev" -> saveDev = true
+            arg == "-S" || arg == "--save" -> saveDev = false
+            arg == "--no-save" -> noSave = true
+            arg == "--registry" || arg == "--tag" || arg == "--cache" -> index += 1
+            arg.startsWith("--registry=") || arg.startsWith("--tag=") || arg.startsWith("--cache=") -> Unit
+            arg.startsWith("-") -> Unit
+            else -> parseNpmPackageSpec(arg)?.let(packages::add)
+        }
+        index += 1
+    }
+    return NpmInstallOptions(packages = packages, saveDev = saveDev, noSave = noSave)
+}
+
+private fun parseNpmPackageSpec(raw: String): NpmPackageSpec? {
+    val clean = raw.trim().removeSurrounding("\"").removeSurrounding("'")
+    if (clean.isBlank() || clean.startsWith("http://") || clean.startsWith("https://")) return null
+    val atIndex = if (clean.startsWith("@")) clean.indexOf('@', startIndex = 1) else clean.lastIndexOf('@')
+    val name = if (atIndex > 0) clean.substring(0, atIndex) else clean
+    val version = if (atIndex > 0) clean.substring(atIndex + 1).ifBlank { "latest" } else "latest"
+    return NpmPackageSpec(
+        name = name.trim().lowercase(),
+        requestedVersion = version.trim().ifBlank { "latest" },
+    ).takeIf { isValidNpmPackageName(it.name) }
+}
+
+private fun createOrUpdatePackageJson(root: File, force: Boolean): WebShellResult {
+    val packageFile = File(root, "package.json")
+    if (packageFile.exists() && !force) {
+        return WebShellResult(output = "package.json already exists. Use npm init -y to refresh defaults.")
+    }
+    val packageJson = if (packageFile.exists()) {
+        runCatching { JSONObject(packageFile.readText()) }.getOrDefault(JSONObject())
+    } else {
+        JSONObject()
+    }
+    applyDefaultPackageJsonFields(packageJson, root.name)
+    packageFile.writeText(packageJson.toString(2) + "\n")
+    return WebShellResult(output = "Wrote package.json", workspaceChanged = true)
+}
+
+private fun installNpmPackages(root: File, options: NpmInstallOptions): WebShellResult {
+    return runCatching {
+        val packageFile = File(root, "package.json")
+        val packageJson = loadOrCreatePackageJson(root)
+        val requestedPackages = if (options.packages.isNotEmpty()) {
+            options.packages
+        } else {
+            packageJsonDependencySpecs(packageJson)
+        }
+        if (requestedPackages.isEmpty()) {
+            return WebShellResult(output = "No dependencies to install. Try npm install <package>.", workspaceChanged = false)
+        }
+
+        val state = NpmInstallState(rootDirectory = root)
+        requestedPackages.forEach { spec ->
+            installNpmPackage(spec = spec, state = state, depth = 0)
+        }
+
+        if (!options.noSave && options.packages.isNotEmpty()) {
+            val dependencySectionName = if (options.saveDev) "devDependencies" else "dependencies"
+            val dependencySection = packageJson.optJSONObject(dependencySectionName)
+                ?: JSONObject().also { packageJson.put(dependencySectionName, it) }
+            requestedPackages.forEach { spec ->
+                state.installedByName[spec.name]?.let { version ->
+                    dependencySection.put(spec.name, "^$version")
+                }
+            }
+        }
+
+        packageFile.writeText(packageJson.toString(2) + "\n")
+        writeNpmPackageLock(root, packageJson, state.lockPackages)
+
+        val summary = buildString {
+            append("Installed ").append(state.installedByName.size).append(" package")
+            append(if (state.installedByName.size == 1) "." else "s.")
+            if (state.messages.isNotEmpty()) {
+                append("\n").append(state.messages.joinToString("\n"))
+            }
+        }
+        WebShellResult(output = summary, workspaceChanged = true)
+    }.getOrElse { error ->
+        WebShellResult(error = "npm install failed: ${error.message ?: "unknown error"}")
+    }
+}
+
+private fun cleanInstallNpmPackages(root: File): WebShellResult {
+    val packageFile = File(root, "package.json")
+    if (!packageFile.isFile) {
+        return WebShellResult(error = "npm ci: package.json is missing")
+    }
+    val packageJson = runCatching { JSONObject(packageFile.readText()) }.getOrNull()
+        ?: return WebShellResult(error = "npm ci: package.json is not valid JSON")
+    if (packageJsonDependencySpecs(packageJson).isEmpty()) {
+        return WebShellResult(output = "No dependencies to install.", workspaceChanged = false)
+    }
+    val nodeModules = File(root, "node_modules").canonicalFile
+    if (isSameOrInside(root.canonicalFile, nodeModules) && nodeModules.isDirectory) {
+        nodeModules.deleteRecursively()
+    }
+    File(root, "package-lock.json").takeIf { it.isFile }?.delete()
+    return installNpmPackages(root, NpmInstallOptions(packages = emptyList()))
+}
+
+private fun installNpmPackage(
+    spec: NpmPackageSpec,
+    state: NpmInstallState,
+    depth: Int,
+): NpmResolvedPackage? {
+    if (depth > NPM_MAX_DEPENDENCY_DEPTH) {
+        state.messages += "warning: skipped deep dependency ${spec.name}@${spec.requestedVersion}"
+        return null
+    }
+    if (state.installCount >= NPM_MAX_INSTALL_PACKAGES) {
+        state.messages += "warning: package limit reached; skipped ${spec.name}@${spec.requestedVersion}"
+        return null
+    }
+
+    val metadata = npmPackageMetadata(spec.name, state)
+    val version = resolveNpmVersion(metadata, spec.requestedVersion)
+        ?: error("Could not resolve ${spec.name}@${spec.requestedVersion}")
+    val existingVersion = state.installedByName[spec.name]
+    if (existingVersion != null) {
+        if (existingVersion != version) {
+            state.messages += "warning: ${spec.name} already installed as $existingVersion; nested $version is not supported."
+        }
+        return null
+    }
+
+    val versionJson = metadata.optJSONObject("versions")?.optJSONObject(version)
+        ?: error("Registry metadata for ${spec.name}@$version is incomplete.")
+    val dist = versionJson.optJSONObject("dist") ?: error("${spec.name}@$version has no downloadable tarball.")
+    val tarballUrl = dist.optString("tarball").ifBlank { error("${spec.name}@$version has no tarball URL.") }
+    val dependencies = jsonObjectToStringMap(versionJson.optJSONObject("dependencies"))
+    val resolved = NpmResolvedPackage(
+        name = spec.name,
+        version = version,
+        tarballUrl = tarballUrl,
+        integrity = dist.optString("integrity").ifBlank { dist.optString("shasum") },
+        dependencies = dependencies,
+    )
+
+    state.installCount += 1
+    state.installedByName[spec.name] = version
+    extractNpmPackageTarball(
+        tarballUrl = tarballUrl,
+        targetDirectory = npmPackageDirectory(state.rootDirectory, spec.name),
+        projectRoot = state.rootDirectory,
+    )
+    addNpmLockPackage(state.lockPackages, resolved)
+    state.messages += "+ ${spec.name}@$version"
+
+    dependencies.forEach { (dependencyName, range) ->
+        if (isValidNpmPackageName(dependencyName)) {
+            installNpmPackage(NpmPackageSpec(dependencyName, range), state, depth + 1)
+        }
+    }
+    return resolved
+}
+
+private fun uninstallNpmPackages(root: File, rawArgs: List<String>): WebShellResult {
+    val specs = rawArgs
+        .filterNot { it.startsWith("-") }
+        .mapNotNull(::parseNpmPackageSpec)
+    if (specs.isEmpty()) return WebShellResult(error = "npm uninstall: expected a package name")
+
+    val packageJson = loadOrCreatePackageJson(root)
+    val removed = mutableListOf<String>()
+    specs.forEach { spec ->
+        val target = npmPackageDirectory(root, spec.name)
+        if (safeDeleteNpmPackageDirectory(root, target)) removed += spec.name
+        packageJson.optJSONObject("dependencies")?.remove(spec.name)
+        packageJson.optJSONObject("devDependencies")?.remove(spec.name)
+        packageJson.optJSONObject("optionalDependencies")?.remove(spec.name)
+    }
+    File(root, "package.json").writeText(packageJson.toString(2) + "\n")
+
+    val lockFile = File(root, "package-lock.json")
+    if (lockFile.isFile) {
+        runCatching {
+            val lock = JSONObject(lockFile.readText())
+            val packages = lock.optJSONObject("packages") ?: JSONObject()
+            specs.forEach { packages.remove("node_modules/${it.name}") }
+            lock.put("packages", packages)
+            lockFile.writeText(lock.toString(2) + "\n")
+        }
+    }
+
+    return WebShellResult(
+        output = if (removed.isEmpty()) "No installed packages matched." else "Removed ${removed.joinToString(", ")}",
+        workspaceChanged = true,
+    )
+}
+
+private fun listNpmPackages(root: File): WebShellResult {
+    val packageJson = runCatching { JSONObject(File(root, "package.json").readText()) }.getOrNull()
+    val requested = packageJson?.let(::packageJsonDependencySpecs).orEmpty()
+    val installed = installedNpmPackages(root)
+    if (requested.isEmpty() && installed.isEmpty()) {
+        return WebShellResult(output = "No npm packages installed.")
+    }
+
+    val lines = mutableListOf("${sanitizeNpmPackageName(root.name)}")
+    requested.forEach { spec ->
+        val version = installed[spec.name]
+        lines += if (version == null) {
+            "`-- ${spec.name}@${spec.requestedVersion} missing"
+        } else {
+            "`-- ${spec.name}@$version"
+        }
+    }
+    installed
+        .filterKeys { installedName -> requested.none { it.name == installedName } }
+        .toSortedMap()
+        .forEach { (name, version) -> lines += "`-- $name@$version extraneous" }
+    return WebShellResult(output = lines.joinToString("\n"))
+}
+
+private fun runNpmScript(root: File, working: File, rawArgs: List<String>): WebShellResult {
+    val scriptName = rawArgs.firstOrNull()?.takeIf { it.isNotBlank() }
+        ?: return WebShellResult(output = npmScriptsText(root))
+    val packageJson = runCatching { JSONObject(File(root, "package.json").readText()) }.getOrNull()
+        ?: return WebShellResult(error = "npm run: package.json is missing")
+    val scripts = packageJson.optJSONObject("scripts") ?: return WebShellResult(error = "npm run: no scripts defined")
+    val script = scripts.optString(scriptName).ifBlank {
+        return WebShellResult(error = "npm run: missing script '$scriptName'")
+    }
+    return runSupportedNpmScript(scriptName, script, root, working)
+}
+
+private fun runSupportedNpmScript(
+    scriptName: String,
+    script: String,
+    root: File,
+    working: File,
+): WebShellResult {
+    val command = script.trim()
+    val lower = command.lowercase()
+    val prefix = "> $scriptName\n> $command"
+    val delegated = when {
+        lower == "preview" || lower == "run" || lower == "serve" ||
+                lower.startsWith("preview ") || lower.startsWith("run ") || lower.startsWith("serve ") -> {
+            WebShellResult(output = "Opening responsive Web preview.", openPreview = true)
+        }
+        lower == "lint" || lower == "check" || lower == "validate" -> {
+            WebShellResult(output = auditWebProject(root))
+        }
+        lower.startsWith("format ") -> executeWebShellCommand(command, root, working)
+        lower.startsWith("node ") || lower.startsWith("js ") -> executeWebShellCommand(command, root, working)
+        lower.contains("vite") || lower.contains("webpack") || lower.contains("parcel") ||
+                lower.contains("next dev") || lower.contains("astro dev") -> {
+            WebShellResult(
+                output = "This script expects a desktop Node dev server. Opening PocketCoded Web preview with local node_modules instead.",
+                openPreview = true,
+            )
+        }
+        else -> WebShellResult(
+            error = "script '$scriptName' uses an external Node CLI that is not bundled on Android: $command"
+        )
+    }
+    return delegated.copy(
+        output = listOf(prefix, delegated.output).filter { it.isNotBlank() }.joinToString("\n"),
+    )
+}
+
+private fun npmScriptsText(root: File): String {
+    val packageJson = runCatching { JSONObject(File(root, "package.json").readText()) }.getOrNull()
+        ?: return "No package.json. Run npm init -y."
+    val scripts = packageJson.optJSONObject("scripts") ?: return "No scripts defined."
+    if (scripts.length() == 0) return "No scripts defined."
+    return buildString {
+        append("Scripts\n")
+        scripts.keys().asSequence().sorted().forEach { name ->
+            append("- ").append(name).append(": ").append(scripts.optString(name)).append('\n')
+        }
+    }.trimEnd()
+}
+
+private fun viewNpmPackage(rawArgs: List<String>): WebShellResult {
+    val spec = rawArgs.firstOrNull()?.let(::parseNpmPackageSpec)
+        ?: return WebShellResult(error = "npm view: expected a package name")
+    return runCatching {
+        val metadata = npmPackageMetadata(spec.name, NpmInstallState(rootDirectory = File(".")))
+        val latest = metadata.optJSONObject("dist-tags")?.optString("latest").orEmpty()
+        val version = resolveNpmVersion(metadata, spec.requestedVersion) ?: latest
+        val versionJson = metadata.optJSONObject("versions")?.optJSONObject(version)
+        val dependencies = jsonObjectToStringMap(versionJson?.optJSONObject("dependencies"))
+        WebShellResult(
+            output = buildString {
+                append(spec.name).append('@').append(version.ifBlank { latest }).append('\n')
+                metadata.optString("description").takeIf { it.isNotBlank() }?.let { append(it).append('\n') }
+                if (latest.isNotBlank()) append("latest: ").append(latest).append('\n')
+                append("dependencies: ").append(dependencies.size)
+            }
+        )
+    }.getOrElse { error ->
+        WebShellResult(error = "npm view failed: ${error.message ?: "unknown error"}")
+    }
+}
+
+private fun loadOrCreatePackageJson(root: File): JSONObject {
+    val packageFile = File(root, "package.json")
+    val packageJson = if (packageFile.isFile) {
+        runCatching { JSONObject(packageFile.readText()) }.getOrDefault(JSONObject())
+    } else {
+        JSONObject()
+    }
+    applyDefaultPackageJsonFields(packageJson, root.name)
+    if (!packageFile.exists()) packageFile.writeText(packageJson.toString(2) + "\n")
+    return packageJson
+}
+
+private fun applyDefaultPackageJsonFields(packageJson: JSONObject, projectName: String) {
+    if (!packageJson.has("name")) packageJson.put("name", sanitizeNpmPackageName(projectName))
+    if (!packageJson.has("version")) packageJson.put("version", "1.0.0")
+    if (!packageJson.has("private")) packageJson.put("private", true)
+    if (!packageJson.has("type")) packageJson.put("type", "module")
+    if (!packageJson.has("scripts")) {
+        packageJson.put(
+            "scripts",
+            JSONObject()
+                .put("start", "preview")
+                .put("dev", "preview")
+                .put("build", "preview")
+                .put("lint", "lint")
+                .put("test", "lint"),
+        )
+    }
+}
+
+private fun packageJsonDependencySpecs(packageJson: JSONObject): List<NpmPackageSpec> {
+    return listOf("dependencies", "devDependencies", "optionalDependencies")
+        .flatMap { sectionName ->
+            jsonObjectToStringMap(packageJson.optJSONObject(sectionName))
+                .mapNotNull { (name, version) ->
+                    if (isValidNpmPackageName(name)) NpmPackageSpec(name, version.ifBlank { "latest" }) else null
+                }
+        }
+        .distinctBy { it.name }
+}
+
+private fun npmPackageMetadata(name: String, state: NpmInstallState): JSONObject {
+    state.metadataCache[name]?.let { return it }
+    val encodedName = URLEncoder.encode(name, Charsets.UTF_8.name()).replace("+", "%20")
+    val metadata = JSONObject(httpGetText("$NPM_REGISTRY_URL/$encodedName"))
+    state.metadataCache[name] = metadata
+    return metadata
+}
+
+private fun resolveNpmVersion(metadata: JSONObject, requestedRange: String): String? {
+    val versions = metadata.optJSONObject("versions") ?: return null
+    val tags = metadata.optJSONObject("dist-tags")
+    val cleanRange = requestedRange
+        .trim()
+        .removePrefix("npm:")
+        .substringBefore("||")
+        .trim()
+        .ifBlank { "latest" }
+    tags?.optString(cleanRange)?.takeIf { it.isNotBlank() }?.let { return it }
+    if (cleanRange == "latest" || cleanRange == "*" || cleanRange == "x") {
+        return tags?.optString("latest")?.takeIf { it.isNotBlank() } ?: newestNpmVersion(versions)
+    }
+    versions.optJSONObject(cleanRange)?.let { return cleanRange }
+
+    val range = cleanRange
+        .replace(Regex("""[<>=]"""), " ")
+        .trim()
+        .split(Regex("""\s+"""))
+        .firstOrNull()
+        .orEmpty()
+    val base = parseSemver(range.trimStart('^', '~')) ?: return tags?.optString("latest").takeIf { !it.isNullOrBlank() }
+    val matcher: (Semver) -> Boolean = when {
+        cleanRange.startsWith("^") -> { version ->
+            version >= base && if (base.major == 0) {
+                version.major == 0 && version.minor == base.minor
+            } else {
+                version.major == base.major
+            }
+        }
+        cleanRange.startsWith("~") -> { version ->
+            version >= base && version.major == base.major && version.minor == base.minor
+        }
+        cleanRange.startsWith(">=") -> { version -> version >= base }
+        else -> { version -> version >= base && version.major == base.major }
+    }
+    return versions.keys()
+        .asSequence()
+        .filterNot { '-' in it && '-' !in cleanRange }
+        .mapNotNull { version -> parseSemver(version)?.let { it to version } }
+        .filter { (semver, _) -> matcher(semver) }
+        .maxByOrNull { it.first }
+        ?.second
+}
+
+private fun newestNpmVersion(versions: JSONObject): String? {
+    return versions.keys()
+        .asSequence()
+        .filterNot { '-' in it }
+        .mapNotNull { version -> parseSemver(version)?.let { it to version } }
+        .maxByOrNull { it.first }
+        ?.second
+}
+
+private fun parseSemver(version: String): Semver? {
+    val match = Regex("""^(\d+)\.(\d+)\.(\d+)""").find(version.trim()) ?: return null
+    return Semver(
+        major = match.groupValues[1].toIntOrNull() ?: return null,
+        minor = match.groupValues[2].toIntOrNull() ?: return null,
+        patch = match.groupValues[3].toIntOrNull() ?: return null,
+    )
+}
+
+private fun httpGetText(url: String): String {
+    val connection = openNpmHttpConnection(url)
+    val status = connection.responseCode
+    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+    val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+    if (status !in 200..299) error("HTTP $status ${connection.responseMessage.orEmpty()} $response")
+    return response
+}
+
+private fun openNpmHttpConnection(url: String): HttpURLConnection {
+    return (URL(url).openConnection() as HttpURLConnection).apply {
+        requestMethod = "GET"
+        connectTimeout = 20_000
+        readTimeout = 90_000
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("User-Agent", "PocketCodedWeb/npm-compatible")
+    }
+}
+
+private fun extractNpmPackageTarball(
+    tarballUrl: String,
+    targetDirectory: File,
+    projectRoot: File,
+) {
+    val nodeModules = File(projectRoot, "node_modules").canonicalFile.apply { mkdirs() }
+    val target = targetDirectory.canonicalFile
+    if (!isSameOrInside(nodeModules, target)) error("Refusing to install outside node_modules.")
+
+    val connection = openNpmHttpConnection(tarballUrl)
+    val length = connection.contentLengthLong
+    if (length > NPM_MAX_PACKAGE_DOWNLOAD_BYTES) {
+        error("Package is too large for mobile install (${length / 1_000_000} MB).")
+    }
+    if (connection.responseCode !in 200..299) {
+        error("Download failed with HTTP ${connection.responseCode}.")
+    }
+
+    target.deleteRecursively()
+    target.mkdirs()
+    GZIPInputStream(BufferedInputStream(connection.inputStream)).use { input ->
+        extractTarStream(input, target)
+    }
+}
+
+private fun extractTarStream(input: InputStream, targetDirectory: File): Int {
+    val header = ByteArray(512)
+    var extractedFiles = 0
+    var extractedBytes = 0L
+    while (readTarHeader(input, header)) {
+        val rawName = tarString(header, 0, 100)
+        val prefix = tarString(header, 345, 155)
+        val fullName = listOf(prefix, rawName)
+            .filter { it.isNotBlank() }
+            .joinToString("/")
+            .replace('\\', '/')
+        val relativeName = fullName
+            .removePrefix("package/")
+            .trimStart('/')
+        val size = tarOctal(header, 124, 12)
+        val typeFlag = header[156].toInt().toChar()
+        val padding = (512 - (size % 512)) % 512
+
+        if (relativeName.isBlank()) {
+            skipFully(input, size + padding)
+            continue
+        }
+        extractedBytes += size
+        if (extractedBytes > NPM_MAX_PACKAGE_DOWNLOAD_BYTES) {
+            error("Extracted package is too large for mobile install.")
+        }
+
+        val target = File(targetDirectory, relativeName).canonicalFile
+        if (!isSameOrInside(targetDirectory, target)) {
+            skipFully(input, size + padding)
+            continue
+        }
+
+        when (typeFlag) {
+            '0', '\u0000' -> {
+                target.parentFile?.mkdirs()
+                FileOutputStream(target).use { output -> copyExactly(input, output, size) }
+                skipFully(input, padding)
+                extractedFiles += 1
+            }
+            '5' -> {
+                target.mkdirs()
+                skipFully(input, size + padding)
+            }
+            else -> skipFully(input, size + padding)
+        }
+    }
+    return extractedFiles
+}
+
+private fun readTarHeader(input: InputStream, header: ByteArray): Boolean {
+    var offset = 0
+    while (offset < header.size) {
+        val read = input.read(header, offset, header.size - offset)
+        if (read < 0) return false
+        offset += read
+    }
+    return header.any { it.toInt() != 0 }
+}
+
+private fun tarString(header: ByteArray, offset: Int, length: Int): String {
+    val end = (offset until offset + length)
+        .firstOrNull { header[it].toInt() == 0 }
+        ?: (offset + length)
+    return header.copyOfRange(offset, end).toString(Charsets.UTF_8).trim()
+}
+
+private fun tarOctal(header: ByteArray, offset: Int, length: Int): Long {
+    return tarString(header, offset, length)
+        .trim()
+        .takeWhile { it in '0'..'7' }
+        .fold(0L) { total, char -> total * 8 + (char - '0') }
+}
+
+private fun copyExactly(input: InputStream, output: FileOutputStream, byteCount: Long) {
+    val buffer = ByteArray(16_384)
+    var remaining = byteCount
+    while (remaining > 0) {
+        val read = input.read(buffer, 0, min(buffer.size.toLong(), remaining).toInt())
+        if (read < 0) error("Unexpected end of tarball.")
+        output.write(buffer, 0, read)
+        remaining -= read
+    }
+}
+
+private fun skipFully(input: InputStream, byteCount: Long) {
+    var remaining = byteCount
+    val buffer = ByteArray(8_192)
+    while (remaining > 0) {
+        val skipped = input.skip(remaining)
+        if (skipped > 0) {
+            remaining -= skipped
+        } else {
+            val read = input.read(buffer, 0, min(buffer.size.toLong(), remaining).toInt())
+            if (read < 0) return
+            remaining -= read
+        }
+    }
+}
+
+private fun addNpmLockPackage(lockPackages: JSONObject, resolved: NpmResolvedPackage) {
+    val entry = JSONObject()
+        .put("version", resolved.version)
+        .put("resolved", resolved.tarballUrl)
+    if (resolved.integrity.isNotBlank()) entry.put("integrity", resolved.integrity)
+    if (resolved.dependencies.isNotEmpty()) {
+        entry.put("dependencies", stringMapToJson(resolved.dependencies))
+    }
+    lockPackages.put("node_modules/${resolved.name}", entry)
+}
+
+private fun writeNpmPackageLock(root: File, packageJson: JSONObject, lockPackages: JSONObject) {
+    val rootEntry = JSONObject()
+        .put("name", packageJson.optString("name").ifBlank { sanitizeNpmPackageName(root.name) })
+        .put("version", packageJson.optString("version").ifBlank { "1.0.0" })
+    packageJson.optJSONObject("dependencies")?.takeIf { it.length() > 0 }?.let {
+        rootEntry.put("dependencies", JSONObject(it.toString()))
+    }
+    packageJson.optJSONObject("devDependencies")?.takeIf { it.length() > 0 }?.let {
+        rootEntry.put("devDependencies", JSONObject(it.toString()))
+    }
+    lockPackages.put("", rootEntry)
+    val lockJson = JSONObject()
+        .put("name", rootEntry.optString("name"))
+        .put("version", rootEntry.optString("version"))
+        .put("lockfileVersion", 3)
+        .put("requires", true)
+        .put("packages", lockPackages)
+    File(root, "package-lock.json").writeText(lockJson.toString(2) + "\n")
+}
+
+private fun npmPackageDirectory(root: File, packageName: String): File {
+    return File(root, "node_modules/${packageName.replace('/', File.separatorChar)}")
+}
+
+private fun safeDeleteNpmPackageDirectory(root: File, target: File): Boolean {
+    val nodeModules = File(root, "node_modules").canonicalFile
+    val canonicalTarget = runCatching { target.canonicalFile }.getOrNull() ?: return false
+    if (!isSameOrInside(nodeModules, canonicalTarget)) return false
+    return canonicalTarget.exists() && canonicalTarget.deleteRecursively()
+}
+
+private fun installedNpmPackages(root: File): Map<String, String> {
+    val nodeModules = File(root, "node_modules")
+    if (!nodeModules.isDirectory) return emptyMap()
+    val installed = mutableMapOf<String, String>()
+    nodeModules.listFiles().orEmpty().forEach { entry ->
+        if (entry.name.startsWith("@") && entry.isDirectory) {
+            entry.listFiles().orEmpty().forEach { scopedPackage ->
+                readInstalledPackageVersion(scopedPackage)?.let { version ->
+                    installed["${entry.name}/${scopedPackage.name}"] = version
+                }
+            }
+        } else {
+            readInstalledPackageVersion(entry)?.let { version ->
+                installed[entry.name] = version
+            }
+        }
+    }
+    return installed
+}
+
+private fun readInstalledPackageVersion(directory: File): String? {
+    val packageJson = File(directory, "package.json")
+    if (!packageJson.isFile) return null
+    return runCatching { JSONObject(packageJson.readText()).optString("version") }
+        .getOrNull()
+        ?.takeIf { it.isNotBlank() }
+}
+
+private fun jsonObjectToStringMap(json: JSONObject?): Map<String, String> {
+    json ?: return emptyMap()
+    return buildMap {
+        json.keys().forEach { key ->
+            val value = json.optString(key).takeIf { it.isNotBlank() } ?: return@forEach
+            put(key, value)
+        }
+    }
+}
+
+private fun stringMapToJson(values: Map<String, String>): JSONObject {
+    val json = JSONObject()
+    values.toSortedMap().forEach { (key, value) -> json.put(key, value) }
+    return json
+}
+
+private fun isValidNpmPackageName(name: String): Boolean {
+    return Regex("""^(?:@[a-z0-9][a-z0-9_.-]*/)?[a-z0-9][a-z0-9_.-]*$""").matches(name)
+}
+
+private fun sanitizeNpmPackageName(raw: String): String {
+    return raw
+        .trim()
+        .lowercase()
+        .replace(Regex("""[^a-z0-9_.-]+"""), "-")
+        .trim('-', '.', '_')
+        .ifBlank { "pocketcoded-web-project" }
+        .take(80)
 }
 
 private fun appendShellResult(result: WebShellResult): String {
@@ -7318,9 +9101,10 @@ private fun terminalDisplayText(
 
 internal fun estimatedLongestLineLength(text: String, cap: Int): Int {
     if (text.isEmpty()) return 0
+    val scanText = if (text.length > 5000) text.takeLast(5000) else text
     var longest = 0
     var current = 0
-    text.forEach { char ->
+    scanText.forEach { char ->
         if (char == '\n') {
             if (current > longest) longest = current
             current = 0
@@ -7399,7 +9183,7 @@ private fun auditWebFiles(root: File, files: List<WebFile>, includeOkMessage: Bo
     files.forEach { file ->
         val text = file.content
         val relativeFile = relativeWorkspacePath(root, File(file.filePath))
-        inspectWebSource(file.name, text).forEach { diagnostic ->
+        WebLanguageServices.diagnostics(File(file.filePath), file.name, text).forEach { diagnostic ->
             messages += "${diagnostic.severity}: $relativeFile:${diagnostic.line}:${diagnostic.column}: ${diagnostic.message}"
         }
         when (fileExtension(file.name)) {
@@ -7409,9 +9193,7 @@ private fun auditWebFiles(root: File, files: List<WebFile>, includeOkMessage: Bo
                 }
                 Regex("""(?:href|src)=["']([^"']+)["']""").findAll(text).forEach { match ->
                     val ref = match.groupValues[1]
-                    if (isRemotePreviewReference(ref)) {
-                        messages += "warning: $relativeFile: external preview dependency is blocked offline: $ref"
-                    } else if (isLocalPreviewReference(ref)) {
+                    if (isLocalPreviewReference(ref)) {
                         val target = resolvePreviewFile(root, File(file.filePath), ref)
                         if (target == null) {
                             messages += "error: $relativeFile: missing linked file $ref"
@@ -7419,15 +9201,13 @@ private fun auditWebFiles(root: File, files: List<WebFile>, includeOkMessage: Bo
                     }
                 }
             }
-            "css", "js", "mjs", "cjs", "jsx" -> {
+            "css", "js", "mjs", "cjs", "jsx", "ts", "tsx" -> {
                 val balance = braceBalance(text)
                 if (balance != 0) messages += "warning: $relativeFile: brace balance is $balance"
                 if (fileExtension(file.name) == "css") {
                     Regex("""url\(\s*(['"]?)(.*?)\1\s*\)""").findAll(text).forEach { match ->
                         val ref = match.groupValues[2].trim()
-                        if (isRemotePreviewReference(ref)) {
-                            messages += "warning: $relativeFile: external CSS asset is blocked offline: $ref"
-                        } else if (isLocalPreviewReference(ref) && resolvePreviewFile(root, File(file.filePath), ref) == null) {
+                        if (isLocalPreviewReference(ref) && resolvePreviewFile(root, File(file.filePath), ref) == null) {
                             messages += "error: $relativeFile: missing CSS asset $ref"
                         }
                     }
@@ -7439,9 +9219,6 @@ private fun auditWebFiles(root: File, files: List<WebFile>, includeOkMessage: Bo
                             ?.trim()
                             .orEmpty()
                         when {
-                            isRemotePreviewReference(specifier) -> {
-                                messages += "warning: $relativeFile: external JavaScript import is blocked offline: $specifier"
-                            }
                             isBareImportSpecifier(specifier) && localEsmUrlForSpecifier(root, specifier) == null -> {
                                 messages += "warning: $relativeFile: package '$specifier' is not available offline. Add it under node_modules/, libs/, vendor/, or assets/."
                             }
@@ -8125,7 +9902,11 @@ private fun defaultContentForFile(name: String, projectName: String): String = w
     in htmlFileExtensions -> defaultIndexHtml(projectName)
     in cssFileExtensions -> defaultCss()
     in javascriptFileExtensions -> defaultJs()
-    "json" -> "{\n  \"name\": \"${projectName.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')}\"\n}\n"
+    "json" -> if (name.equals("package.json", ignoreCase = true)) {
+        defaultPackageJson(projectName)
+    } else {
+        "{\n  \"name\": \"${sanitizeNpmPackageName(projectName)}\"\n}\n"
+    }
     "svg" -> "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\">\n    <rect width=\"100\" height=\"100\" fill=\"#426bde\"/>\n</svg>\n"
     else -> ""
 }
@@ -8190,6 +9971,12 @@ private fun defaultJs(): String = """
     });
 """.trimIndent() + "\n"
 
+private fun defaultPackageJson(projectName: String): String {
+    val json = JSONObject()
+    applyDefaultPackageJsonFields(json, projectName)
+    return json.toString(2) + "\n"
+}
+
 private fun buildExplorerEntries(
     rootDirectory: File,
     files: List<WebFile>,
@@ -8248,6 +10035,8 @@ private fun fileIcon(name: String) = when (fileExtension(name)) {
 private fun fileColor(name: String, palette: WebPalette): Color = when (fileExtension(name)) {
     in htmlFileExtensions -> Color(0xFFE86F3A)
     in cssFileExtensions -> Color(0xFF3A8DFF)
+    "ts", "tsx" -> Color(0xFF3178C6)
+    "jsx" -> Color(0xFF61DAFB)
     in javascriptFileExtensions -> Color(0xFFF7D84A)
     "json" -> palette.warning
     "svg" -> Color(0xFFFF9A35)
