@@ -3,95 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
   <meta name="description" content="Privacy Policy for the PocketCodedWeb Android application.">
   <title>Privacy Policy - PocketCodedWeb</title>
-  <style>
-    :root {
-      color-scheme: light dark;
-      --background: #f7f9fc;
-      --surface: #ffffff;
-      --text: #172033;
-      --muted: #586579;
-      --border: #dce3ee;
-      --accent: #5c55f5;
-      --accent-soft: #eeedff;
-    }
-
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --background: #071426;
-        --surface: #0d2038;
-        --text: #f5f7fb;
-        --muted: #b8c4d6;
-        --border: #294463;
-        --accent: #9d8cff;
-        --accent-soft: #241f4f;
-      }
-    }
-
-    * { box-sizing: border-box; }
-
-    body {
-      margin: 0;
-      background: var(--background);
-      color: var(--text);
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.65;
-    }
-
-    main {
-      width: min(860px, calc(100% - 32px));
-      margin: 40px auto;
-      padding: clamp(24px, 5vw, 56px);
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-    }
-
-    h1, h2 { line-height: 1.25; }
-    h1 { margin: 0 0 8px; font-size: clamp(2rem, 5vw, 3rem); }
-    h2 { margin: 36px 0 12px; font-size: 1.35rem; }
-    p, li { color: var(--muted); }
-    strong { color: var(--text); }
-    ul { padding-left: 24px; }
-    li + li { margin-top: 8px; }
-    a { color: var(--accent); }
-
-    .eyebrow {
-      margin: 0;
-      color: var(--accent);
-      font-weight: 700;
-      letter-spacing: 0;
-    }
-
-    .summary {
-      margin: 28px 0;
-      padding: 18px 20px;
-      background: var(--accent-soft);
-      border-left: 4px solid var(--accent);
-      border-radius: 6px;
-    }
-
-    footer {
-      margin-top: 44px;
-      padding-top: 20px;
-      border-top: 1px solid var(--border);
-      color: var(--muted);
-    }
-  </style>
+  <link rel="stylesheet" href="policy.css">
 </head>
 <body>
   <main>
     <p class="eyebrow">PocketCodedWeb</p>
     <h1>Privacy Policy</h1>
-    <p><strong>Effective date:</strong> June 15, 2026</p>
+    <p><strong>Effective date:</strong> July 6, 2026</p>
+
+    <nav aria-label="Policy navigation">
+      <a href="index.html">Policies</a>
+      <a href="account-deletion.html">Data deletion</a>
+      <a href="terms-of-service.html">Terms</a>
+    </nav>
 
     <div class="summary">
-      PocketCodedWeb is a mobile Python development environment. Your projects, source code,
-      terminal history, Git repositories, and SSH keys are stored locally on your device and
-      are not automatically uploaded to PocketCodedWeb. Account information is processed using
-      Google Firebase so that you can sign in and manage your account.
+      PocketCodedWeb is a mobile web development environment. Most project data, including source
+      code, terminal history, imported files, SSH keys, and personal Gemini API keys, is stored on
+      your device. Account, trial, billing status, and limited service data may be processed through
+      Firebase and Google Play so the app can provide sign-in, verification, Premium access, and
+      abuse prevention.
     </div>
 
     <h2>1. Who we are</h2>
@@ -101,161 +34,136 @@
       <a href="mailto:Slimkheli2@gmail.com">Slimkheli2@gmail.com</a>.
     </p>
 
-    <h2>2. Information we collect and process</h2>
-    <p><strong>Account and profile information.</strong> When you register or sign in, we process:</p>
-    <ul>
-      <li>Your name or display name;</li>
-      <li>Your email address;</li>
-      <li>A Firebase user identifier;</li>
-      <li>Your sign-in provider, such as email/password or Google; and</li>
-      <li>The date and time of your most recent sign-in.</li>
-    </ul>
-    <p>
-      Email/password authentication is handled by Firebase Authentication. PocketCodedWeb does
-      not receive or store your password in readable form. Firebase may process authentication
-      information such as passwords, email addresses, IP addresses, and user-agent information
-      to authenticate users, secure accounts, and prevent abuse.
-    </p>
+    <h2>2. Information we collect or process</h2>
+    <p><strong>Account information.</strong> When you sign in or create an account, Firebase
+      Authentication processes your email address, display name if provided, verification status,
+      sign-in provider, Firebase user ID, authentication tokens, and related account metadata.</p>
 
-    <p><strong>Google Sign-In information.</strong> If you choose Google Sign-In, Google provides
-      the app with account details needed to authenticate you, such as your Google account email,
-      display name, account identifier, and an authentication token. Your use of Google Sign-In
-      is also governed by Google's Privacy Policy.</p>
+    <p><strong>Profile, trial, and Premium status.</strong> PocketCodedWeb stores limited account
+      records in Cloud Firestore, such as your Firebase user ID, email address, display name,
+      sign-in providers, email verification status, profile sync timestamps, trial timestamps, and
+      whether Premium is unlocked.</p>
 
-    <p><strong>Purchase and trial information.</strong> Google Play provides the app with the
-      product identifier, localized price, purchase state, purchase token, and acknowledgement
-      status needed to complete or restore the one-time Premium purchase. The app stores a local
-      Premium entitlement flag for offline continuity and reconciles it with Google Play when a
-      Billing connection is available. PocketCodedWeb stores the start of your free trial in your
-      Firebase profile and stores the most recent free-trial continuation time locally. We do not
-      receive or store your full payment-card details.</p>
-
-    <p><strong>Locally stored development data.</strong> The app stores projects and operational
-      data in app-private storage on your device, including source code, files, folders, editor
-      state, terminal commands and output, Git repositories and configuration, virtual
-      environments, installed Python packages, and SSH keys you generate. We do not automatically
-      send this development data to our servers or Firebase.</p>
+    <p><strong>Local development data.</strong> The app stores projects and operational data in
+      app-private storage on your device, including source code, files, folders, editor state,
+      terminal commands and output, Git repositories and configuration, installed packages, preview
+      cache, and SSH keys you generate. This data is not automatically uploaded to a
+      PocketCodedWeb server.</p>
 
     <p><strong>Files you select.</strong> When you import or export a file or folder, Android's
-      system file picker gives the app access only to the item or location you select. Exported
-      copies are stored in the destination you choose and remain under your control.</p>
+      system file picker gives the app access only to the item or location you select.</p>
+
+    <p><strong>Purchase and trial information.</strong> Google Play provides the app with purchase
+      information needed to complete, acknowledge, validate, or restore the one-time Premium
+      purchase. This can include product ID, localized price, purchase state, order ID, purchase
+      time, purchase token, acknowledgement status, and an app account identifier. Google Play
+      handles your payment details; PocketCodedWeb does not receive your full payment-card number.</p>
+
+    <p><strong>AI Chat information.</strong> If you use AI Chat, the app sends your prompt, selected
+      project context, active editor content, file names, recent terminal output, selected model,
+      and the Gemini API key you entered directly to Google's Gemini API. The API key is stored
+      locally in app-private preferences and is not sent to a PocketCodedWeb backend.</p>
+
+    <p><strong>Analytics and diagnostics.</strong> PocketCodedWeb includes Firebase Analytics. This
+      may collect app instance identifiers, device and app information, usage events, diagnostics,
+      and crash-related signals to help understand app reliability and feature usage. We do not use
+      this data for third-party advertising.</p>
 
     <p><strong>User-directed network activity.</strong> The app includes tools such as Git, SSH,
-      <code>pip</code>, and <code>curl</code>. When you use these tools, commands, credentials,
-      repository data, source code, package requests, or other content may be transmitted directly
-      to the remote host you specify, such as GitHub, GitLab, a package index, or an API endpoint.
-      Those services process information under their own privacy policies. PocketCodedWeb does not
-      control user-selected remote services.</p>
+      package installation, HTTP requests, browser preview, and terminal commands. When you use
+      these tools, commands, credentials, repository data, source code, package requests, or other
+      content may be transmitted directly to the remote host you specify.</p>
 
-    <p><strong>AI chat information.</strong> If you use the AI Chat feature, the app may send your
-      prompt, selected project context, active editor content, visible source files, project file
-      names, and recent terminal output to Firebase AI Logic and Google's Gemini models so that the
-      model can generate a response. AI Chat requires a signed-in, verified account. The app shows
-      the selected model before a request is sent. AI suggestions that run terminal commands or
-      replace code require your explicit approval in the app.</p>
+    <p><strong>Support messages.</strong> If you email us, we process your email address and the
+      content of your message to respond to your request.</p>
 
-    <h2>3. How we use information</h2>
-    <p>We use information only as needed to:</p>
+    <h2>3. Permissions</h2>
+    <p>
+      PocketCodedWeb requests internet access so sign-in, Firebase, Google Play Billing, Gemini,
+      Git, package downloads, web preview, and user-directed network features can work. The app
+      does not request location, camera, microphone, contacts, SMS, or call log permissions.
+    </p>
+
+    <h2>4. How we use information</h2>
     <ul>
-      <li>Create, authenticate, secure, and maintain user accounts;</li>
-      <li>Display and maintain basic account profile information;</li>
-      <li>Provide the editor, terminal, project, import/export, Git, SSH, and package features;</li>
-      <li>Respond to support, privacy, and account-deletion requests;</li>
-      <li>Prevent fraud, abuse, and security incidents; and</li>
+      <li>Provide sign-in, email verification, account recovery, and Google Sign-In;</li>
+      <li>Sync account profile, trial timing, and Premium entitlement records;</li>
+      <li>Provide the editor, terminal, project, import/export, Git, SSH, package, preview, and AI features;</li>
+      <li>Complete, validate, acknowledge, and restore the one-time Premium purchase through Google Play;</li>
+      <li>Improve reliability, diagnose problems, prevent abuse, and protect security;</li>
+      <li>Respond to support, privacy, and account deletion requests; and</li>
       <li>Comply with applicable law and enforce our legal rights.</li>
     </ul>
 
-    <h2>4. Sharing and service providers</h2>
-    <p>We do not sell personal information. We do not use personal information for advertising.</p>
-    <p>Information may be processed or shared in these limited circumstances:</p>
+    <h2>5. Sharing and service providers</h2>
+    <p>We do not sell personal information. We do not use personal information for third-party advertising.</p>
     <ul>
-      <li><strong>Google Firebase:</strong> Firebase Authentication processes sign-in data, and Cloud Firestore stores your display name, email, authentication providers, and last sign-in time.</li>
-      <li><strong>Google Sign-In:</strong> used only when you choose to authenticate with a Google account.</li>
-      <li><strong>Firebase AI Logic and Gemini:</strong> used only when you ask AI Chat to generate a response using project or terminal context.</li>
-      <li><strong>Google Play:</strong> purchases and app distribution are handled by Google Play. We do not receive your full payment-card details.</li>
-      <li><strong>User-selected services:</strong> data is sent to Git hosts, package providers, websites, or APIs only when you initiate the relevant command or connection.</li>
-      <li><strong>Legal and safety reasons:</strong> information may be disclosed when reasonably necessary to comply with law, lawful process, or to protect users, the public, or our rights.</li>
+      <li><strong>Google Firebase:</strong> used for Authentication, Firestore, Analytics, and related app services.</li>
+      <li><strong>Google Play:</strong> used for app distribution, license testing, purchase processing, refunds, and purchase restoration.</li>
+      <li><strong>Google Gemini:</strong> used only when you enter a Gemini API key and ask AI Chat to generate a response.</li>
+      <li><strong>User-selected services:</strong> data is sent to Git hosts, package providers, websites, APIs, or servers only when you initiate the relevant command or connection.</li>
+      <li><strong>Legal and safety reasons:</strong> information may be disclosed when reasonably necessary to comply with law, lawful process, prevent fraud, protect users, or protect our rights.</li>
     </ul>
 
-    <h2>5. Advertising and analytics</h2>
+    <h2>6. Security</h2>
     <p>
-      PocketCodedWeb does not currently include advertising SDKs, Firebase Analytics, or third-party
-      behavioral analytics. If this changes, this policy and the Google Play Data safety disclosure
-      will be updated before the new collection begins.
-    </p>
-
-    <h2>6. Data security</h2>
-    <p>
-      Account communications with Firebase use encrypted connections. Development files are stored
-      in Android app-private storage, and PocketCodedWeb excludes project folders, SSH keys, and
-      runtime data from Android cloud backup. Access to external files is provided through Android's
-      system file picker. No system can be guaranteed completely secure, so users should protect
-      their device, account credentials, private keys, and access tokens.
-    </p>
-    <p>
-      User-directed terminal connections may use different protocols. HTTPS and SSH provide
-      encrypted transport when correctly configured; plain HTTP does not. You are responsible for
-      the destination and protocol you choose.
+      Account services use Firebase and Google infrastructure. Data transmitted to Firebase,
+      Google Play, Gemini, and HTTPS services is protected in transit by modern transport security
+      where supported by those services. Local project files are stored in Android app-private
+      storage. No system can be guaranteed completely secure, so users should protect their device,
+      private keys, access tokens, project secrets, and API keys.
     </p>
 
     <h2>7. Retention and deletion</h2>
     <ul>
-      <li><strong>Account data:</strong> retained while your account is active and until deletion is requested or otherwise required.</li>
-      <li><strong>Trial data:</strong> the trial start is retained with your cloud profile until account deletion; the hourly continuation timestamp and cached Premium status remain locally until app data is cleared.</li>
-      <li><strong>Firebase data:</strong> after we initiate deletion, Google may retain information in backup systems for a limited period in accordance with Firebase's retention practices.</li>
-      <li><strong>Local projects and settings:</strong> remain on your device until you delete them, clear the app's storage, or uninstall the app.</li>
-      <li><strong>Exported files:</strong> remain in the location you selected until you delete them.</li>
+      <li><strong>Local projects and settings:</strong> remain on your device until you delete them, clear app storage, or uninstall the app.</li>
+      <li><strong>Account and Firestore records:</strong> remain while your PocketCodedWeb account is active and are deleted or anonymized after a verified deletion request, except where retention is needed for security, fraud prevention, legal, or payment record reasons.</li>
+      <li><strong>Google Play purchase records:</strong> are retained by Google under Google's policies and may remain necessary for refunds, tax, accounting, fraud prevention, and purchase restoration.</li>
+      <li><strong>Support emails:</strong> are retained only as long as reasonably needed to respond and keep records of the request.</li>
       <li><strong>User-selected third parties:</strong> information sent to remote services is retained under those services' own policies.</li>
     </ul>
-    <p>
-      To request account and associated cloud-profile deletion, follow the steps on our
-      <a href="account-deletion.html">Account Deletion page</a>. Local and exported files cannot
-      be remotely deleted by us because we do not control your device storage.
-    </p>
+    <p>See the <a href="account-deletion.html">Data Deletion page</a> for account and local deletion steps.</p>
 
     <h2>8. Your choices and rights</h2>
     <p>
       Depending on where you live, you may have rights to access, correct, delete, restrict, or
-      object to certain processing of your personal information. You may also have a right to data
-      portability or to complain to a local data-protection authority. Send requests to
-      <a href="mailto:Slimkheli2@gmail.com">Slimkheli2@gmail.com</a>. We may need to verify your
-      identity before completing a request.
+      object to certain processing of your personal information. Send requests to
+      <a href="mailto:Slimkheli2@gmail.com">Slimkheli2@gmail.com</a>. You can also remove local
+      app data from your device at any time by deleting projects, clearing app storage, or
+      uninstalling PocketCodedWeb.
     </p>
 
     <h2>9. Children's privacy</h2>
     <p>
-      PocketCodedWeb is not directed to children under 13, or the minimum age required to consent to
-      data processing in their country. We do not knowingly collect personal information from a
-      child below that age. If you believe a child has provided personal information, contact us so
-      that we can investigate and delete it.
+      PocketCodedWeb is not directed to children under 13, or the minimum age required to consent
+      to data processing in their country. We do not knowingly collect personal information from a
+      child below that age.
     </p>
 
     <h2>10. International processing</h2>
     <p>
       Google and user-selected remote services may process information in countries other than your
-      own. Their legal terms and safeguards apply to that processing. Firebase explains its privacy,
-      security, and international-transfer practices on its official privacy and security page.
+      own. Their legal terms and safeguards apply to that processing.
     </p>
 
     <h2>11. Changes to this policy</h2>
     <p>
       We may update this Privacy Policy when PocketCodedWeb's features, service providers, or legal
       obligations change. The effective date at the top will be updated when changes are published.
-      Material changes will be communicated in the app or through another appropriate notice where
-      required.
     </p>
 
     <h2>12. Contact</h2>
     <p>
       Privacy contact: <a href="mailto:Slimkheli2@gmail.com">Slimkheli2@gmail.com</a><br>
       Application: PocketCodedWeb<br>
-      Package name: com.mkhokheli.PocketCodedWeb
+      Package name: com.mkhokheli.pocketcodedweb
     </p>
 
     <footer>
-      <a href="account-deletion.html">Account deletion instructions</a>
+      <a href="index.html">Policies</a> |
+      <a href="account-deletion.html">Data deletion instructions</a> |
+      <a href="terms-of-service.html">Terms of Service</a>
     </footer>
   </main>
 </body>
 </html>
-

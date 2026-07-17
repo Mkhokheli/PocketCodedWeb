@@ -12,6 +12,16 @@ service cloud.firestore {
           || request.resource.data.trialStartedAt == request.time;
       }
 
+      function validTrialCheckOnCreate() {
+        return !('trialCheckedAt' in request.resource.data)
+          || request.resource.data.trialCheckedAt == request.time;
+      }
+
+      function validTrialLockOnCreate() {
+        return !('trialLockedAt' in request.resource.data)
+          || request.resource.data.trialLockedAt == request.time;
+      }
+
       function trialStartIsImmutable() {
         return (
           !('trialStartedAt' in resource.data)
@@ -25,18 +35,73 @@ service cloud.firestore {
         );
       }
 
+      function trialCheckIsServerTimeOrUnchanged() {
+        return !('trialCheckedAt' in request.resource.data)
+          || request.resource.data.trialCheckedAt == request.time
+          || (
+            'trialCheckedAt' in resource.data
+            && request.resource.data.trialCheckedAt == resource.data.trialCheckedAt
+          );
+      }
+
+      function trialLockIsImmutable() {
+        return (
+          !('trialLockedAt' in resource.data)
+          && (
+            !('trialLockedAt' in request.resource.data)
+            || request.resource.data.trialLockedAt == request.time
+          )
+        ) || (
+          'trialLockedAt' in resource.data
+          && request.resource.data.trialLockedAt == resource.data.trialLockedAt
+        );
+      }
+
+      function backendFieldsAreUnchanged() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'app', 'uid', 'email', 'displayName', 'emailVerified', 'providers',
+          'photoUrl', 'createdAtMillis', 'lastSignInAt', 'lastSignInAtMillis',
+          'lastSyncedAt', 'trialCheckedAt', 'trialLockedAt'
+        ]);
+      }
+
+      function noClientEntitlementOnCreate() {
+        return !request.resource.data.keys().hasAny([
+          'isPremium', 'premium', 'premiumVerified', 'entitlement',
+          'purchaseToken', 'purchaseOrderId', 'trialStartedAtMillis',
+          'trialEndsAtMillis'
+        ]);
+      }
+
       allow read: if ownsProfile();
-      allow create: if ownsProfile() && validTrialStartOnCreate();
-      allow update: if ownsProfile() && trialStartIsImmutable();
+      allow create: if ownsProfile()
+        && noClientEntitlementOnCreate()
+        && validTrialStartOnCreate()
+        && validTrialCheckOnCreate()
+        && validTrialLockOnCreate();
+      allow update: if ownsProfile()
+        && backendFieldsAreUnchanged()
+        && trialStartIsImmutable()
+        && trialCheckIsServerTimeOrUnchanged()
+        && trialLockIsImmutable();
       allow delete: if false;
     }
 
-    // AI quotas and entitlement overrides are maintained only by Cloud Functions/Admin SDK.
+    // Quotas, entitlement overrides, and aggregate usage are maintained by Cloud Functions/Admin SDK.
     match /aiDailyUsage/{usageId} {
       allow read, write: if false;
     }
 
     match /aiEntitlements/{userId} {
+      allow read, write: if false;
+    }
+
+    match /emailDailyUsage/{usageId} {
+      allow read, write: if false;
+    }
+
+    // Purchase tokens and entitlement lifecycle are server-only.
+    match /playPurchases/{purchaseTokenHash} {
       allow read, write: if false;
     }
 

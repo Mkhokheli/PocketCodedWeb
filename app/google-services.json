@@ -1,20 +1,20 @@
 {
   "project_info": {
-    "project_number": "360292021566",
-    "project_id": "PocketCodedWeb",
-    "storage_bucket": "PocketCodedWeb.firebasestorage.app"
+    "project_number": "566417411168",
+    "project_id": "pocketcodedweb-6887b",
+    "storage_bucket": "pocketcodedweb-6887b.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:360292021566:android:72e604827377683e01a86f",
+        "mobilesdk_app_id": "1:566417411168:android:e678f246f4739fcd648705",
         "android_client_info": {
           "package_name": "com.mkhokheli.pocketcodedweb"
         }
       },
       "oauth_client": [
         {
-          "client_id": "360292021566-utqffns2he1ol3udds427p8jd5vps0nu.apps.googleusercontent.com",
+          "client_id": "566417411168-b632e8mo6esk4l5n85t1s4i6p51p43vl.apps.googleusercontent.com",
           "client_type": 1,
           "android_info": {
             "package_name": "com.mkhokheli.pocketcodedweb",
@@ -22,20 +22,20 @@
           }
         },
         {
-          "client_id": "360292021566-f4dirdg67nbgcnokd71ovnhu08vagm1i.apps.googleusercontent.com",
+          "client_id": "566417411168-6p0d7mk17mvl78fnmnhmpi7rta0fccc5.apps.googleusercontent.com",
           "client_type": 3
         }
       ],
       "api_key": [
         {
-          "current_key": "AIzaSyDr-2HcwrV5DZRJzFVZ47EDFRqlNwezVh8"
+          "current_key": "AIzaSyD7S9pptVGOJLwjUgXDD3C5zp4TARMghjI"
         }
       ],
       "services": {
         "appinvite_service": {
           "other_platform_oauth_client": [
             {
-              "client_id": "360292021566-f4dirdg67nbgcnokd71ovnhu08vagm1i.apps.googleusercontent.com",
+              "client_id": "566417411168-6p0d7mk17mvl78fnmnhmpi7rta0fccc5.apps.googleusercontent.com",
               "client_type": 3
             }
           ]
@@ -45,4 +45,3 @@
   ],
   "configuration_version": "1"
 }
-

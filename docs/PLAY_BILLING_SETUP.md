@@ -4,10 +4,10 @@ PocketCodedWeb uses a one-time, non-consumable Google Play product.
 
 ## Product
 
-- Product ID: `PocketCodedWeb_lifetime`
+- Product ID: `pocketcodedweb_lifetime`
 - Product type: One-time product
 - Suggested display name: `PocketCodedWeb Premium`
-- Base price: `R99.99` in South African rand
+- Base price: `R149.99` in South African rand
 
 The Android app must be listed as free to install. Google Play does not support changing an app
 from paid to free-trial-plus-IAP behavior automatically. Premium access is sold through the
@@ -17,9 +17,9 @@ one-time product above.
 
 1. Upload a signed Android App Bundle with the Billing implementation to an internal testing track.
 2. Open **Monetize with Play > Products > One-time products**.
-3. Create `PocketCodedWeb_lifetime` exactly. Product IDs cannot be changed later.
+3. Create `pocketcodedweb_lifetime` exactly. Product IDs cannot be changed later.
 4. Add and activate a purchase option for a one-time, non-consumable purchase.
-5. Set the South African base price to `R99.99`.
+5. Set the South African base price to `R149.99`.
 6. Review every regional price. Google Play converts the base price automatically. Manually adjust
    supported currencies to the closest locally valid price ending in `.99`. Some currencies, such
    as currencies without minor units, cannot use `.99`; use the closest valid local price there.
@@ -35,17 +35,21 @@ currency conversion inside the app.
 
 Verify these cases with Play license testers:
 
-- Successful purchase immediately unlocks Premium.
+- Successful purchase immediately unlocks Premium after Google Play reports `PURCHASED`.
 - A pending payment stays locked until Google Play changes it to `PURCHASED`.
 - Cancelling checkout does not unlock Premium.
 - **Restore Purchase** unlocks the app for the Google Play account which owns the product.
-- Clearing app data and signing in again restores the purchase.
+- Clearing app data and tapping **Restore Purchase** restores the purchase.
 - Refunded or revoked purchases are removed after the next successful Play Billing reconciliation.
+- A purchase made under another signed-in PocketCodedWeb account does not unlock this account.
 
 ## Production Security
 
-The current app acknowledges and checks purchases with Google Play Billing on-device. Before a
-large production launch, add server-side purchase-token verification using the Google Play
-Developer API and grant entitlements from a trusted backend. Never grant Premium from an editable
-Firestore boolean supplied by the Android client.
+The app validates the Google Play product ID, Google Play order ID prefix, obfuscated app account
+ID, and purchase timing before unlocking Premium. Premium state is cached locally for offline
+continuity and mirrored to `users/{uid}.isPremium` in Firestore for backend quota decisions.
+
+This is still on-device Billing validation, not hosted purchase-token verification. For the
+strongest production fraud protection, add a trusted backend that verifies purchase tokens with the
+Google Play Android Developer API before granting Premium or custom claims.
 

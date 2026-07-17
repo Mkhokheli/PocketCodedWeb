@@ -1,6 +1,9 @@
 package com.mkhokheli.pocketcodedweb
 
+import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
@@ -8,13 +11,12 @@ import android.os.Looper
 import android.provider.OpenableColumns
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
-import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
-import android.webkit.WebResourceResponse
-import android.webkit.WebSettings
+import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import org.eclipse.jgit.api.Git
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -49,6 +51,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -57,7 +61,6 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.text.ClickableText
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -78,6 +81,7 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Fullscreen
+import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.Html
 import androidx.compose.material.icons.rounded.Javascript
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -87,6 +91,7 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreHoriz
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Visibility
@@ -105,6 +110,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.derivedStateOf
@@ -115,13 +121,15 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -135,6 +143,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.PlatformTextStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextLayoutResult
@@ -156,9 +165,19 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.core.content.edit
 import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.mkhokheli.pocketcodedweb.ui.theme.PocketCodedWebTheme
+import com.google.firebase.FirebaseApp
+import com.google.firebase.appcheck.AppCheckProviderFactory
+import com.google.firebase.appcheck.FirebaseAppCheck
+import com.google.firebase.appcheck.debug.DebugAppCheckProviderFactory
+import com.google.firebase.appcheck.playintegrity.PlayIntegrityAppCheckProviderFactory
+import com.google.firebase.auth.FirebaseAuth
+import com.google.android.gms.tasks.Tasks
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -167,13 +186,21 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.net.URL
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.util.LinkedHashMap
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.GZIPInputStream
 import kotlin.math.min
 
@@ -187,6 +214,7 @@ private const val PREF_EXPLORER_VISIBLE = "explorer_visible"
 private const val PREF_FILE_SEARCH = "file_search"
 private const val PREF_TERMINAL_INPUT = "terminal_input"
 private const val PREF_TERMINAL_TEXT = "terminal_text"
+private const val PREF_TERMINAL_TEXT_SAVED_AT = "terminal_text_saved_at"
 private const val PREF_FULL_SCREEN_MODE = "full_screen_mode"
 private const val PREF_IDE_THEME = "ide_theme"
 private const val PREF_USER_AI_API_KEY = "user_ai_api_key"
@@ -195,15 +223,26 @@ private const val AI_CONTEXT_FILE_LIMIT = 24
 private const val AI_CONTEXT_CHAR_LIMIT = 60_000
 private const val AI_TERMINAL_CONTEXT_LIMIT = 12_000
 private const val AI_MAX_OUTPUT_TOKENS = 16_384
+private const val PREVIEW_HANDOFF_TERMINAL_SNAPSHOT_CHARS = 60_000
+private const val TERMINAL_ACTIVITY_RETENTION_MS = 60L * 60L * 1000L
 private const val COMPLETION_IDLE_TIMEOUT_MS = 3_500L
 private const val EDITOR_SAVE_DEBOUNCE_MS = 1_000L
 private const val DIAGNOSTIC_IDLE_DELAY_MS = 220L
-private const val SYNTAX_HIGHLIGHT_IDLE_DELAY_MS = 80L
+private const val EDITOR_METRICS_IDLE_DELAY_MS = 60L
 private const val CURSOR_REVEAL_DELAY_MS = 45L
 private const val LSP_COMPLETION_DEBOUNCE_MS = 45L
 private const val LSP_CACHE_ENTRY_LIMIT = 32
 private const val LIVE_DIAGNOSTIC_CHAR_LIMIT = 180_000
 private const val LIVE_SYNTAX_HIGHLIGHT_CHAR_LIMIT = 120_000
+private const val RESPONSIVE_DIAGNOSTIC_CHAR_LIMIT = 60_000
+private const val RESPONSIVE_HIGHLIGHT_CHAR_LIMIT = 50_000
+private const val COMPLETION_SCAN_CHAR_LIMIT = 30_000
+private const val COMMENT_STATE_SCAN_CHAR_LIMIT = 20_000
+private const val EXTERNAL_LSP_LARGE_FILE_LIMIT = 80_000
+private const val LIVE_COLOR_RETARGET_RADIUS = 2_000
+private const val LARGE_FILE_HIGHLIGHT_IDLE_MS = 700L
+private const val LIVE_PREVIEW_CACHE_VERSION = 5
+private const val LIVE_PREVIEW_MAX_BROWSER_ASSET_BYTES = 30_000_000L
 private const val NPM_REGISTRY_URL = "https://registry.npmjs.org"
 private const val NPM_MAX_PACKAGE_DOWNLOAD_BYTES = 30_000_000L
 private const val NPM_MAX_INSTALL_PACKAGES = 160
@@ -212,7 +251,15 @@ private const val NPM_MAX_DEPENDENCY_DEPTH = 7
 private val htmlFileExtensions = setOf("html", "htm", "svg")
 private val cssFileExtensions = setOf("css")
 private val javascriptFileExtensions = setOf("js", "mjs", "cjs", "jsx", "ts", "tsx")
-private val editableWebExtensions = htmlFileExtensions + cssFileExtensions + javascriptFileExtensions + setOf("json", "md", "txt")
+private val generalCodeFileExtensions = setOf(
+    "kt", "kts", "java", "py", "pyw", "rb", "php", "c", "h", "cc", "cpp", "cxx", "hpp",
+    "cs", "go", "rs", "swift", "dart", "scala", "sh", "bash", "zsh", "ps1", "sql", "xml",
+    "yaml", "yml", "toml", "ini", "conf", "properties", "gradle", "groovy", "lua", "r",
+    "vue", "svelte",
+)
+private val editableWebExtensions =
+    htmlFileExtensions + cssFileExtensions + javascriptFileExtensions +
+            generalCodeFileExtensions + setOf("json", "md", "txt")
 private val defaultWebFileNames = listOf("index.html", "style.css", "script.js")
 private val workspaceMetadataNames = setOf(".git", ".ssh", ".pocketcodedweb")
 private val aiEditableFilePathRegex =
@@ -235,9 +282,6 @@ private val commonLibraryPackageNames = listOf(
     "chart.js/auto",
     "dayjs",
     "date-fns",
-    "firebase/app",
-    "firebase/auth",
-    "firebase/firestore",
     "@supabase/supabase-js",
     "zod",
     "uuid",
@@ -281,6 +325,7 @@ private val JS_BOOLEAN_NULL_REGEX = Regex("\\b(true|false|null|undefined|NaN|Inf
 private val JS_NUMBER_REGEX = Regex("\\b\\d+(?:\\.\\d+)?\\b")
 private val JS_MEMBER_ACCESS_REGEX = Regex("\\.([A-Za-z_$][\\w$]*)")
 private val JS_FUNC_CALL_REGEX = Regex("\\b([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()|\\.([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()")
+private val JS_MODULE_SYNTAX_REGEX = Regex("""(?m)^\s*(import|export)\b""")
 
 private val JSON_KEY_REGEX = Regex("\"[^\"]*\"(?=\\s*:)")
 private val JSON_STRING_VALUE_REGEX = Regex(":\\s*(\"[^\"]*\")")
@@ -301,6 +346,8 @@ internal data class WebFile(
     val filePath: String,
     val modifiedAt: Long,
     val externalUri: String? = null,
+    val sizeBytes: Long = content.length.toLong(),
+    val contentHash: Int = content.hashCode(),
 )
 
 @Stable
@@ -319,8 +366,17 @@ private enum class WebFullScreenMode {
     Editor,
     Terminal,
     Ai,
-    Preview,
 }
+
+private enum class WebPreviewDestination {
+    InApp,
+    Browser,
+}
+
+private data class InAppLivePreviewState(
+    val title: String,
+    val url: String,
+)
 
 private enum class WebTheme(
     val displayName: String,
@@ -390,6 +446,7 @@ private data class WebShellResult(
     val workspaceChanged: Boolean = false,
     val openPreview: Boolean = false,
     val runJs: String? = null,
+    val openFilePath: String? = null,
 )
 
 internal data class CompletionItem(
@@ -419,6 +476,10 @@ private data class EditorVisualResult(
     val source: String = "",
     val text: AnnotatedString = AnnotatedString(""),
 )
+
+private fun plainEditorVisualResult(source: String): EditorVisualResult {
+    return EditorVisualResult(source, AnnotatedString(source))
+}
 
 private data class EditorTextMetrics(
     val lineCount: Int = 1,
@@ -536,6 +597,7 @@ private class NpmInstallState(
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        configureFirebaseAppCheck(this)
         enableEdgeToEdge()
         setContent {
             val activityContext = this@MainActivity
@@ -580,11 +642,12 @@ private fun WebIdeApp(
     val rootDirectory = remember(projectDirectory.absolutePath) {
         projectDirectory.apply {
             mkdirs()
-            ensureDefaultWebProject(this)
         }
     }
     val savedSession = remember(rootDirectory.absolutePath) { loadWebIdeSession(context, rootDirectory) }
-    val initialFiles = remember(rootDirectory.absolutePath) { loadWebFiles(rootDirectory) }
+    val initialFiles = remember(rootDirectory.absolutePath) {
+        loadInitialWebFiles(rootDirectory, savedSession.activeFilePath)
+    }
     val files = remember(rootDirectory.absolutePath) {
         mutableStateListOf<WebFile>().apply { addAll(initialFiles) }
     }
@@ -618,13 +681,18 @@ private fun WebIdeApp(
     val dirtyFileIds = remember { mutableSetOf<Long>() }
     val pendingEditorTextByFileId = remember(rootDirectory.absolutePath) { mutableMapOf<Long, String>() }
     val pendingEditorSaveJobs = remember { mutableMapOf<Long, Job>() }
+    val fileRefreshGeneration = remember(rootDirectory.absolutePath) { AtomicLong(0L) }
 
     val activeFile = (files.firstOrNull { it.id == activeFileId }
-        ?: files.firstOrNull()
-        ?: createDefaultWebFile(rootDirectory).also {
-            files.add(it)
-            activeFileId = it.id
-        }).withPendingEditorText(pendingEditorTextByFileId)
+        ?: files.firstOrNull())
+        ?.withPendingEditorText(pendingEditorTextByFileId)
+
+    LaunchedEffect(files.size, activeFileId) {
+        when {
+            files.isEmpty() && activeFileId != -1L -> activeFileId = -1L
+            files.isNotEmpty() && files.none { it.id == activeFileId } -> activeFileId = files.first().id
+        }
+    }
 
     BackHandler(enabled = true) {
         if (fullScreenMode != null) {
@@ -638,7 +706,9 @@ private fun WebIdeApp(
         mutableStateOf(
             validDirectoryOrRoot(
                 rootDirectory = rootDirectory,
-                candidatePath = savedSession.workingDirectoryPath ?: activeFile.parentDirectoryPath(rootDirectory),
+                candidatePath = savedSession.workingDirectoryPath
+                    ?: activeFile?.parentDirectoryPath(rootDirectory)
+                    ?: rootDirectory.absolutePath,
             ).absolutePath
         )
     }
@@ -646,7 +716,9 @@ private fun WebIdeApp(
         mutableStateOf(
             validDirectoryOrRoot(
                 rootDirectory = rootDirectory,
-                candidatePath = savedSession.terminalDirectoryPath ?: activeFile.parentDirectoryPath(rootDirectory),
+                candidatePath = savedSession.terminalDirectoryPath
+                    ?: activeFile?.parentDirectoryPath(rootDirectory)
+                    ?: rootDirectory.absolutePath,
             ).absolutePath
         )
     }
@@ -656,9 +728,14 @@ private fun WebIdeApp(
     val terminalDirectory = remember(terminalDirectoryPath, directoryVersion) {
         validDirectoryOrRoot(rootDirectory, terminalDirectoryPath)
     }
-    val tabFiles = files
-        .filter { it.isDirectChildOf(workingDirectory) }
-        .sortedByDescending { it.modifiedAt }
+    val tabFiles by remember(workingDirectoryPath, directoryVersion) {
+        derivedStateOf {
+            files.asSequence()
+                .filter { it.isDirectChildOf(workingDirectory) }
+                .sortedByDescending { it.modifiedAt }
+                .toList()
+        }
+    }
     val terminalPromptText = terminalPrompt(rootDirectory, terminalDirectory)
 
     var selectedAiModelId by rememberSaveable(rootDirectory.absolutePath) { mutableStateOf(aiModelOptions.first().id) }
@@ -678,6 +755,110 @@ private fun WebIdeApp(
     var aiPendingAction by remember { mutableStateOf<AiSuggestedAction?>(null) }
     var aiVerificationMessage by remember { mutableStateOf<String?>(null) }
     var terminalJsToRun by remember { mutableStateOf<String?>(null) }
+    var terminalRevealRequest by remember { mutableLongStateOf(0L) }
+    var browserPreviewReturnPending by remember(rootDirectory.absolutePath) { mutableStateOf(false) }
+    var previewDestinationDialogOpen by remember(rootDirectory.absolutePath) { mutableStateOf(false) }
+    var inAppLivePreview by remember(rootDirectory.absolutePath) { mutableStateOf<InAppLivePreviewState?>(null) }
+    var terminalBackgroundedAt by rememberSaveable(rootDirectory.absolutePath) { mutableLongStateOf(0L) }
+
+    fun currentWebSession(terminalSnapshot: String = terminalText): WebSession {
+        return WebSession(
+            activeFileId = activeFile?.id ?: -1L,
+            activeFilePath = activeFile?.filePath,
+            workingDirectoryPath = workingDirectoryPath,
+            terminalDirectoryPath = terminalDirectoryPath,
+            expandedFolderPaths = expandedFolderPaths.toList(),
+            explorerVisible = explorerVisible,
+            fileSearch = fileSearch,
+            terminalInput = terminalInput,
+            terminalText = terminalSnapshot,
+            fullScreenMode = fullScreenMode,
+            userAiApiKey = userAiApiKey.takeIf { it.isNotBlank() },
+        )
+    }
+
+    fun saveCurrentWebIdeSession(
+        persistTerminalText: Boolean = false,
+        terminalSnapshot: String = terminalText,
+    ) {
+        saveWebIdeSession(
+            context = context,
+            rootDirectory = rootDirectory,
+            session = currentWebSession(terminalSnapshot),
+            persistTerminalText = persistTerminalText,
+        )
+    }
+
+    fun releaseBrowserPreviewHandoffMemory() {
+        WebLanguageServices.releasePreviewHandoffMemory()
+        ProjectFileCache.clearAll()
+    }
+
+    fun prepareBrowserPreviewHandoff() {
+        val compactTerminalText = compactTerminalSnapshotForPreviewHandoff(terminalText)
+        terminalBackgroundedAt = System.currentTimeMillis()
+        if (compactTerminalText != terminalText) {
+            terminalText = compactTerminalText
+        }
+        releaseBrowserPreviewHandoffMemory()
+        saveCurrentWebIdeSession(
+            persistTerminalText = true,
+            terminalSnapshot = compactTerminalText,
+        )
+    }
+
+    fun persistTerminalForBackground() {
+        val compactTerminalText = compactTerminalSnapshotForPreviewHandoff(terminalText)
+        terminalBackgroundedAt = System.currentTimeMillis()
+        if (compactTerminalText != terminalText) {
+            terminalText = compactTerminalText
+        }
+        saveCurrentWebIdeSession(
+            persistTerminalText = compactTerminalText.isNotBlank(),
+            terminalSnapshot = compactTerminalText,
+        )
+    }
+
+    DisposableEffect(context, rootDirectory.absolutePath) {
+        val lifecycle = (context as? ComponentActivity)?.lifecycle
+        if (lifecycle == null) {
+            onDispose {}
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_STOP -> {
+                        persistTerminalForBackground()
+                        if (browserPreviewReturnPending) {
+                            releaseBrowserPreviewHandoffMemory()
+                        }
+                    }
+                    Lifecycle.Event.ON_RESUME -> {
+                        val terminalExpired = terminalBackgroundedAt > 0L &&
+                                System.currentTimeMillis() - terminalBackgroundedAt >= TERMINAL_ACTIVITY_RETENTION_MS
+                        terminalBackgroundedAt = 0L
+                        if (terminalExpired) {
+                            terminalText = ""
+                            browserPreviewReturnPending = false
+                            saveCurrentWebIdeSession()
+                        } else if (browserPreviewReturnPending) {
+                            browserPreviewReturnPending = false
+                            if (fullScreenMode != WebFullScreenMode.Terminal) {
+                                fullScreenMode = null
+                            }
+                            terminalRevealRequest += 1L
+                            terminalText = appendTerminalOutput(
+                                terminalText,
+                                "[localhost] Returned from browser preview. Terminal activity is current.",
+                            )
+                        }
+                    }
+                    else -> Unit
+                }
+            }
+            lifecycle.addObserver(observer)
+            onDispose { lifecycle.removeObserver(observer) }
+        }
+    }
 
     if (terminalJsToRun != null) {
         val jsCode = terminalJsToRun!!
@@ -750,13 +931,31 @@ private fun WebIdeApp(
         selectPath: String? = null,
         workingPath: String? = null,
     ) {
+        val loadedFileIds = loadedFiles.mapTo(mutableSetOf()) { it.id }
+        val missingFileIds = (
+            pendingEditorTextByFileId.keys +
+                dirtyFileIds +
+                pendingEditorSaveJobs.keys
+            ).filter { it !in loadedFileIds }
+        missingFileIds.forEach { fileId ->
+            pendingEditorSaveJobs.remove(fileId)?.cancel()
+            pendingEditorTextByFileId.remove(fileId)
+            dirtyFileIds.remove(fileId)
+        }
+        val currentFilesById = files.associateBy(WebFile::id)
         val mergedFiles = loadedFiles.map { loadedFile ->
-            val currentFile = files.firstOrNull { it.id == loadedFile.id }
+            val currentFile = currentFilesById[loadedFile.id]
             val pendingText = pendingEditorTextByFileId[loadedFile.id]
             if (pendingText != null) {
-                loadedFile.copy(content = pendingText, modifiedAt = currentFile?.modifiedAt ?: loadedFile.modifiedAt)
+                loadedFile.withContent(
+                    content = pendingText,
+                    modifiedAt = currentFile?.modifiedAt ?: loadedFile.modifiedAt,
+                )
             } else if (currentFile != null && currentFile.id in dirtyFileIds) {
-                loadedFile.copy(content = currentFile.content, modifiedAt = currentFile.modifiedAt)
+                loadedFile.withContent(
+                    content = currentFile.content,
+                    modifiedAt = currentFile.modifiedAt,
+                )
             } else {
                 loadedFile
             }
@@ -766,14 +965,22 @@ private fun WebIdeApp(
         val selectedFile = selectPath?.let { path -> mergedFiles.firstOrNull { samePath(it.filePath, path) } }
             ?: mergedFiles.firstOrNull { it.id == activeFileId }
             ?: mergedFiles.firstOrNull()
-            ?: createDefaultWebFile(rootDirectory).also { files.add(it) }
-        activeFileId = selectedFile.id
-        workingDirectoryPath = workingPath ?: selectedFile.parentDirectoryPath(rootDirectory)
+        activeFileId = selectedFile?.id ?: -1L
+        workingDirectoryPath = validDirectoryOrRoot(
+            rootDirectory = rootDirectory,
+            candidatePath = workingPath ?: selectedFile?.parentDirectoryPath(rootDirectory) ?: rootDirectory.absolutePath,
+        ).absolutePath
         directoryVersion += 1L
     }
 
     fun refreshFiles(selectPath: String? = null, workingPath: String? = null) {
-        applyLoadedFiles(loadWebFiles(rootDirectory), selectPath, workingPath)
+        val generation = fileRefreshGeneration.incrementAndGet()
+        coroutineScope.launch {
+            val loadedFiles = withContext(Dispatchers.IO) { loadWebFiles(rootDirectory) }
+            if (fileRefreshGeneration.get() == generation) {
+                applyLoadedFiles(loadedFiles, selectPath, workingPath)
+            }
+        }
     }
 
     val openFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -823,22 +1030,71 @@ private fun WebIdeApp(
         expandedFolderPaths.addUniquePath(folder.path)
     }
 
+    fun discardEditorState(fileId: Long) {
+        pendingEditorSaveJobs.remove(fileId)?.cancel()
+        pendingEditorTextByFileId.remove(fileId)
+        dirtyFileIds.remove(fileId)
+    }
+
+    fun discardEditorStateUnder(directory: File) {
+        files
+            .filter { file -> isSameOrInside(directory, File(file.filePath)) }
+            .forEach { file -> discardEditorState(file.id) }
+    }
+
+    fun discardEditorStateForTerminalDelete(command: String) {
+        val args = splitShellCommandLine(command)
+        val executable = args.firstOrNull()?.lowercase().orEmpty()
+        if (executable !in setOf("rm", "del")) return
+        val target = resolveTerminalPath(rootDirectory, terminalDirectory, args.getOrNull(1).orEmpty()) ?: return
+        if (samePath(target.absolutePath, rootDirectory.absolutePath)) return
+        if (target.isDirectory) {
+            discardEditorStateUnder(target)
+        } else {
+            files
+                .firstOrNull { file -> samePath(file.filePath, target.absolutePath) }
+                ?.let { file -> discardEditorState(file.id) }
+        }
+    }
+
+    LaunchedEffect(rootDirectory.absolutePath) {
+        refreshFiles(
+            selectPath = savedSession.activeFilePath,
+            workingPath = savedSession.workingDirectoryPath,
+        )
+    }
+
     fun updateActiveContent(newCode: String) {
-        val fileToSync = activeFile
+        val fileToSync = activeFile ?: return
         pendingEditorTextByFileId[fileToSync.id] = newCode
         dirtyFileIds += fileToSync.id
         pendingEditorSaveJobs.remove(fileToSync.id)?.cancel()
         pendingEditorSaveJobs[fileToSync.id] = coroutineScope.launch {
             delay(EDITOR_SAVE_DEBOUNCE_MS)
-            withContext(Dispatchers.IO) { saveFileContent(fileToSync.filePath, newCode) }
+            if (files.none { it.id == fileToSync.id }) {
+                pendingEditorTextByFileId.remove(fileToSync.id)
+                dirtyFileIds.remove(fileToSync.id)
+                pendingEditorSaveJobs.remove(fileToSync.id)
+                return@launch
+            }
+            if (pendingEditorTextByFileId[fileToSync.id] != newCode) {
+                return@launch
+            }
+            val modifiedAt = System.currentTimeMillis()
+            withContext(Dispatchers.IO) { saveFileContent(fileToSync.filePath, newCode, modifiedAt) }
+            // A newer edit may have arrived while the file write was in progress.
+            // Never publish this older snapshot back into Compose/editor state.
+            if (pendingEditorTextByFileId[fileToSync.id] != newCode) {
+                return@launch
+            }
             files.replaceFile(fileToSync.id) {
-                copy(content = newCode, modifiedAt = System.currentTimeMillis())
+                withContent(content = newCode, modifiedAt = modifiedAt)
             }
             if (pendingEditorTextByFileId[fileToSync.id] == newCode) {
                 pendingEditorTextByFileId.remove(fileToSync.id)
+                dirtyFileIds.remove(fileToSync.id)
+                pendingEditorSaveJobs.remove(fileToSync.id)
             }
-            dirtyFileIds.remove(fileToSync.id)
-            pendingEditorSaveJobs.remove(fileToSync.id)
         }
     }
 
@@ -898,6 +1154,7 @@ private fun WebIdeApp(
     }
 
     fun deleteFile(file: WebFile) {
+        discardEditorState(file.id)
         File(file.filePath).takeIf { isSameOrInside(rootDirectory, it) }?.delete()
         refreshFiles(workingPath = workingDirectory.absolutePath)
     }
@@ -906,6 +1163,7 @@ private fun WebIdeApp(
         val directory = File(folder.path)
         if (samePath(directory.absolutePath, rootDirectory.absolutePath)) return
         if (isSameOrInside(rootDirectory, directory)) {
+            discardEditorStateUnder(directory)
             directory.deleteRecursively()
             expandedFolderPaths.removeAll { samePath(it, directory.absolutePath) || it.startsWith(directory.absolutePath + File.separator) }
             refreshFiles(workingPath = rootDirectory.absolutePath)
@@ -919,27 +1177,152 @@ private fun WebIdeApp(
         pendingSnapshot.forEach { (fileId, pendingText) ->
             pendingEditorSaveJobs.remove(fileId)?.cancel()
             files.replaceFile(fileId) {
-                copy(content = pendingText, modifiedAt = modifiedAt)
+                withContent(content = pendingText, modifiedAt = modifiedAt)
             }
             dirtyFileIds.remove(fileId)
         }
         pendingEditorTextByFileId.clear()
     }
 
-    fun runWebPreview() {
+    fun launchLivePreview(
+        previewActiveFile: WebFile,
+        previewFiles: List<WebFile>,
+        destination: WebPreviewDestination,
+    ) {
+        coroutineScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { prepareLivePreviewEntry(rootDirectory, previewFiles, previewActiveFile) }
+            }
+            result
+                .onSuccess { entryFile ->
+                    val onPreviewLog: (String) -> Unit = { message ->
+                        coroutineScope.launch {
+                            terminalText = appendTerminalOutput(terminalText, message)
+                        }
+                    }
+                    when (destination) {
+                        WebPreviewDestination.Browser -> {
+                            inAppLivePreview = null
+                            val launchResult = openLivePreviewInDefaultBrowser(
+                                context = context,
+                                entryFile = entryFile,
+                                onLog = onPreviewLog,
+                                beforeOpen = { url ->
+                                    browserPreviewReturnPending = true
+                                    terminalText = appendTerminalOutput(
+                                        terminalText,
+                                        "Serving ${previewActiveFile.name} at $url\nOpening in your device browser. Press Back from the browser to return here and review terminal activity.",
+                                    )
+                                    prepareBrowserPreviewHandoff()
+                                },
+                            )
+                            if (launchResult.error != null) {
+                                browserPreviewReturnPending = false
+                                terminalText = appendTerminalOutput(
+                                    terminalText,
+                                    "Serving ${previewActiveFile.name} at ${launchResult.url}\nCould not open the device browser: ${launchResult.error}",
+                                )
+                            }
+                        }
+                        WebPreviewDestination.InApp -> {
+                            val previewResult = startLivePreviewServer(
+                                entryFile = entryFile,
+                                onLog = onPreviewLog,
+                            )
+                            if (previewResult.error != null) {
+                                terminalText = appendTerminalOutput(
+                                    terminalText,
+                                    "Could not open in-app Live Preview: ${previewResult.error}",
+                                )
+                            } else {
+                                browserPreviewReturnPending = false
+                                inAppLivePreview = InAppLivePreviewState(
+                                    title = previewActiveFile.name,
+                                    url = previewResult.url,
+                                )
+                                terminalText = appendTerminalOutput(
+                                    terminalText,
+                                    "Serving ${previewActiveFile.name} at ${previewResult.url}\nOpened in in-app Live Preview.",
+                                )
+                            }
+                        }
+                    }
+                }
+                .onFailure { error ->
+                    terminalText = appendTerminalOutput(
+                        terminalText,
+                        "Could not prepare live preview: ${error.message ?: "unknown error"}",
+                    )
+                }
+        }
+    }
+
+    fun requestWebPreview() {
+        val previewActiveFile = activeFile
+        if (previewActiveFile == null) {
+            terminalText = appendTerminalOutput(
+                terminalText,
+                "$terminalPromptText preview\nNo file is open. Create or import a Web file before running preview.",
+            )
+            return
+        }
+        previewDestinationDialogOpen = true
+    }
+
+    fun runWebPreview(destination: WebPreviewDestination) {
+        val previewActiveFile = activeFile
+        if (previewActiveFile == null) {
+            terminalText = appendTerminalOutput(
+                terminalText,
+                "$terminalPromptText preview\nNo file is open. Create or import a Web file before running preview.",
+            )
+            return
+        }
         val previewFiles = files.withPendingEditorTexts(pendingEditorTextByFileId)
         val diagnostics = previewDiagnosticsForTerminal(rootDirectory, previewFiles)
         commitPendingEditorStateForPreview()
         terminalText = appendTerminalOutput(
             terminalText,
             buildString {
-                append("$terminalPromptText preview ${activeFile.name}\nOpening responsive Web preview.")
+                append("$terminalPromptText preview ${previewActiveFile.name}\nStarting localhost preview server.")
                 if (diagnostics.isNotBlank()) {
                     append("\n").append(diagnostics)
                 }
             },
         )
-        fullScreenMode = WebFullScreenMode.Preview
+        launchLivePreview(previewActiveFile, previewFiles, destination)
+    }
+
+    fun runActiveScriptFile(scriptFile: WebFile) {
+        val runnableFile = scriptFile.withPendingEditorText(pendingEditorTextByFileId)
+        commitPendingEditorStateForPreview()
+        val committedFile = files.firstOrNull { it.id == runnableFile.id } ?: runnableFile
+        coroutineScope.launch(Dispatchers.IO) {
+            saveFileContent(committedFile.filePath, committedFile.content, committedFile.modifiedAt)
+        }
+        terminalJsToRun = terminalRunnableJavaScript(committedFile, rootDirectory)
+        when (fullScreenMode) {
+            WebFullScreenMode.Editor,
+            WebFullScreenMode.Ai -> fullScreenMode = WebFullScreenMode.Terminal
+            WebFullScreenMode.Terminal -> Unit
+            null -> terminalRevealRequest += 1L
+        }
+    }
+
+    fun runActiveFile() {
+        val fileToRun = activeFile
+        if (fileToRun == null) {
+            terminalText = appendTerminalOutput(
+                terminalText,
+                "$terminalPromptText run\nNo file is open. Create or import a Web file before running code.",
+            )
+            return
+        }
+        if (isTerminalRunnableScript(fileToRun.name)) {
+            runActiveScriptFile(fileToRun)
+        } else {
+            requestWebPreview()
+        }
     }
 
     fun submitTerminalCommand(commandOverride: String? = null) {
@@ -947,6 +1330,7 @@ private fun WebIdeApp(
         if (command.isBlank()) return
         terminalInput = ""
         terminalText = appendTerminalOutput(terminalText, "$terminalPromptText ${redactTerminalCommandForDisplay(command)}")
+        discardEditorStateForTerminalDelete(command)
         coroutineScope.launch {
             val result = withContext(Dispatchers.IO) {
                 executeWebShellCommand(command, rootDirectory, terminalDirectory)
@@ -961,15 +1345,26 @@ private fun WebIdeApp(
                 terminalDirectoryPath = it
                 workingDirectoryPath = it
             }
-            if (result.workspaceChanged) refreshFiles(workingPath = terminalDirectoryPath)
+            if (result.workspaceChanged || result.openFilePath != null) {
+                val safeTerminalPath = validDirectoryOrRoot(rootDirectory, terminalDirectoryPath).absolutePath
+                terminalDirectoryPath = safeTerminalPath
+                val openPath = result.openFilePath
+                refreshFiles(
+                    selectPath = openPath,
+                    workingPath = openPath?.let { File(it).parent } ?: safeTerminalPath,
+                )
+                if (openPath != null) fullScreenMode = WebFullScreenMode.Editor
+            }
             if (result.openPreview) {
-                val previewFiles = files.withPendingEditorTexts(pendingEditorTextByFileId)
-                val diagnostics = previewDiagnosticsForTerminal(rootDirectory, previewFiles)
-                commitPendingEditorStateForPreview()
-                if (diagnostics.isNotBlank()) {
-                    terminalText = appendTerminalOutput(terminalText, diagnostics)
+                val previewActiveFile = activeFile
+                if (previewActiveFile == null) {
+                    terminalText = appendTerminalOutput(
+                        terminalText,
+                        "No file is open. Create or import a Web file before running preview.",
+                    )
+                    return@launch
                 }
-                fullScreenMode = WebFullScreenMode.Preview
+                previewDestinationDialogOpen = true
             }
         }
     }
@@ -978,10 +1373,6 @@ private fun WebIdeApp(
         val promptText = aiInput.trim()
         if (promptText.isBlank() || aiBusy) return
         val apiKey = userAiApiKey.trim()
-        if (apiKey.isBlank()) {
-            aiError = "Add a Gemini API key to use AI Chat."
-            return
-        }
         aiInput = ""
         aiError = null
         aiVerificationMessage = null
@@ -990,17 +1381,18 @@ private fun WebIdeApp(
             aiBusy = true
             val result = withContext(Dispatchers.IO) {
                 runCatching {
-                    callGeminiDirectly(
-                        modelId = selectedAiModel.id,
-                        prompt = buildAiCopilotPrompt(
+                    val fullPrompt = buildAiCopilotPrompt(
                             rootDirectory = rootDirectory,
                             files = files.withPendingEditorTexts(pendingEditorTextByFileId),
-                            activeFile = activeFile.withPendingEditorText(pendingEditorTextByFileId),
+                            activeFile = activeFile?.withPendingEditorText(pendingEditorTextByFileId),
                             userPrompt = promptText,
                             terminalText = terminalText,
-                        ),
-                        apiKey = apiKey,
-                    )
+                        )
+                    if (apiKey.isNotBlank()) {
+                        callGeminiDirectly(selectedAiModel.id, fullPrompt, apiKey)
+                    } else {
+                        callGeminiBackend(selectedAiModel.id, fullPrompt)
+                    }
                 }
             }
             result
@@ -1008,7 +1400,7 @@ private fun WebIdeApp(
                     aiMessages += AiChatMessage(AiChatRole.Assistant, response)
                     aiPendingAction = suggestedActionFromAiText(
                         text = response,
-                        activeFile = activeFile.withPendingEditorText(pendingEditorTextByFileId),
+                        activeFile = activeFile?.withPendingEditorText(pendingEditorTextByFileId),
                     )
                 }
                 .onFailure { error ->
@@ -1027,17 +1419,30 @@ private fun WebIdeApp(
                 aiVerificationMessage = "Started suggested terminal command."
             }
             is AiSuggestedAction.ReplaceActiveFile -> {
-                updateActiveContent(action.code)
-                aiVerificationMessage = "Replaced ${activeFile.name}."
+                val targetFile = activeFile
+                if (targetFile == null) {
+                    aiVerificationMessage = "Create or open a file before replacing the active file."
+                } else {
+                    updateActiveContent(action.code)
+                    aiVerificationMessage = "Replaced ${targetFile.name}."
+                }
             }
             is AiSuggestedAction.ApplyProjectFileChanges -> {
                 runCatching {
+                    action.changes
+                        .filter { it.operation == AiProjectFileOperation.Delete }
+                        .forEach { change ->
+                            val target = File(rootDirectory, change.path).canonicalFile
+                            files
+                                .firstOrNull { file -> samePath(file.filePath, target.absolutePath) }
+                                ?.let { file -> discardEditorState(file.id) }
+                        }
                     applyAiProjectFileChanges(rootDirectory, action.changes)
                 }.onSuccess { message ->
                     val selectedPath = action.changes
                         .firstOrNull { it.operation == AiProjectFileOperation.Write }
                         ?.let { File(rootDirectory, it.path).absolutePath }
-                        ?: activeFile.filePath
+                        ?: activeFile?.filePath
                     refreshFiles(selectPath = selectedPath, workingPath = workingDirectory.absolutePath)
                     aiVerificationMessage = message
                 }.onFailure { error ->
@@ -1059,25 +1464,10 @@ private fun WebIdeApp(
         fullScreenMode,
         userAiApiKey,
         expandedFolderPaths.size,
+        browserPreviewReturnPending,
     ) {
         delay(2000L) // Debounce session saving to reduce IO overhead
-        saveWebIdeSession(
-            context = context,
-            rootDirectory = rootDirectory,
-            session = WebSession(
-                activeFileId = activeFileId,
-                activeFilePath = activeFile.filePath,
-                workingDirectoryPath = workingDirectoryPath,
-                terminalDirectoryPath = terminalDirectoryPath,
-                expandedFolderPaths = expandedFolderPaths.toList(),
-                explorerVisible = explorerVisible,
-                fileSearch = fileSearch,
-                terminalInput = terminalInput,
-                terminalText = terminalText,
-                fullScreenMode = fullScreenMode,
-                userAiApiKey = userAiApiKey.takeIf { it.isNotBlank() },
-            ),
-        )
+        saveCurrentWebIdeSession(persistTerminalText = browserPreviewReturnPending)
     }
 
     Box(
@@ -1087,24 +1477,43 @@ private fun WebIdeApp(
             .systemBarsPadding(),
     ) {
         when (fullScreenMode) {
-            WebFullScreenMode.Editor -> WebEditorFullScreen(
-                files = tabFiles,
-                activeFile = activeFile,
+            WebFullScreenMode.Editor -> {
+                val currentFile = activeFile
+                if (currentFile == null) {
+                    EmptyEditorFullScreen(
+                        files = tabFiles,
+                        palette = palette,
+                        onSelectFile = ::selectFile,
+                        onAddFile = { newFileDialogOpen = true },
+                        onDeleteFile = { fileId ->
+                            files.firstOrNull { it.id == fileId }?.let { deleteFileTarget = it }
+                        },
+                        onBack = { fullScreenMode = null },
+                    )
+                } else {
+                    WebEditorFullScreen(
+                        files = tabFiles,
+                        activeFile = currentFile,
+                        palette = palette,
+                        darkMode = ideTheme.isDark,
+                        nextThemeName = ideTheme.next().displayName,
+                        onToggleTheme = onToggleTheme,
+                        onSelectFile = ::selectFile,
+                        onAddFile = { newFileDialogOpen = true },
+                        onDeleteFile = { fileId ->
+                            files.firstOrNull { it.id == fileId }?.let { deleteFileTarget = it }
+                        },
+                        onCodeChange = ::updateActiveContent,
+                        onRunPreview = ::runActiveFile,
+                        onBack = { fullScreenMode = null },
+                    )
+                }
+            }
+            WebFullScreenMode.Terminal -> WebTerminalFullScreen(
                 palette = palette,
                 darkMode = ideTheme.isDark,
                 nextThemeName = ideTheme.next().displayName,
                 onToggleTheme = onToggleTheme,
-                onSelectFile = ::selectFile,
-                onAddFile = { newFileDialogOpen = true },
-                onDeleteFile = { fileId ->
-                    files.firstOrNull { it.id == fileId }?.let { deleteFileTarget = it }
-                },
-                onCodeChange = ::updateActiveContent,
-                onRunPreview = ::runWebPreview,
-                onBack = { fullScreenMode = null },
-            )
-            WebFullScreenMode.Terminal -> WebTerminalFullScreen(
-                palette = palette,
                 promptText = terminalPromptText,
                 text = terminalText,
                 input = terminalInput,
@@ -1131,16 +1540,6 @@ private fun WebIdeApp(
                 onDismissAction = { aiPendingAction = null },
                 onBack = { fullScreenMode = null },
             )
-            WebFullScreenMode.Preview -> WebPreviewFullScreen(
-                rootDirectory = rootDirectory,
-                files = files.withPendingEditorTexts(pendingEditorTextByFileId),
-                activeFile = activeFile.withPendingEditorText(pendingEditorTextByFileId),
-                palette = palette,
-                onRuntimeMessage = { message ->
-                    terminalText = appendTerminalOutput(terminalText, message)
-                },
-                onBack = { fullScreenMode = null },
-            )
             null -> WebIdeHomeScreen(
                 files = files,
                 tabFiles = tabFiles,
@@ -1157,6 +1556,7 @@ private fun WebIdeApp(
                 expandedFolderPaths = expandedFolderPaths,
                 terminalText = terminalText,
                 terminalInput = terminalInput,
+                terminalRevealRequest = terminalRevealRequest,
                 onToggleTheme = onToggleTheme,
                 onBackToProjects = onBackToProjects,
                 onToggleExplorer = { explorerVisible = !explorerVisible },
@@ -1171,7 +1571,7 @@ private fun WebIdeApp(
                 onSelectFolder = ::selectFolder,
                 onSelectFile = ::selectFile,
                 onCodeChange = ::updateActiveContent,
-                onRunPreview = ::runWebPreview,
+                onRunPreview = ::runActiveFile,
                 onOpenAi = { fullScreenMode = WebFullScreenMode.Ai },
                 onFileActions = { fileActionsDialogOpen = true },
                 onNewFile = { newFileDialogOpen = true },
@@ -1186,6 +1586,49 @@ private fun WebIdeApp(
                 directoryVersion = directoryVersion,
             )
         }
+
+        inAppLivePreview?.let { preview ->
+            InAppLivePreviewScreen(
+                preview = preview,
+                palette = palette,
+                onClose = { inAppLivePreview = null },
+                onOpenExternal = { url ->
+                    inAppLivePreview = null
+                    browserPreviewReturnPending = true
+                    terminalText = appendTerminalOutput(
+                        terminalText,
+                        "Opening in your device browser: $url",
+                    )
+                    prepareBrowserPreviewHandoff()
+                    val launchError = openUrlInDefaultBrowser(context, url)
+                    if (launchError != null) {
+                        browserPreviewReturnPending = false
+                        terminalText = appendTerminalOutput(
+                            terminalText,
+                            "Could not open the device browser: $launchError",
+                        )
+                    }
+                },
+                onLog = { message ->
+                    terminalText = appendTerminalOutput(terminalText, message)
+                },
+            )
+        }
+    }
+
+    if (previewDestinationDialogOpen) {
+        PreviewDestinationDialog(
+            palette = palette,
+            onDismiss = { previewDestinationDialogOpen = false },
+            onOpenInApp = {
+                previewDestinationDialogOpen = false
+                runWebPreview(WebPreviewDestination.InApp)
+            },
+            onOpenBrowser = {
+                previewDestinationDialogOpen = false
+                runWebPreview(WebPreviewDestination.Browser)
+            },
+        )
     }
 
     if (fileActionsDialogOpen) {
@@ -1273,11 +1716,365 @@ private fun WebIdeApp(
     }
 }
 
+private fun configureFirebaseAppCheck(context: Context) {
+    FirebaseApp.initializeApp(context)
+    val provider: AppCheckProviderFactory = if (BuildConfig.DEBUG) {
+        DebugAppCheckProviderFactory.getInstance()
+    } else {
+        PlayIntegrityAppCheckProviderFactory.getInstance()
+    }
+    FirebaseAppCheck.getInstance().installAppCheckProviderFactory(provider)
+}
+
+@Composable
+private fun PreviewDestinationDialog(
+    palette: WebPalette,
+    onDismiss: () -> Unit,
+    onOpenInApp: () -> Unit,
+    onOpenBrowser: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            color = palette.panel,
+            contentColor = palette.text,
+            shape = RoundedCornerShape(8.dp),
+            border = BorderStroke(1.dp, palette.strongBorder.copy(alpha = 0.65f)),
+            tonalElevation = 0.dp,
+            shadowElevation = 10.dp,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(palette.accent.copy(alpha = 0.16f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Visibility,
+                            contentDescription = null,
+                            tint = palette.accent,
+                            modifier = Modifier.size(23.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Open preview",
+                            color = palette.text,
+                            fontSize = 22.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = "Choose a preview target",
+                            color = palette.mutedText,
+                            fontSize = 13.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+
+                Spacer(Modifier.height(18.dp))
+                Button(
+                    onClick = onOpenInApp,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = palette.run,
+                        contentColor = palette.runText,
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Visibility,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "In-app Live Preview",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+
+                Spacer(Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = onOpenBrowser,
+                    border = BorderStroke(1.dp, palette.border),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = palette.tab,
+                        contentColor = palette.text,
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(52.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Language,
+                        contentDescription = null,
+                        tint = palette.text,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = "Browser localhost",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun InAppLivePreviewScreen(
+    preview: InAppLivePreviewState,
+    palette: WebPalette,
+    onClose: () -> Unit,
+    onOpenExternal: (String) -> Unit,
+    onLog: (String) -> Unit,
+) {
+    var webView by remember(preview.url) { mutableStateOf<WebView?>(null) }
+    var currentUrl by remember(preview.url) { mutableStateOf(preview.url) }
+    var currentTitle by remember(preview.url) { mutableStateOf(preview.title) }
+    var progress by remember(preview.url) { mutableStateOf(0) }
+    var canGoBack by remember(preview.url) { mutableStateOf(false) }
+    var canGoForward by remember(preview.url) { mutableStateOf(false) }
+
+    fun updateNavigationState(view: WebView) {
+        canGoBack = view.canGoBack()
+        canGoForward = view.canGoForward()
+        currentUrl = view.url.orEmpty().ifBlank { currentUrl }
+        currentTitle = view.title.orEmpty().ifBlank { currentTitle.ifBlank { preview.title } }
+    }
+
+    BackHandler(enabled = true) {
+        val view = webView
+        if (view?.canGoBack() == true) {
+            view.goBack()
+            updateNavigationState(view)
+        } else {
+            onClose()
+        }
+    }
+
+    DisposableEffect(preview.url) {
+        onDispose {
+            webView?.stopLoading()
+            webView?.destroy()
+            webView = null
+        }
+    }
+
+    Surface(
+        color = palette.backgroundBottom,
+        modifier = Modifier.fillMaxSize(),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(palette.panel)
+                    .border(BorderStroke(1.dp, palette.border))
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    IconButton(
+                        onClick = {
+                            webView?.goBack()
+                            webView?.let(::updateNavigationState)
+                        },
+                        enabled = canGoBack,
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Back",
+                            tint = if (canGoBack) palette.text else palette.subtleText,
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            webView?.goForward()
+                            webView?.let(::updateNavigationState)
+                        },
+                        enabled = canGoForward,
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                            contentDescription = "Forward",
+                            tint = if (canGoForward) palette.text else palette.subtleText,
+                        )
+                    }
+                    IconButton(
+                        onClick = { webView?.reload() },
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = "Reload",
+                            tint = palette.text,
+                        )
+                    }
+                    Surface(
+                        color = palette.elevatedPanel,
+                        shape = RoundedCornerShape(8.dp),
+                        border = BorderStroke(1.dp, palette.border),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 10.dp),
+                            contentAlignment = Alignment.CenterStart,
+                        ) {
+                            Text(
+                                text = currentUrl,
+                                color = palette.mutedText,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { onOpenExternal(currentUrl.ifBlank { preview.url }) },
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Language,
+                            contentDescription = "Open in browser",
+                            tint = palette.text,
+                        )
+                    }
+                    IconButton(
+                        onClick = onClose,
+                        modifier = Modifier.size(38.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = "Close preview",
+                            tint = palette.text,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    text = currentTitle.ifBlank { preview.title },
+                    color = palette.text,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+                Spacer(Modifier.height(6.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp)
+                        .background(palette.border),
+                ) {
+                    if (progress in 1..99) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(progress / 100f)
+                                .fillMaxHeight()
+                                .background(palette.accent),
+                        )
+                    }
+                }
+            }
+
+            key(preview.url) {
+                AndroidView(
+                    factory = { context ->
+                        WebView(context).apply {
+                            webView = this
+                            settings.javaScriptEnabled = true
+                            settings.domStorageEnabled = true
+                            settings.allowFileAccess = true
+                            settings.allowContentAccess = true
+                            settings.mediaPlaybackRequiresUserGesture = false
+                            settings.useWideViewPort = true
+                            settings.loadWithOverviewMode = true
+                            settings.builtInZoomControls = true
+                            settings.displayZoomControls = false
+                            webViewClient = object : WebViewClient() {
+                                override fun onPageFinished(view: WebView?, url: String?) {
+                                    view ?: return
+                                    currentUrl = url.orEmpty().ifBlank { preview.url }
+                                    progress = 100
+                                    updateNavigationState(view)
+                                }
+
+                                override fun onReceivedError(
+                                    view: WebView?,
+                                    request: WebResourceRequest?,
+                                    error: WebResourceError?,
+                                ) {
+                                    if (request?.isForMainFrame == true) {
+                                        onLog(
+                                            formatPreviewRuntimeMessage(
+                                                level = "error",
+                                                message = error?.description?.toString() ?: "Page load failed.",
+                                                source = request.url?.toString().orEmpty().ifBlank { "in-app preview" },
+                                                line = 0,
+                                                column = 0,
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                            webChromeClient = object : WebChromeClient() {
+                                override fun onProgressChanged(view: WebView?, newProgress: Int) {
+                                    progress = newProgress.coerceIn(0, 100)
+                                    view?.let(::updateNavigationState)
+                                }
+
+                                override fun onReceivedTitle(view: WebView?, title: String?) {
+                                    if (!title.isNullOrBlank()) {
+                                        currentTitle = title
+                                    }
+                                    view?.let(::updateNavigationState)
+                                }
+                            }
+                            loadUrl(preview.url)
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun WebIdeHomeScreen(
     files: List<WebFile>,
     tabFiles: List<WebFile>,
-    activeFile: WebFile,
+    activeFile: WebFile?,
     projectName: String,
     rootDirectory: File,
     workingDirectory: File,
@@ -1290,6 +2087,7 @@ private fun WebIdeHomeScreen(
     expandedFolderPaths: List<String>,
     terminalText: String,
     terminalInput: String,
+    terminalRevealRequest: Long,
     onToggleTheme: () -> Unit,
     onBackToProjects: () -> Unit,
     onToggleExplorer: () -> Unit,
@@ -1319,6 +2117,12 @@ private fun WebIdeHomeScreen(
             .padding(horizontal = 14.dp),
     ) {
         val pageScroll = rememberScrollState()
+        LaunchedEffect(terminalRevealRequest) {
+            if (terminalRevealRequest > 0L) {
+                delay(80)
+                pageScroll.animateScrollTo(pageScroll.maxValue)
+            }
+        }
         val editorHeight = when {
             maxHeight < 740.dp -> 310.dp
             explorerVisible -> 390.dp
@@ -1347,7 +2151,7 @@ private fun WebIdeHomeScreen(
             Spacer(Modifier.height(10.dp))
             FileTabsBar(
                 files = tabFiles,
-                activeFileId = activeFile.id,
+                activeFileId = activeFile?.id ?: -1L,
                 palette = palette,
                 onSelectFile = onSelectFile,
                 onAddFile = onNewFile,
@@ -1365,7 +2169,7 @@ private fun WebIdeHomeScreen(
                 ) {
                     ExplorerPanel(
                         files = files,
-                        activeFileId = activeFile.id,
+                        activeFileId = activeFile?.id ?: -1L,
                         rootDirectory = rootDirectory,
                         workingDirectory = workingDirectory,
                         search = fileSearch,
@@ -1396,32 +2200,56 @@ private fun WebIdeHomeScreen(
                             explorerFraction = (explorerFraction + dragAmount / layoutWidthPx).coerceIn(0.28f, 0.72f)
                         },
                     )
+                    if (activeFile == null) {
+                        EmptyEditorPanel(
+                            palette = palette,
+                            modifier = Modifier.weight(1f - explorerFraction),
+                            height = editorHeight,
+                            onNewFile = onNewFile,
+                        )
+                    } else {
+                        WebCodeEditorPanel(
+                            file = activeFile,
+                            palette = palette,
+                            modifier = Modifier.weight(1f - explorerFraction),
+                            height = editorHeight,
+                            compact = true,
+                            onCodeChange = onCodeChange,
+                            onRunPreview = onRunPreview,
+                            onFullScreen = { onFullScreen(WebFullScreenMode.Editor) },
+                        )
+                    }
+                }
+            } else {
+                if (activeFile == null) {
+                    EmptyEditorPanel(
+                        palette = palette,
+                        modifier = Modifier.fillMaxWidth(),
+                        height = editorHeight,
+                        onNewFile = onNewFile,
+                    )
+                } else {
                     WebCodeEditorPanel(
                         file = activeFile,
                         palette = palette,
-                        modifier = Modifier.weight(1f - explorerFraction),
+                        modifier = Modifier.fillMaxWidth(),
                         height = editorHeight,
-                        compact = true,
+                        compact = false,
                         onCodeChange = onCodeChange,
                         onRunPreview = onRunPreview,
                         onFullScreen = { onFullScreen(WebFullScreenMode.Editor) },
                     )
                 }
-            } else {
-                WebCodeEditorPanel(
-                    file = activeFile,
-                    palette = palette,
-                    modifier = Modifier.fillMaxWidth(),
-                    height = editorHeight,
-                    compact = false,
-                    onCodeChange = onCodeChange,
-                    onRunPreview = onRunPreview,
-                    onFullScreen = { onFullScreen(WebFullScreenMode.Editor) },
-                )
             }
 
             Spacer(Modifier.height(12.dp))
-            RunPreviewButton(palette = palette, onClick = onRunPreview)
+            RunPreviewButton(
+                palette = palette,
+                label = runButtonLabelFor(activeFile),
+                preview = activeFile?.let { isLivePreviewFile(it.name) } == true,
+                enabled = activeFile != null,
+                onClick = onRunPreview,
+            )
             Spacer(Modifier.height(12.dp))
             WebTerminalPanel(
                 palette = palette,
@@ -2032,6 +2860,67 @@ private fun WebCodeEditorPanel(
 }
 
 @Composable
+private fun EmptyEditorPanel(
+    palette: WebPalette,
+    modifier: Modifier = Modifier,
+    height: Dp = Dp.Unspecified,
+    onNewFile: () -> Unit,
+) {
+    val panelModifier = if (height == Dp.Unspecified) {
+        modifier
+    } else {
+        modifier.height(height)
+    }
+
+    Panel(
+        palette = palette,
+        modifier = panelModifier,
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Description,
+                    contentDescription = null,
+                    tint = palette.accent,
+                    modifier = Modifier.size(34.dp),
+                )
+                Text(
+                    text = "No file open",
+                    color = palette.text,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = "Create or import a Web file to start editing.",
+                    color = palette.mutedText,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                )
+                Button(
+                    onClick = onNewFile,
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.accent),
+                    shape = RoundedCornerShape(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Add,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("New File")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SmartCodeEditor(
     file: WebFile,
     palette: WebPalette,
@@ -2046,9 +2935,6 @@ private fun SmartCodeEditor(
     var suppressCompletionsForText by remember(file.id) { mutableStateOf<String?>(null) }
     var diagnostics by remember(file.id) { mutableStateOf<List<CodeDiagnostic>>(emptyList()) }
     var completionResult by remember(file.id) { mutableStateOf(EditorCompletionResult()) }
-    var editorVisualResult by remember(file.id) {
-        mutableStateOf(WebLanguageServices.highlight(file.name, file.content, palette, emptyList()))
-    }
     var textMetrics by remember(file.id) {
         mutableStateOf(editorTextMetrics(file.content, cap = 1_600))
     }
@@ -2086,39 +2972,33 @@ private fun SmartCodeEditor(
                     suppressCompletionsForText != editorValue.text
         }
     }
-    LaunchedEffect(file.name, editorValue.text) {
+    LaunchedEffect(file.name, editorValue.text, palette) {
         val snapshot = editorValue.text
-        if (snapshot.length > LIVE_DIAGNOSTIC_CHAR_LIMIT) {
-            diagnostics = emptyList()
-            return@LaunchedEffect
-        }
-        delay(DIAGNOSTIC_IDLE_DELAY_MS)
+        delay(
+            when {
+                snapshot.length > LIVE_COLOR_RETARGET_RADIUS -> LARGE_FILE_HIGHLIGHT_IDLE_MS
+                snapshot.length > RESPONSIVE_HIGHLIGHT_CHAR_LIMIT -> DIAGNOSTIC_IDLE_DELAY_MS * 2
+                else -> DIAGNOSTIC_IDLE_DELAY_MS
+            }
+        )
         val fileOnDisk = File(file.filePath)
         val inspected = withContext(Dispatchers.Default) {
-            WebLanguageServices.diagnostics(fileOnDisk, file.name, snapshot)
+            if (
+                snapshot.length <= LIVE_DIAGNOSTIC_CHAR_LIMIT &&
+                snapshot.length <= RESPONSIVE_DIAGNOSTIC_CHAR_LIMIT
+            ) {
+                WebLanguageServices.diagnostics(fileOnDisk, file.name, snapshot)
+            } else {
+                emptyList()
+            }
         }
         if (snapshot == editorValue.text) {
             diagnostics = inspected
         }
     }
-    LaunchedEffect(file.name, editorValue.text, palette, diagnostics) {
-        val snapshot = editorValue.text
-        val fileName = file.name
-        val snapshotDiagnostics = diagnostics
-        if (snapshot.length > LIVE_SYNTAX_HIGHLIGHT_CHAR_LIMIT) {
-            editorVisualResult = EditorVisualResult(snapshot, AnnotatedString(snapshot))
-            return@LaunchedEffect
-        }
-        delay(SYNTAX_HIGHLIGHT_IDLE_DELAY_MS)
-        val visualResult = withContext(Dispatchers.Default) {
-            WebLanguageServices.highlight(fileName, snapshot, palette, snapshotDiagnostics)
-        }
-        if (snapshot == editorValue.text) {
-            editorVisualResult = visualResult
-        }
-    }
     LaunchedEffect(editorValue.text) {
         val snapshot = editorValue.text
+        delay(EDITOR_METRICS_IDLE_DELAY_MS)
         val metrics = withContext(Dispatchers.Default) {
             editorTextMetrics(snapshot, cap = 1_600)
         }
@@ -2141,7 +3021,9 @@ private fun SmartCodeEditor(
         val cursor = editorValue.selection.start.coerceIn(0, layout.layoutInput.text.length)
         val cursorRect = layout.getCursorRect(cursor)
         val topComfortPx = with(density) { 32.dp.toPx() }
-        val bottomComfortPx = with(density) { if (completionSurfaceVisible) 86.dp.toPx() else 34.dp.toPx() }
+        // The suggestion tray always reserves three rows, so cursor-reveal geometry
+        // must remain constant when suggestions appear or disappear.
+        val bottomComfortPx = with(density) { 34.dp.toPx() }
         val leftComfortPx = with(density) { 24.dp.toPx() }
         val rightComfortPx = with(density) { 44.dp.toPx() }
 
@@ -2177,7 +3059,6 @@ private fun SmartCodeEditor(
     LaunchedEffect(
         editorValue.text,
         editorValue.selection,
-        completionSurfaceVisible,
         lastTextLayoutResult,
         editorViewportHeightPx,
         editorViewportWidthPx,
@@ -2200,15 +3081,21 @@ private fun SmartCodeEditor(
         fontFamily = FontFamily.Monospace,
         fontSize = 14.sp,
         lineHeight = 20.sp,
+        platformStyle = PlatformTextStyle(includeFontPadding = false),
     )
     val showQuickKeys = showKeyboardAccessory && WindowInsets.ime.getBottom(density) > 0
-    val editorBottomComfort = if (completionSurfaceVisible) 72.dp else 16.dp
-    val editorVisualTransformation = remember(editorVisualResult, file.name, palette) {
+    val editorBottomComfort = 16.dp
+    val editorVisualTransformation = remember(
+        file.name,
+        palette,
+        diagnostics,
+        editorValue.selection.start,
+    ) {
         WebSyntaxTransformation(
-            source = editorVisualResult.source,
-            transformed = editorVisualResult.text,
             fileName = file.name,
             palette = palette,
+            diagnostics = diagnostics,
+            cursor = editorValue.selection.start,
         )
     }
     fun selectCompletion(item: CompletionItem) {
@@ -2231,7 +3118,8 @@ private fun SmartCodeEditor(
             Box(
                 modifier = Modifier
                     .width(gutterWidth)
-                    .fillMaxHeight(),
+                    .fillMaxHeight()
+                    .clipToBounds(),
             ) {
                 Text(
                     text = lineNumbers,
@@ -2240,8 +3128,10 @@ private fun SmartCodeEditor(
                     textAlign = TextAlign.End,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .fillMaxHeight()
-                        .verticalScroll(editorVerticalScroll)
+                        .wrapContentHeight(unbounded = true, align = Alignment.Top)
+                        .graphicsLayer {
+                            translationY = -editorVerticalScroll.value.toFloat()
+                        }
                         .padding(end = 3.dp),
                 )
             }
@@ -2280,17 +3170,11 @@ private fun SmartCodeEditor(
                         value = editorValue,
                         onValueChange = { requestedValue ->
                             val previousValue = editorValue
-                            val textChanged = requestedValue.text != previousValue.text
+                            // TextField selection updates normally retain the same String instance.
+                            // Referential comparison avoids walking a large document just to discover
+                            // that one character near the end changed.
+                            val textChanged = requestedValue.text !== previousValue.text
                             val updatedValue = applySmartWebEditorChange(previousValue, requestedValue, file.name)
-
-                            if (textChanged) {
-                                editorVisualResult = WebLanguageServices.highlight(
-                                    fileName = file.name,
-                                    source = updatedValue.text,
-                                    palette = palette,
-                                    diagnostics = emptyList(),
-                                )
-                            }
 
                             editorValue = updatedValue
                             if (textChanged) {
@@ -2300,7 +3184,7 @@ private fun SmartCodeEditor(
                             } else if (requestedValue.selection != previousValue.selection) {
                                 completionsVisible = false
                             }
-                            if (updatedValue.text != file.content) {
+                            if (updatedValue.text !== previousValue.text) {
                                 onCodeChange(updatedValue.text)
                             }
                         },
@@ -2330,15 +3214,16 @@ private fun SmartCodeEditor(
                 }
             }
         }
-        if (completionSurfaceVisible) {
-            Spacer(Modifier.height(6.dp))
-            CompletionSuggestionBar(
-                completions = completionResult.items,
-                palette = palette,
-                modifier = Modifier.fillMaxWidth(),
-                onSelect = { item -> selectCompletion(item) },
-            )
-        }
+        // Keep one compact completion strip mounted so suggestions never resize the
+        // editor. Items flow horizontally and can be scrolled when they overflow.
+        Spacer(Modifier.height(6.dp))
+        CompletionSuggestionBar(
+            completions = if (completionSurfaceVisible) completionResult.items else emptyList(),
+            diagnostics = if (completionSurfaceVisible) emptyList() else diagnostics,
+            palette = palette,
+            modifier = Modifier.fillMaxWidth(),
+            onSelect = { item -> selectCompletion(item) },
+        )
         if (showQuickKeys) {
             Spacer(Modifier.height(6.dp))
             EditorQuickKeys(
@@ -2351,14 +3236,6 @@ private fun SmartCodeEditor(
                     completionsVisible = false
                     onCodeChange(updated.text)
                 },
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        if (diagnostics.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            InspectionStrip(
-                diagnostics = diagnostics,
-                palette = palette,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -2389,38 +3266,44 @@ private fun SignatureHelpChip(
 @Composable
 private fun CompletionSuggestionBar(
     completions: List<CompletionItem>,
+    diagnostics: List<CodeDiagnostic>,
     palette: WebPalette,
     modifier: Modifier = Modifier,
     onSelect: (CompletionItem) -> Unit,
 ) {
-    val rows = remember(completions) { completions.take(16).chunked(3) }
-    LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        contentPadding = PaddingValues(4.dp),
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
-            .heightIn(min = 42.dp, max = 124.dp)
+            .height(42.dp)
             .clip(RoundedCornerShape(10.dp))
             .background(palette.elevatedPanel)
-            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(10.dp)),
+            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(10.dp))
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 4.dp),
     ) {
-        items(
-            items = rows,
-            key = { row -> row.joinToString("|") { it.completionKey() } },
-        ) { rowItems ->
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-            ) {
-                rowItems.forEach { item ->
-                    CompletionSuggestionChip(
-                        item = item,
-                        palette = palette,
-                        onSelect = { onSelect(item) },
-                    )
-                }
+        completions.take(16).forEach { item ->
+            CompletionSuggestionChip(
+                item = item,
+                palette = palette,
+                onSelect = { onSelect(item) },
+            )
+        }
+        if (completions.isEmpty()) {
+            diagnostics.take(8).forEach { diagnostic ->
+                Text(
+                    text = "L${diagnostic.line}: ${diagnostic.message}",
+                    color = diagnosticColor(diagnostic.severity, palette),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .widthIn(max = 280.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(palette.panel)
+                        .padding(horizontal = 9.dp, vertical = 7.dp),
+                )
             }
         }
     }
@@ -2603,6 +3486,48 @@ private fun QuickKey(
 }
 
 @Composable
+private fun EmptyEditorFullScreen(
+    files: List<WebFile>,
+    palette: WebPalette,
+    onSelectFile: (Long) -> Unit,
+    onAddFile: () -> Unit,
+    onDeleteFile: (Long) -> Unit,
+    onBack: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding()
+            .padding(horizontal = 14.dp)
+            .padding(bottom = 10.dp),
+    ) {
+        Spacer(Modifier.height(4.dp))
+        FileTabsOnlyBar(
+            files = files,
+            activeFileId = -1L,
+            palette = palette,
+            onSelectFile = onSelectFile,
+            onAddFile = onAddFile,
+            onDeleteFile = onDeleteFile,
+        )
+        Spacer(Modifier.height(10.dp))
+        EmptyEditorPanel(
+            palette = palette,
+            modifier = Modifier.weight(1f),
+            onNewFile = onAddFile,
+        )
+        Spacer(Modifier.height(12.dp))
+        OutlinedButton(
+            onClick = onBack,
+            modifier = Modifier.fillMaxWidth().height(48.dp),
+            shape = RoundedCornerShape(12.dp),
+        ) {
+            Text("Back")
+        }
+    }
+}
+
+@Composable
 private fun WebEditorFullScreen(
     files: List<WebFile>,
     activeFile: WebFile,
@@ -2653,6 +3578,8 @@ private fun WebEditorFullScreen(
             Spacer(Modifier.height(12.dp))
             RunPreviewButton(
                 palette = palette,
+                label = runButtonLabelFor(activeFile),
+                preview = isLivePreviewFile(activeFile.name),
                 onClick = onRunPreview,
             )
         }
@@ -2660,21 +3587,33 @@ private fun WebEditorFullScreen(
 }
 
 @Composable
-private fun RunPreviewButton(palette: WebPalette, onClick: () -> Unit) {
+private fun RunPreviewButton(
+    palette: WebPalette,
+    label: String = "Run Code",
+    preview: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
     Button(
         onClick = onClick,
-        colors = ButtonDefaults.buttonColors(containerColor = palette.run, contentColor = palette.runText),
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = palette.run,
+            contentColor = palette.runText,
+            disabledContainerColor = palette.tab,
+            disabledContentColor = palette.mutedText,
+        ),
         shape = RoundedCornerShape(14.dp),
         modifier = Modifier.fillMaxWidth().height(54.dp),
     ) {
         Icon(
-            imageVector = Icons.Rounded.PlayArrow,
+            imageVector = if (preview) Icons.Rounded.Visibility else Icons.Rounded.PlayArrow,
             contentDescription = null,
             modifier = Modifier.size(25.dp),
         )
         Spacer(Modifier.width(9.dp))
         Text(
-            text = "Run Code",
+            text = label,
             fontSize = 21.sp,
             fontWeight = FontWeight.Medium,
         )
@@ -2689,6 +3628,14 @@ private fun WebTerminalPanel(
     input: String,
     height: Dp = 220.dp,
     modifier: Modifier = Modifier,
+    showHeader: Boolean = true,
+    expanded: Boolean = false,
+    darkMode: Boolean? = null,
+    nextThemeName: String = "",
+    onToggleTheme: (() -> Unit)? = null,
+    isRunning: Boolean = false,
+    keepInputVisibleWhileRunning: Boolean = true,
+    isAwaitingInput: Boolean = false,
     onInputChange: (String) -> Unit,
     onSend: () -> Unit,
     onFullScreen: () -> Unit,
@@ -2713,43 +3660,63 @@ private fun WebTerminalPanel(
         }
     }
 
-    Panel(
-        palette = palette,
-        modifier = modifier
+    val panelModifier = if (height == Dp.Unspecified) {
+        modifier.fillMaxWidth()
+    } else {
+        modifier
             .fillMaxWidth()
             .height(height)
-            .bringIntoViewRequester(bringIntoViewRequester),
+    }
+
+    Panel(
+        palette = palette,
+        modifier = panelModifier.bringIntoViewRequester(bringIntoViewRequester),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "Terminal Output",
-                color = palette.text,
-                fontSize = 17.sp,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onFullScreen, modifier = Modifier.size(34.dp)) {
-                Icon(
-                    imageVector = Icons.Rounded.Fullscreen,
-                    contentDescription = "Fullscreen terminal",
-                    tint = palette.text,
-                    modifier = Modifier.size(22.dp),
+        if (showHeader) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Terminal Output",
+                    color = palette.text,
+                    fontSize = 17.sp,
+                    modifier = Modifier.weight(1f),
                 )
+                if (darkMode != null && onToggleTheme != null) {
+                    IdeThemeCycleButton(
+                        darkMode = darkMode,
+                        nextThemeName = nextThemeName,
+                        buttonColor = palette.elevatedPanel,
+                        borderColor = palette.border,
+                        contentColor = palette.text,
+                        onClick = onToggleTheme,
+                        modifier = Modifier.size(30.dp),
+                        iconSize = 18.dp,
+                    )
+                    Spacer(Modifier.width(4.dp))
+                }
+                IconButton(onClick = onFullScreen, modifier = Modifier.size(34.dp)) {
+                    Icon(
+                        imageVector = if (expanded) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                        contentDescription = if (expanded) "Minimize terminal" else "Fullscreen terminal",
+                        tint = palette.text,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
             }
+            Spacer(Modifier.height(7.dp))
+            HorizontalRule(palette)
+            Spacer(Modifier.height(7.dp))
         }
-        Spacer(Modifier.height(7.dp))
-        HorizontalRule(palette)
-        Spacer(Modifier.height(7.dp))
         TerminalBody(
             terminalText = text,
             terminalInput = input,
             palette = palette,
             promptText = promptText,
-            isRunning = false,
-            keepInputVisibleWhileRunning = true,
-            isAwaitingInput = false,
+            isRunning = isRunning,
+            keepInputVisibleWhileRunning = keepInputVisibleWhileRunning,
+            isAwaitingInput = isAwaitingInput,
             onTerminalFocusChange = { focused ->
                 terminalFocused = focused
                 if (focused) bringTerminalIntoView()
@@ -2827,10 +3794,12 @@ private fun TerminalBody(
         color = palette.terminalPrompt,
         fontWeight = FontWeight.SemiBold,
     )
-    val longestTerminalLineLength = remember(displayedTerminalText, activeInputPrefix, terminalInput, showInputRow) {
-        val outputLength = estimatedLongestLineLength(displayedTerminalText, cap = 4_000)
+    val longestOutputLineLength = remember(displayedTerminalText) {
+        estimatedLongestLineLength(displayedTerminalText, cap = 4_000)
+    }
+    val longestTerminalLineLength = remember(longestOutputLineLength, activeInputPrefix, terminalInput, showInputRow) {
         val inputLength = if (showInputRow) activeInputPrefix.length + terminalInput.length + 1 else 0
-        maxOf(outputLength, inputLength, 1).coerceAtMost(4_000)
+        maxOf(longestOutputLineLength, inputLength, 1).coerceAtMost(4_000)
     }
 
     fun focusTerminalInput() {
@@ -2904,7 +3873,6 @@ private fun TerminalBody(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .imePadding()
                                 .bringIntoViewRequester(inputBringIntoViewRequester),
                         ) {
                             Text(
@@ -2942,6 +3910,9 @@ private fun TerminalBody(
 @Composable
 private fun WebTerminalFullScreen(
     palette: WebPalette,
+    darkMode: Boolean,
+    nextThemeName: String,
+    onToggleTheme: () -> Unit,
     promptText: String,
     text: String,
     input: String,
@@ -2949,32 +3920,34 @@ private fun WebTerminalFullScreen(
     onSend: () -> Unit,
     onBack: () -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().padding(14.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, null, tint = palette.text) }
-            Text("Terminal", color = palette.text, fontWeight = FontWeight.Bold)
-        }
-        Spacer(Modifier.height(10.dp))
-        Surface(
-            color = palette.panel,
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.dp, palette.border),
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            TerminalBody(
-                terminalText = text,
-                terminalInput = input,
-                palette = palette,
-                promptText = promptText,
-                isRunning = false,
-                keepInputVisibleWhileRunning = true,
-                isAwaitingInput = false,
-                onTerminalFocusChange = {},
-                onTerminalInputChange = onInputChange,
-                onTerminalCommandSubmit = onSend,
-                modifier = Modifier.padding(12.dp),
-            )
-        }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding()
+            .padding(horizontal = 8.dp)
+            .padding(bottom = 6.dp),
+    ) {
+        Spacer(Modifier.height(4.dp))
+        WebTerminalPanel(
+            palette = palette,
+            promptText = promptText,
+            text = text,
+            input = input,
+            height = Dp.Unspecified,
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            expanded = true,
+            darkMode = darkMode,
+            nextThemeName = nextThemeName,
+            onToggleTheme = onToggleTheme,
+            isRunning = false,
+            keepInputVisibleWhileRunning = true,
+            isAwaitingInput = false,
+            onInputChange = onInputChange,
+            onSend = onSend,
+            onFullScreen = onBack,
+        )
     }
 }
 
@@ -2998,7 +3971,7 @@ private fun AiChatFullScreen(
     onDismissAction: () -> Unit,
     onBack: () -> Unit,
 ) {
-    val aiEnabled = userAiApiKey.isNotBlank() && !busy
+    val aiEnabled = !busy
 
     Column(
         modifier = Modifier
@@ -3488,11 +4461,12 @@ private fun AiPersonalKeySection(
             }
 
             if (isEditing || currentKey.isBlank()) {
-                ClickableText(
-                    text = AnnotatedString("Get a free API key at Google AI Studio"),
+                Text(
+                    text = "Get a free API key at Google AI Studio",
                     style = TextStyle(color = palette.accent, fontSize = 11.sp, textDecoration = TextDecoration.Underline),
-                    modifier = Modifier.padding(top = 8.dp),
-                    onClick = { uriHandler.openUri("https://aistudio.google.com/app/apikey") },
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .clickable { uriHandler.openUri("https://aistudio.google.com/app/apikey") },
                 )
             }
         }
@@ -3595,7 +4569,7 @@ private fun AiComposer(
                 ) {
                     if (input.isBlank()) {
                         Text(
-                            text = if (enabled) "Ask about this project..." else "Add a Gemini API key to use AI",
+                            text = if (enabled) "Ask about this project..." else "AI request in progress…",
                             color = palette.subtleText,
                             fontSize = 14.sp,
                         )
@@ -3623,178 +4597,432 @@ private fun AiComposer(
     }
 }
 
-@Composable
-private fun WebPreviewFullScreen(
-    rootDirectory: File,
-    files: List<WebFile>,
-    activeFile: WebFile,
-    palette: WebPalette,
-    onRuntimeMessage: (String) -> Unit,
-    onBack: () -> Unit,
-) {
-    val latestRuntimeMessage = rememberUpdatedState(onRuntimeMessage)
-    val previewFilesKey = files.joinToString("|") { file -> "${file.filePath}:${file.modifiedAt}:${file.content.hashCode()}" }
-    var previewEntryFile by remember(rootDirectory.absolutePath) { mutableStateOf<File?>(null) }
-    var previewError by remember(rootDirectory.absolutePath) { mutableStateOf<String?>(null) }
+private data class BrowserPreviewLaunchResult(
+    val url: String,
+    val error: String? = null,
+)
 
-    LaunchedEffect(rootDirectory.absolutePath, previewFilesKey, activeFile.filePath, activeFile.content) {
-        val result = withContext(Dispatchers.IO) {
-            runCatching { prepareLivePreviewEntry(rootDirectory, files, activeFile) }
-        }
-        result.onSuccess { entryFile ->
-            previewEntryFile = entryFile
-            previewError = null
-        }.onFailure { error ->
-            previewEntryFile = null
-            previewError = error.message ?: "Could not prepare the live preview."
-        }
-    }
-
-    Column(modifier = Modifier.fillMaxSize().background(Color.White)) {
-        Row(
-            modifier = Modifier.fillMaxWidth().background(palette.backgroundTop).padding(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, null, tint = palette.text) }
-            Text("Responsive Preview", color = palette.text, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            Text(activeFile.name, color = palette.subtleText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        previewError?.let { message ->
-            Text(
-                text = message,
-                color = palette.error,
-                fontSize = 12.sp,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(palette.elevatedPanel)
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-            )
-        }
-        AndroidView(
-            factory = {
-                WebView(it).apply {
-                    configureLivePreviewWebView(
-                        webView = this,
-                        onRuntimeMessage = { message -> latestRuntimeMessage.value(message) },
-                    )
-                }
-            },
-            update = { webView ->
-                val entryFile = previewEntryFile
-                if (entryFile == null) {
-                    if (webView.tag != "preparing") {
-                        webView.tag = "preparing"
-                        webView.loadDataWithBaseURL(
-                            null,
-                            livePreviewStatusHtml("Preparing preview..."),
-                            "text/html",
-                            "UTF-8",
-                            null,
-                        )
-                    }
-                    return@AndroidView
-                }
-                val previewUrl = Uri.fromFile(entryFile).toString()
-                if (webView.tag != previewUrl) {
-                    webView.tag = previewUrl
-                    loadLivePreviewUrl(webView, previewUrl)
-                }
-            },
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
+private fun startLivePreviewServer(
+    entryFile: File,
+    onLog: (String) -> Unit,
+): BrowserPreviewLaunchResult {
+    val previewDirectory = entryFile.parentFile
+        ?: return BrowserPreviewLaunchResult(url = "", error = "Preview directory is missing.")
+    val url = runCatching {
+        LocalhostPreviewServer.serve(
+            directory = previewDirectory,
+            entryName = entryFile.name,
+            onLog = onLog,
+        )
+    }.getOrElse { error ->
+        return BrowserPreviewLaunchResult(
+            url = "",
+            error = error.message ?: error::class.java.simpleName,
         )
     }
+
+    return BrowserPreviewLaunchResult(url = url)
 }
 
-@Suppress("DEPRECATION")
-private fun configureLivePreviewWebView(
-    webView: WebView,
-    onRuntimeMessage: (String) -> Unit,
-) {
-    webView.isFocusable = false
-    webView.isFocusableInTouchMode = false
-    webView.isLongClickable = false
-    webView.setBackgroundColor(android.graphics.Color.WHITE)
-    webView.webChromeClient = object : WebChromeClient() {
-        override fun onConsoleMessage(consoleMessage: ConsoleMessage?): Boolean {
-            consoleMessage ?: return false
-            onRuntimeMessage(
-                formatPreviewRuntimeMessage(
-                    level = consoleMessage.messageLevel().name.lowercase(),
-                    message = consoleMessage.message().orEmpty(),
-                    source = consoleMessage.sourceId().orEmpty(),
-                    line = consoleMessage.lineNumber(),
-                    column = 0,
-                )
-            )
-            return true
+private fun openLivePreviewInDefaultBrowser(
+    context: Context,
+    entryFile: File,
+    onLog: (String) -> Unit,
+    beforeOpen: (String) -> Unit = {},
+): BrowserPreviewLaunchResult {
+    val previewResult = startLivePreviewServer(entryFile, onLog)
+    if (previewResult.error != null) return previewResult
+
+    beforeOpen(previewResult.url)
+    val launchError = openUrlInDefaultBrowser(context, previewResult.url)
+    return BrowserPreviewLaunchResult(url = previewResult.url, error = launchError)
+}
+
+private fun openUrlInDefaultBrowser(context: Context, url: String): String? {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        addCategory(Intent.CATEGORY_BROWSABLE)
+        if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+
+    return runCatching {
+        context.startActivity(intent)
+    }.fold(
+        onSuccess = { null },
+        onFailure = { error -> error.message ?: error::class.java.simpleName },
+    )
+}
+
+private object LocalhostPreviewServer {
+    private val lock = Any()
+    private var serverSocket: ServerSocket? = null
+    private var serverThread: Thread? = null
+    private var rootDirectory: File? = null
+    private var entryFileName: String = "index.html"
+    private var logSink: ((String) -> Unit)? = null
+    private var port: Int = -1
+
+    fun serve(directory: File, entryName: String, onLog: (String) -> Unit): String {
+        val root = directory.canonicalFile
+        synchronized(lock) {
+            logSink = onLog
+            val socket = serverSocket
+            if (
+                socket != null &&
+                !socket.isClosed &&
+                rootDirectory?.let { samePath(it.absolutePath, root.absolutePath) } == true
+            ) {
+                entryFileName = entryName
+                return previewUrl(port, entryName)
+            }
+
+            stopLocked()
+            val loopback = InetAddress.getByName("127.0.0.1")
+            val newSocket = ServerSocket(0, 50, loopback)
+            serverSocket = newSocket
+            rootDirectory = root
+            entryFileName = entryName
+            port = newSocket.localPort
+            serverThread = Thread {
+                serveLoop(newSocket)
+            }.apply {
+                name = "PocketCodedWebLocalhostPreview"
+                isDaemon = true
+                start()
+            }
+            return previewUrl(port, entryName)
         }
     }
-    webView.webViewClient = object : WebViewClient() {
-        override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-            return false
+
+    private fun previewUrl(port: Int, entryName: String): String {
+        val safeEntry = entryName.ifBlank { "index.html" }
+        return "http://127.0.0.1:$port/${urlPathEncode(safeEntry)}"
+    }
+
+    private fun serveLoop(socket: ServerSocket) {
+        while (!socket.isClosed) {
+            val client = runCatching { socket.accept() }.getOrNull() ?: break
+            Thread {
+                client.use { handleClient(it) }
+            }.apply {
+                name = "PocketCodedWebPreviewRequest"
+                isDaemon = true
+                start()
+            }
+        }
+    }
+
+    private fun handleClient(client: Socket) {
+        client.soTimeout = 15_000
+        val input = client.getInputStream().bufferedReader(Charsets.ISO_8859_1)
+        val output = BufferedOutputStream(client.getOutputStream())
+        val requestLine = input.readLine().orEmpty()
+        val parts = requestLine.split(' ')
+        if (parts.size < 2) {
+            writeTextResponse(output, 400, "Bad Request", "Bad request.")
+            logRequest("?", "/", 400, "Bad Request")
+            return
         }
 
-        override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
-            val url = request?.url?.toString().orEmpty()
-            val description = error?.description?.toString().orEmpty()
-            if (url.isNotBlank() || description.isNotBlank()) {
-                onRuntimeMessage(
-                    formatPreviewRuntimeMessage(
-                        level = "error",
-                        message = listOf("Resource load failed", description)
-                            .filter { it.isNotBlank() }
-                            .joinToString(": "),
-                        source = url,
-                        line = 0,
-                        column = 0,
-                    )
-                )
+        val method = parts[0].uppercase(Locale.US)
+        val rawPath = parts[1]
+        val headers = mutableMapOf<String, String>()
+        while (true) {
+            val line = input.readLine() ?: break
+            if (line.isEmpty()) break
+            val splitAt = line.indexOf(':')
+            if (splitAt > 0) {
+                headers[line.substring(0, splitAt).trim().lowercase(Locale.US)] =
+                    line.substring(splitAt + 1).trim()
             }
         }
 
-        override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, errorResponse: WebResourceResponse?) {
-            val url = request?.url?.toString().orEmpty()
-            if (url.endsWith("/favicon.ico")) return
-            onRuntimeMessage(
-                formatPreviewRuntimeMessage(
-                    level = "error",
-                    message = "HTTP ${errorResponse?.statusCode ?: 0} ${errorResponse?.reasonPhrase.orEmpty()}",
-                    source = url,
-                    line = 0,
-                    column = 0,
-                )
-            )
+        if (method == "POST" && requestPathOnly(rawPath) == "/__pcw_console") {
+            readRequestBody(input, headers)
+                ?.let(::decodePreviewConsolePayload)
+                ?.let(::log)
+            writeHeaders(output, 204, "No Content", "text/plain; charset=utf-8", 0)
+            return
         }
 
-        override fun onPageFinished(view: WebView?, url: String?) {
-            view?.let(::injectLivePreviewFitController)
+        if (method == "OPTIONS") {
+            writeHeaders(output, 204, "No Content", "text/plain; charset=utf-8", 0)
+            logRequest(method, rawPath, 204, "No Content")
+            return
+        }
+        if (method != "GET" && method != "HEAD") {
+            writeTextResponse(output, 405, "Method Not Allowed", "Method not allowed.")
+            logRequest(method, rawPath, 405, "Method Not Allowed")
+            return
+        }
+
+        val target = resolveRequestFile(rawPath)
+        if (target == null || !target.isFile) {
+            writeTextResponse(output, 404, "Not Found", "Not found.")
+            logRequest(method, rawPath, 404, "Not Found")
+            return
+        }
+
+        val range = parseByteRange(headers["range"], target.length())
+        if (range == null && headers.containsKey("range")) {
+            writeRangeNotSatisfiable(output, target.length())
+            logRequest(method, rawPath, 416, "Range Not Satisfiable")
+            return
+        }
+
+        val mimeType = previewMimeType(target)
+        if (range != null) {
+            writeFileRangeResponse(output, target, mimeType, range.first, range.last, method == "HEAD")
+            logRequest(method, rawPath, 206, "Partial Content")
+        } else {
+            writeFileResponse(output, target, mimeType, method == "HEAD")
+            logRequest(method, rawPath, 200, "OK")
         }
     }
-    webView.settings.apply {
-        javaScriptEnabled = true
-        domStorageEnabled = true
-        allowFileAccess = true
-        allowContentAccess = true
-        allowFileAccessFromFileURLs = true
-        allowUniversalAccessFromFileURLs = true
-        javaScriptCanOpenWindowsAutomatically = false
-        mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-        mediaPlaybackRequiresUserGesture = false
-        loadsImagesAutomatically = true
-        blockNetworkLoads = false
-        setSupportMultipleWindows(false)
-        setSupportZoom(true)
-        builtInZoomControls = true
-        displayZoomControls = false
-        textZoom = 100
-        cacheMode = WebSettings.LOAD_NO_CACHE
-        defaultTextEncodingName = "utf-8"
-        useWideViewPort = true
-        loadWithOverviewMode = false
+
+    private fun requestPathOnly(rawPath: String): String {
+        return rawPath.substringBefore('?').substringBefore('#')
+    }
+
+    private fun readRequestBody(
+        input: java.io.BufferedReader,
+        headers: Map<String, String>,
+    ): String? {
+        val length = headers["content-length"]
+            ?.toIntOrNull()
+            ?.coerceIn(0, 64_000)
+            ?: return null
+        if (length == 0) return ""
+        val buffer = CharArray(length)
+        var offset = 0
+        while (offset < length) {
+            val read = input.read(buffer, offset, length - offset)
+            if (read < 0) break
+            offset += read
+        }
+        return String(buffer, 0, offset)
+    }
+
+    private fun decodePreviewConsolePayload(body: String): String? {
+        val values = body
+            .split('&')
+            .mapNotNull { pair ->
+                val splitAt = pair.indexOf('=')
+                if (splitAt < 0) return@mapNotNull null
+                val key = formDecode(pair.substring(0, splitAt))
+                val value = formDecode(pair.substring(splitAt + 1))
+                key to value
+            }
+            .toMap()
+        val message = values["message"].orEmpty()
+        if (message.isBlank()) return null
+        return formatPreviewRuntimeMessage(
+            level = values["level"].orEmpty().ifBlank { "log" },
+            message = message,
+            source = values["source"].orEmpty().ifBlank { "browser" },
+            line = values["line"]?.toIntOrNull() ?: 0,
+            column = values["column"]?.toIntOrNull() ?: 0,
+        )
+    }
+
+    private fun formDecode(value: String): String {
+        return runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value)
+    }
+
+    private fun logRequest(method: String, rawPath: String, status: Int, message: String) {
+        if (requestPathOnly(rawPath) == "/__pcw_console") return
+        val path = rawPath.substringBefore('#').ifBlank { "/" }
+        log("[localhost] $method $path -> $status $message")
+    }
+
+    private fun log(message: String) {
+        synchronized(lock) { logSink }?.invoke(message)
+    }
+
+    private fun resolveRequestFile(rawPath: String): File? {
+        val root = synchronized(lock) { rootDirectory } ?: return null
+        val requestPath = rawPath
+            .substringBefore('?')
+            .substringBefore('#')
+            .trimStart('/')
+            .ifBlank { entryFileName.ifBlank { "index.html" } }
+        val decodedPath = runCatching {
+            URLDecoder.decode(requestPath.replace("+", "%2B"), "UTF-8")
+        }.getOrDefault(requestPath)
+        val normalizedPath = decodedPath.replace('\\', '/').trimStart('/')
+        if (normalizedPath.split('/').any { it == ".." }) return null
+        val candidate = File(root, normalizedPath).canonicalFile
+        if (!isSameOrInside(root, candidate)) return null
+        return if (candidate.isDirectory) {
+            File(candidate, "index.html").canonicalFile.takeIf { isSameOrInside(root, it) }
+        } else {
+            candidate
+        }
+    }
+
+    private fun parseByteRange(rangeHeader: String?, fileLength: Long): LongRange? {
+        if (rangeHeader.isNullOrBlank() || !rangeHeader.startsWith("bytes=")) return null
+        val rangeText = rangeHeader.removePrefix("bytes=").substringBefore(',').trim()
+        val separator = rangeText.indexOf('-')
+        if (separator < 0) return null
+        val startText = rangeText.substring(0, separator).trim()
+        val endText = rangeText.substring(separator + 1).trim()
+        val start = if (startText.isBlank()) {
+            val suffixLength = endText.toLongOrNull() ?: return null
+            (fileLength - suffixLength).coerceAtLeast(0L)
+        } else {
+            startText.toLongOrNull() ?: return null
+        }
+        val end = if (endText.isBlank()) {
+            fileLength - 1
+        } else {
+            endText.toLongOrNull() ?: return null
+        }.coerceAtMost(fileLength - 1)
+        if (fileLength <= 0L || start !in 0L until fileLength || end < start) return null
+        return start..end
+    }
+
+    private fun writeFileResponse(output: BufferedOutputStream, file: File, mimeType: String, headOnly: Boolean) {
+        writeHeaders(output, 200, "OK", mimeType, file.length())
+        if (!headOnly) {
+            FileInputStream(file).use { input ->
+                input.copyTo(output)
+            }
+        }
+        output.flush()
+    }
+
+    private fun writeFileRangeResponse(
+        output: BufferedOutputStream,
+        file: File,
+        mimeType: String,
+        start: Long,
+        end: Long,
+        headOnly: Boolean,
+    ) {
+        val contentLength = end - start + 1
+        val headers = buildString {
+            append("HTTP/1.1 206 Partial Content\r\n")
+            append("Content-Type: ").append(mimeType).append("\r\n")
+            append("Content-Length: ").append(contentLength).append("\r\n")
+            append("Content-Range: bytes ").append(start).append('-').append(end).append('/').append(file.length()).append("\r\n")
+            append(commonPreviewHeaders())
+            append("\r\n")
+        }
+        output.write(headers.toByteArray(Charsets.UTF_8))
+        if (!headOnly) {
+            FileInputStream(file).use { input ->
+                skipFully(input, start)
+                copyLimited(input, output, contentLength)
+            }
+        }
+        output.flush()
+    }
+
+    private fun writeRangeNotSatisfiable(output: BufferedOutputStream, fileLength: Long) {
+        val response = buildString {
+            append("HTTP/1.1 416 Range Not Satisfiable\r\n")
+            append("Content-Range: bytes */").append(fileLength).append("\r\n")
+            append("Content-Length: 0\r\n")
+            append(commonPreviewHeaders())
+            append("\r\n")
+        }
+        output.write(response.toByteArray(Charsets.UTF_8))
+        output.flush()
+    }
+
+    private fun writeTextResponse(output: BufferedOutputStream, code: Int, message: String, body: String) {
+        val bytes = body.toByteArray(Charsets.UTF_8)
+        writeHeaders(output, code, message, "text/plain; charset=utf-8", bytes.size.toLong())
+        output.write(bytes)
+        output.flush()
+    }
+
+    private fun writeHeaders(
+        output: BufferedOutputStream,
+        code: Int,
+        message: String,
+        contentType: String,
+        contentLength: Long,
+    ) {
+        val headers = buildString {
+            append("HTTP/1.1 ").append(code).append(' ').append(message).append("\r\n")
+            append("Content-Type: ").append(contentType).append("\r\n")
+            append("Content-Length: ").append(contentLength).append("\r\n")
+            append(commonPreviewHeaders())
+            append("\r\n")
+        }
+        output.write(headers.toByteArray(Charsets.UTF_8))
+        output.flush()
+    }
+
+    private fun commonPreviewHeaders(): String {
+        return buildString {
+            append("Access-Control-Allow-Origin: *\r\n")
+            append("Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n")
+            append("Access-Control-Allow-Headers: Content-Type, Range\r\n")
+            append("Accept-Ranges: bytes\r\n")
+            append("Cache-Control: no-store, no-cache, must-revalidate\r\n")
+            append("Pragma: no-cache\r\n")
+            append("Connection: close\r\n")
+        }
+    }
+
+    private fun stopLocked() {
+        runCatching { serverSocket?.close() }
+        serverSocket = null
+        serverThread = null
+        rootDirectory = null
+        logSink = null
+        port = -1
     }
 }
+
+private fun urlPathEncode(path: String): String {
+    return path
+        .split('/')
+        .joinToString("/") { segment ->
+            URLEncoder.encode(segment, "UTF-8").replace("+", "%20")
+        }
+}
+
+private fun previewMimeType(file: File): String {
+    return when (file.extension.lowercase(Locale.US)) {
+        "html", "htm" -> "text/html; charset=utf-8"
+        "css" -> "text/css; charset=utf-8"
+        "js", "mjs", "cjs", "jsx", "ts", "tsx" -> "text/javascript; charset=utf-8"
+        "json", "map" -> "application/json; charset=utf-8"
+        "txt", "md" -> "text/plain; charset=utf-8"
+        "svg" -> "image/svg+xml"
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "ico" -> "image/x-icon"
+        "wasm" -> "application/wasm"
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "ogg" -> "audio/ogg"
+        "mp4" -> "video/mp4"
+        "webm" -> "video/webm"
+        "woff" -> "font/woff"
+        "woff2" -> "font/woff2"
+        "ttf" -> "font/ttf"
+        "otf" -> "font/otf"
+        else -> "application/octet-stream"
+    }
+}
+
+private fun copyLimited(input: InputStream, output: BufferedOutputStream, byteCount: Long) {
+    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+    var remaining = byteCount
+    while (remaining > 0L) {
+        val read = input.read(buffer, 0, minOf(buffer.size.toLong(), remaining).toInt())
+        if (read == -1) return
+        output.write(buffer, 0, read)
+        remaining -= read
+    }
+}
+
 
 private fun prepareLivePreviewEntry(
     rootDirectory: File,
@@ -3802,14 +5030,22 @@ private fun prepareLivePreviewEntry(
     activeFile: WebFile,
 ): File {
     val root = rootDirectory.canonicalFile
-    // 1. Save all project files to disk so assets like images are available
-    files.forEach { file ->
-        val target = File(file.filePath).canonicalFile
-        if (isSameOrInside(root, target)) {
-            target.parentFile?.mkdirs()
-            saveFileContent(target.absolutePath, file.content)
-        }
+    val previewDir = File(root, ".pocketcodedweb/preview").apply { mkdirs() }
+    val entryFile = File(previewDir, "index.html")
+    val signatureFile = File(previewDir, "signature.txt")
+    val previewSignature = livePreviewSignature(root, files, activeFile)
+
+    if (
+        entryFile.isFile &&
+        runCatching { signatureFile.readText() }.getOrNull() == previewSignature
+    ) {
+        return entryFile
     }
+
+    // 1. Save changed project files to disk so assets like images are available.
+    syncPreviewProjectFilesToDisk(root, files)
+    syncPreviewBrowsableAssets(root, previewDir)
+    val filesByCanonicalPath = buildFilesByCanonicalPath(files)
 
     // 2. Identify the base HTML
     val activeExtension = fileExtension(activeFile.name)
@@ -3828,36 +5064,126 @@ private fun prepareLivePreviewEntry(
 
     // 3. Adopt GameCoded "Inlining" logic - Bundle all project CSS and JS into this one HTML string
     val bundledHtml = if (baseHtml.contains("<html", ignoreCase = true) || looksLikeHtmlSource(baseHtml)) {
-        inlinePreviewProjectAssets(root, files, File(activeFile.filePath), baseHtml)
+        inlinePreviewProjectAssets(root, filesByCanonicalPath, File(activeFile.filePath), baseHtml)
     } else {
         bundleProjectAssets(baseHtml, files, activeFile)
     }
 
-    // 4. Inject responsive baseline (from IdeActivity.kt)
-    val finalHtml = injectResponsiveBaseline(bundledHtml)
+    // 4. Inject preview browser compatibility, terminal logging, and responsive baseline.
+    val finalHtml = injectLivePreviewLogBridge(injectLivePreviewCompatibility(injectResponsiveBaseline(bundledHtml)))
 
-    // 5. Write the final bundled HTML to a temp preview file and return it
-    val previewDir = File(root, ".pocketcodedweb/preview").apply { mkdirs() }
-    val entryFile = File(previewDir, "index.html")
-    entryFile.writeText(finalHtml)
+    // 5. Write the final bundled HTML to a temp preview file and return it.
+    if (!entryFile.isFile || runCatching { entryFile.readText() }.getOrNull() != finalHtml) {
+        entryFile.writeText(finalHtml)
+    }
+    signatureFile.writeText(previewSignature)
     return entryFile
 }
 
+private fun livePreviewSignature(
+    rootDirectory: File,
+    files: List<WebFile>,
+    activeFile: WebFile,
+): String = buildString {
+    append("v").append(LIVE_PREVIEW_CACHE_VERSION)
+    append("|active|")
+    append(relativeWorkspacePath(rootDirectory, File(activeFile.filePath)))
+    append('|').append(activeFile.modifiedAt)
+    append('|').append(activeFile.sizeBytes)
+    append('|').append(activeFile.contentHash)
+
+    files
+        .sortedBy { it.filePath }
+        .forEach { file ->
+            append('\n')
+            append(relativeWorkspacePath(rootDirectory, File(file.filePath)))
+            append('|').append(file.modifiedAt)
+            append('|').append(file.sizeBytes)
+            append('|').append(file.contentHash)
+        }
+
+    rootDirectory.walkTopDown()
+        .onEnter { file -> file == rootDirectory || !isProjectIgnoredDirectory(file) }
+        .filter { it.isFile && it.length() <= LIVE_PREVIEW_MAX_BROWSER_ASSET_BYTES }
+        .sortedBy { relativeWorkspacePath(rootDirectory, it) }
+        .forEach { file ->
+            append('\n')
+            append("asset|").append(relativeWorkspacePath(rootDirectory, file))
+            append('|').append(file.lastModified())
+            append('|').append(file.length())
+        }
+}
+
+private fun syncPreviewProjectFilesToDisk(rootDirectory: File, files: List<WebFile>) {
+    files.forEach { file ->
+        val target = runCatching { File(file.filePath).canonicalFile }.getOrNull() ?: return@forEach
+        if (!isSameOrInside(rootDirectory, target)) return@forEach
+        if (target.isFile && target.lastModified() == file.modifiedAt) return@forEach
+
+        target.parentFile?.mkdirs()
+        target.writeText(file.content)
+        target.setLastModified(file.modifiedAt)
+        ProjectFileCache.invalidate(target)
+    }
+}
+
+private fun syncPreviewBrowsableAssets(rootDirectory: File, previewDirectory: File) {
+    val root = rootDirectory.canonicalFile
+    val preview = previewDirectory.canonicalFile
+
+    root.walkTopDown()
+        .onEnter { file ->
+            file == root || (!isProjectIgnoredDirectory(file) && !isSameOrInside(preview, file))
+        }
+        .filter { file ->
+            file.isFile &&
+                    !isSameOrInside(preview, file) &&
+                    file.length() <= LIVE_PREVIEW_MAX_BROWSER_ASSET_BYTES
+        }
+        .forEach { source ->
+            val relativePath = runCatching { source.canonicalFile.relativeTo(root).path }.getOrNull()
+                ?: return@forEach
+            val target = File(preview, relativePath).canonicalFile
+            if (!isSameOrInside(preview, target)) return@forEach
+            if (
+                target.isFile &&
+                target.length() == source.length() &&
+                target.lastModified() == source.lastModified()
+            ) {
+                return@forEach
+            }
+            target.parentFile?.mkdirs()
+            runCatching {
+                source.copyTo(target, overwrite = true)
+                target.setLastModified(source.lastModified())
+            }
+        }
+}
+
+private fun buildFilesByCanonicalPath(files: List<WebFile>): Map<String, WebFile> {
+    val result = mutableMapOf<String, WebFile>()
+    files.forEach { file ->
+        val path = runCatching { File(file.filePath).canonicalFile.absolutePath }.getOrNull()
+        if (path != null) result[path] = file
+    }
+    return result
+}
+
 private fun bundleProjectAssets(html: String, files: List<WebFile>, activeFile: WebFile): String {
-    val cssBlock = files
-        .filter { fileExtension(it.name) in cssFileExtensions }
+    val cssFiles = files.filter { fileExtension(it.name) in cssFileExtensions }
+    val jsFiles = files.filter { fileExtension(it.name) in javascriptFileExtensions }
+    val cssBlock = cssFiles
         .joinToString("\n\n") { "/* ${it.name} */\n${it.content}" }
         .trim()
 
-    val jsBlock = files
-        .filter { fileExtension(it.name) in javascriptFileExtensions }
+    val jsBlock = jsFiles
         .joinToString("\n\n") { "// ${it.name}\n${it.content}" }
         .replace("</script", "<\\/script", ignoreCase = true)
         .trim()
 
-    val needsTranspilation = files.any { 
+    val needsTranspilation = jsFiles.any {
         fileExtension(it.name) in setOf("ts", "tsx", "jsx") || 
-        (fileExtension(it.name) in javascriptFileExtensions && Regex("""(?m)^\s*(import|export)\b""").containsMatchIn(it.content))
+        JS_MODULE_SYNTAX_REGEX.containsMatchIn(it.content)
     }
 
     var result = html
@@ -3880,7 +5206,7 @@ private fun bundleProjectAssets(html: String, files: List<WebFile>, activeFile: 
 
 private fun inlinePreviewProjectAssets(
     rootDirectory: File,
-    files: List<WebFile>,
+    filesByCanonicalPath: Map<String, WebFile>,
     sourceOwner: File,
     html: String,
 ): String {
@@ -3890,7 +5216,7 @@ private fun inlinePreviewProjectAssets(
         val href = htmlAttributeValue(tag, "href") ?: return@replace tag
         if (!rel.contains("stylesheet", ignoreCase = true)) return@replace tag
         val file = resolvePreviewFile(rootDirectory, sourceOwner, href)?.let { target ->
-            files.firstOrNull { samePath(it.filePath, target.absolutePath) }
+            filesByCanonicalPath[target.canonicalFile.absolutePath]
         } ?: return@replace tag
         if (fileExtension(file.name) !in cssFileExtensions) return@replace tag
         """<style id="pcw-inlined-${file.name}" data-pcw-source="${escapeHtmlAttribute(href)}">
@@ -3901,12 +5227,12 @@ ${file.content}
         val attributes = match.groupValues[1]
         val src = htmlAttributeValue(attributes, "src") ?: return@replace match.value
         val file = resolvePreviewFile(rootDirectory, sourceOwner, src)?.let { target ->
-            files.firstOrNull { samePath(it.filePath, target.absolutePath) }
+            filesByCanonicalPath[target.canonicalFile.absolutePath]
         } ?: return@replace match.value
         if (fileExtension(file.name) !in javascriptFileExtensions) return@replace match.value
         val cleanedAttributes = removeHtmlAttribute(attributes, "src")
         val needsTranspilation = fileExtension(file.name) in setOf("ts", "tsx", "jsx") || 
-            Regex("""(?m)^\s*(import|export)\b""").containsMatchIn(file.content)
+            JS_MODULE_SYNTAX_REGEX.containsMatchIn(file.content)
         val type = if (needsTranspilation) " type=\"text/babel\" data-presets=\"react,typescript,env\"" else cleanedAttributes
         val escapedContent = file.content.replace("</script", "<\\/script", ignoreCase = true)
         """<script$type data-pcw-source="${escapeHtmlAttribute(src)}">
@@ -3945,252 +5271,389 @@ private fun injectIntoHeadStart(html: String, content: String): String {
     }
 }
 
-private fun injectLivePreviewFitController(webView: WebView) {
-    webView.evaluateJavascript(livePreviewFitControllerScript(), null)
+private fun injectLivePreviewLogBridge(html: String): String {
+    val bridge = """
+        <script id="pcw-live-preview-log-bridge">
+            (function () {
+                if (window.__pcwLivePreviewLogBridgeInstalled) return;
+                window.__pcwLivePreviewLogBridgeInstalled = true;
+
+                var endpoint = "/__pcw_console";
+                var originalConsole = {
+                    log: console.log,
+                    info: console.info,
+                    warn: console.warn,
+                    error: console.error
+                };
+
+                function encode(value) {
+                    return encodeURIComponent(value == null ? "" : String(value));
+                }
+
+                function stringify(value) {
+                    if (value instanceof Error) return value.stack || value.message || String(value);
+                    if (typeof value === "string") return value;
+                    if (value == null) return String(value);
+                    try {
+                        return JSON.stringify(value);
+                    } catch (error) {
+                        return String(value);
+                    }
+                }
+
+                function stackLocation() {
+                    var stack = "";
+                    try {
+                        throw new Error();
+                    } catch (error) {
+                        stack = error && error.stack || "";
+                    }
+                    var lines = stack.split("\n").slice(2);
+                    for (var index = 0; index < lines.length; index++) {
+                        var line = lines[index];
+                        if (line.indexOf("pcw-live-preview-log-bridge") >= 0) continue;
+                        var match = line.match(/(?:\()?(https?:\/\/[^)\s]+|[^)\s]+):(\d+):(\d+)\)?/);
+                        if (match) {
+                            return {
+                                source: match[1].split("/").pop() || match[1],
+                                line: match[2],
+                                column: match[3]
+                            };
+                        }
+                    }
+                    return { source: "browser", line: "0", column: "0" };
+                }
+
+                function post(level, message, source, line, column) {
+                    var body = "level=" + encode(level) +
+                        "&message=" + encode(message) +
+                        "&source=" + encode(source || "browser") +
+                        "&line=" + encode(line || 0) +
+                        "&column=" + encode(column || 0);
+                    try {
+                        if (navigator.sendBeacon) {
+                            var blob = new Blob([body], { type: "application/x-www-form-urlencoded" });
+                            if (navigator.sendBeacon(endpoint, blob)) return;
+                        }
+                    } catch (error) {}
+                    try {
+                        fetch(endpoint, {
+                            method: "POST",
+                            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+                            body: body,
+                            keepalive: true
+                        }).catch(function () {});
+                    } catch (error) {}
+                }
+
+                function forward(level, args) {
+                    var location = stackLocation();
+                    post(
+                        level,
+                        Array.prototype.slice.call(args).map(stringify).join(" "),
+                        location.source,
+                        location.line,
+                        location.column
+                    );
+                }
+
+                ["log", "info", "warn", "error"].forEach(function (level) {
+                    console[level] = function () {
+                        try {
+                            originalConsole[level].apply(console, arguments);
+                        } catch (error) {}
+                        forward(level, arguments);
+                    };
+                });
+
+                window.addEventListener("error", function (event) {
+                    var message = event.message || (event.error && (event.error.stack || event.error.message)) || "Script error";
+                    post("error", message, event.filename || "browser", event.lineno || 0, event.colno || 0);
+                });
+
+                window.addEventListener("unhandledrejection", function (event) {
+                    var reason = event.reason;
+                    post("error", "Unhandled promise rejection: " + stringify(reason), "browser", 0, 0);
+                });
+
+                var lastVisibilityState = document.visibilityState || "visible";
+                document.addEventListener("visibilitychange", function () {
+                    var state = document.visibilityState || "visible";
+                    if (state === lastVisibilityState) return;
+                    lastVisibilityState = state;
+                    post("info", "Preview tab " + state, "browser", 0, 0);
+                });
+
+                window.addEventListener("pagehide", function () {
+                    post("info", "Preview page closed or backgrounded", "browser", 0, 0);
+                });
+            })();
+        </script>
+    """.trimIndent()
+
+    return injectIntoHeadStart(html, bridge)
 }
 
-private fun livePreviewFitControllerScript(): String {
-    return """
-        (function () {
-            if (window.__pcwLivePreviewFitInstalled) {
-                if (typeof window.__pcwLivePreviewApplyFit === "function") {
-                    window.__pcwLivePreviewApplyFit();
-                }
-                return;
-            }
-            window.__pcwLivePreviewFitInstalled = true;
+private fun injectLivePreviewCompatibility(html: String): String {
+    val compatibility = """
+        <script id="pcw-live-preview-compatibility">
+            (function () {
+                if (window.__pcwLivePreviewCompatibilityInstalled) return;
+                window.__pcwLivePreviewCompatibilityInstalled = true;
 
-            var previousTarget = null;
-            var scheduledFrame = 0;
+                var fullscreenElement = null;
+                var savedNoFitValue;
+                var savedNoFitWasSet = false;
+                var pointerLockElement = null;
 
-            function addViewportMeta() {
-                if (document.querySelector("meta[name='viewport']")) return;
-                var meta = document.createElement("meta");
-                meta.name = "viewport";
-                meta.content = "width=device-width, initial-scale=1.0, viewport-fit=cover";
-                (document.head || document.documentElement).appendChild(meta);
-            }
-
-            function addPreviewStyle() {
-                if (document.getElementById("pcw-live-preview-fit-style")) return;
-                var style = document.createElement("style");
-                style.id = "pcw-live-preview-fit-style";
-                style.textContent = [
-                    "html{min-width:0;-webkit-text-size-adjust:100%;}",
-                    "body{min-width:0;}",
-                    "img,video,canvas,svg,iframe{max-width:100%;}",
-                    "[data-pcw-preview-fit-target='true']{will-change:transform;}"
-                ].join("\n");
-                (document.head || document.documentElement).appendChild(style);
-            }
-
-            function visibleElement(element) {
-                if (!element || element.nodeType !== 1) return false;
-                if (element === document.body || element === document.documentElement) return false;
-                if (/^(SCRIPT|STYLE|META|LINK|TITLE|TEMPLATE)$/i.test(element.tagName)) return false;
-                var style = window.getComputedStyle(element);
-                if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
-                var rect = element.getBoundingClientRect();
-                return rect.width > 2 && rect.height > 2;
-            }
-
-            function descriptor(element) {
-                return ((element.id || "") + " " + (element.className || "") + " " + element.tagName).toLowerCase();
-            }
-
-            function hasGameWords(element) {
-                var text = descriptor(element);
-                return text.indexOf("game") >= 0 ||
-                    text.indexOf("canvas") >= 0 ||
-                    text.indexOf("stage") >= 0 ||
-                    text.indexOf("screen") >= 0 ||
-                    text.indexOf("app") >= 0 ||
-                    text.indexOf("root") >= 0;
-            }
-
-            function candidateScore(element) {
-                if (!element) return 0;
-                var text = descriptor(element);
-                var score = 0;
-                if (element.hasAttribute("data-preview-fit") || element.hasAttribute("data-pcw-fit")) score += 100;
-                if (text.indexOf("game") >= 0) score += 12;
-                if (text.indexOf("canvas") >= 0) score += 10;
-                if (text.indexOf("stage") >= 0) score += 8;
-                if (text.indexOf("screen") >= 0) score += 6;
-                if (text.indexOf("app") >= 0 || text.indexOf("root") >= 0) score += 4;
-                if (element.querySelector && element.querySelector("canvas, svg, iframe")) score += 14;
-                if (/^(CANVAS|SVG|IFRAME)$/i.test(element.tagName)) score += 18;
-                var rect = element.getBoundingClientRect();
-                score += Math.min(10, Math.round((rect.width * rect.height) / 60000));
-                return score;
-            }
-
-            function bestVisibleCandidate(selector) {
-                return Array.prototype.slice.call(document.querySelectorAll(selector))
-                    .filter(visibleElement)
-                    .sort(function (left, right) {
-                        return candidateScore(right) - candidateScore(left);
-                    })[0] || null;
-            }
-
-            function visibleBodyChildren() {
-                return Array.prototype.slice.call((document.body && document.body.children) || [])
-                    .filter(visibleElement);
-            }
-
-            function findFitTarget() {
-                var body = document.body;
-                if (!body || body.dataset.pcwNoFit === "true" || document.documentElement.dataset.pcwNoFit === "true") return null;
-
-                var explicit = bestVisibleCandidate("[data-preview-fit], [data-pcw-fit]");
-                if (explicit && explicit !== body && explicit !== document.documentElement) return explicit;
-
-                var canvas = bestVisibleCandidate("canvas, svg, iframe");
-                if (canvas) {
-                    var parent = canvas.parentElement;
-                    if (parent && parent !== body && parent !== document.documentElement && visibleElement(parent)) {
-                        if (hasGameWords(parent) || parent.children.length <= 8) return parent;
+                function createEvent(name) {
+                    try {
+                        return new Event(name, { bubbles: true, cancelable: false });
+                    } catch (error) {
+                        var event = document.createEvent("Event");
+                        event.initEvent(name, true, false);
+                        return event;
                     }
-                    return canvas;
                 }
 
-                var selector = [
-                    "#game",
-                    "#game-container",
-                    "#gameContainer",
-                    "#gameCanvas",
-                    "#canvas",
-                    "#app",
-                    "#root",
-                    ".game",
-                    ".game-container",
-                    ".gameContainer",
-                    ".canvas-container",
-                    ".stage",
-                    ".screen",
-                    ".app",
-                    ".root"
-                ].join(",");
-                var named = bestVisibleCandidate(selector);
-                if (named && named !== body && named !== document.documentElement && candidateScore(named) >= 8) return named;
+                function dispatch(target, name) {
+                    try {
+                        (target || document).dispatchEvent(createEvent(name));
+                    } catch (error) {}
+                }
 
-                var children = visibleBodyChildren();
-                if (children.length === 1 && candidateScore(children[0]) >= 4) return children[0];
-                return null;
-            }
+                function setGetter(owner, name, getter) {
+                    try {
+                        Object.defineProperty(owner, name, {
+                            configurable: true,
+                            enumerable: true,
+                            get: getter
+                        });
+                    } catch (error) {}
+                }
 
-            function rememberStyle(element) {
-                if (!element || element.dataset.pcwPreviewOriginalStyleSet === "true") return;
-                element.dataset.pcwPreviewOriginalStyle = element.getAttribute("style") || "";
-                element.dataset.pcwPreviewOriginalStyleSet = "true";
-            }
+                function setMethod(owner, name, method) {
+                    try {
+                        Object.defineProperty(owner, name, {
+                            configurable: true,
+                            writable: true,
+                            value: method
+                        });
+                    } catch (error) {
+                        try { owner[name] = method; } catch (ignored) {}
+                    }
+                }
 
-            function restoreStyle(element) {
-                if (!element || element.dataset.pcwPreviewOriginalStyleSet !== "true") return;
-                var original = element.dataset.pcwPreviewOriginalStyle || "";
-                if (original) {
-                    element.setAttribute("style", original);
+                function addCompatibilityStyle() {
+                    if (document.getElementById("pcw-live-preview-compatibility-style")) return;
+                    var style = document.createElement("style");
+                    style.id = "pcw-live-preview-compatibility-style";
+                    style.textContent = [
+                        "html.pcw-preview-fullscreen-active,body.pcw-preview-fullscreen-active{width:100%!important;height:100%!important;margin:0!important;padding:0!important;overflow:hidden!important;}",
+                        "[data-pcw-preview-fullscreen='true']{box-sizing:border-box!important;overscroll-behavior:none!important;}"
+                    ].join("\n");
+                    (document.head || document.documentElement).appendChild(style);
+                }
+
+                function rememberStyle(element) {
+                    if (!element || element.dataset.pcwPreviewFullscreenStyleSet === "true") return;
+                    element.dataset.pcwPreviewFullscreenStyle = element.getAttribute("style") || "";
+                    element.dataset.pcwPreviewFullscreenStyleSet = "true";
+                }
+
+                function restoreStyle(element) {
+                    if (!element || element.dataset.pcwPreviewFullscreenStyleSet !== "true") return;
+                    var original = element.dataset.pcwPreviewFullscreenStyle || "";
+                    if (original) {
+                        element.setAttribute("style", original);
+                    } else {
+                        element.removeAttribute("style");
+                    }
+                    delete element.dataset.pcwPreviewFullscreenStyle;
+                    delete element.dataset.pcwPreviewFullscreenStyleSet;
+                    delete element.dataset.pcwPreviewFullscreen;
+                }
+
+                function applyFullscreenStyle(element) {
+                    rememberStyle(element);
+                    addCompatibilityStyle();
+                    document.documentElement.classList.add("pcw-preview-fullscreen-active");
+                    if (document.body) document.body.classList.add("pcw-preview-fullscreen-active");
+                    element.dataset.pcwPreviewFullscreen = "true";
+                    element.style.position = "fixed";
+                    element.style.left = "0";
+                    element.style.top = "0";
+                    element.style.width = "100vw";
+                    element.style.height = "100vh";
+                    element.style.maxWidth = "none";
+                    element.style.maxHeight = "none";
+                    element.style.margin = "0";
+                    element.style.padding = "0";
+                    element.style.transform = "none";
+                    element.style.transformOrigin = "center center";
+                    element.style.overflow = "hidden";
+                    element.style.zIndex = "2147483647";
+                    element.style.background = element.style.background || (document.body && getComputedStyle(document.body).backgroundColor) || "#000";
+                }
+
+                function refreshPreviewLayout() {
+                    setTimeout(function () {
+                        dispatch(window, "resize");
+                        if (typeof window.__pcwLivePreviewApplyFit === "function") {
+                            window.__pcwLivePreviewApplyFit();
+                        }
+                    }, 0);
+                }
+
+                function exitPreviewFullscreen() {
+                    if (!fullscreenElement) return Promise.resolve();
+                    var previous = fullscreenElement;
+                    fullscreenElement = null;
+                    restoreStyle(previous);
+                    document.documentElement.classList.remove("pcw-preview-fullscreen-active");
+                    if (document.body) document.body.classList.remove("pcw-preview-fullscreen-active");
+                    if (savedNoFitWasSet) {
+                        if (typeof savedNoFitValue === "undefined") {
+                            delete document.documentElement.dataset.pcwNoFit;
+                        } else {
+                            document.documentElement.dataset.pcwNoFit = savedNoFitValue;
+                        }
+                    }
+                    savedNoFitWasSet = false;
+                    savedNoFitValue = undefined;
+                    dispatch(document, "fullscreenchange");
+                    dispatch(document, "webkitfullscreenchange");
+                    dispatch(previous, "fullscreenchange");
+                    refreshPreviewLayout();
+                    return Promise.resolve();
+                }
+
+                function requestPreviewFullscreen(element) {
+                    element = element && element.nodeType === 1 ? element : document.documentElement;
+                    if (fullscreenElement && fullscreenElement !== element) {
+                        exitPreviewFullscreen();
+                    }
+                    fullscreenElement = element;
+                    if (!savedNoFitWasSet) {
+                        savedNoFitValue = document.documentElement.dataset.pcwNoFit;
+                        savedNoFitWasSet = true;
+                    }
+                    document.documentElement.dataset.pcwNoFit = "true";
+                    applyFullscreenStyle(element);
+                    dispatch(document, "fullscreenchange");
+                    dispatch(document, "webkitfullscreenchange");
+                    dispatch(element, "fullscreenchange");
+                    refreshPreviewLayout();
+                    return Promise.resolve();
+                }
+
+                setGetter(document, "fullscreenEnabled", function () { return true; });
+                setGetter(document, "webkitFullscreenEnabled", function () { return true; });
+                setGetter(document, "mozFullScreenEnabled", function () { return true; });
+                setGetter(document, "msFullscreenEnabled", function () { return true; });
+                setGetter(document, "fullscreenElement", function () { return fullscreenElement; });
+                setGetter(document, "webkitFullscreenElement", function () { return fullscreenElement; });
+                setGetter(document, "mozFullScreenElement", function () { return fullscreenElement; });
+                setGetter(document, "msFullscreenElement", function () { return fullscreenElement; });
+
+                setMethod(document, "exitFullscreen", exitPreviewFullscreen);
+                setMethod(document, "webkitExitFullscreen", exitPreviewFullscreen);
+                setMethod(document, "mozCancelFullScreen", exitPreviewFullscreen);
+                setMethod(document, "msExitFullscreen", exitPreviewFullscreen);
+
+                function installElementPreviewMethods(owner) {
+                    if (!owner) return;
+                    setMethod(owner, "requestFullscreen", function () { return requestPreviewFullscreen(this); });
+                    setMethod(owner, "webkitRequestFullscreen", function () { return requestPreviewFullscreen(this); });
+                    setMethod(owner, "webkitRequestFullScreen", function () { return requestPreviewFullscreen(this); });
+                    setMethod(owner, "mozRequestFullScreen", function () { return requestPreviewFullscreen(this); });
+                    setMethod(owner, "msRequestFullscreen", function () { return requestPreviewFullscreen(this); });
+                    setMethod(owner, "requestPointerLock", function () {
+                        pointerLockElement = this;
+                        dispatch(document, "pointerlockchange");
+                    });
+                    setMethod(owner, "webkitRequestPointerLock", function () {
+                        pointerLockElement = this;
+                        dispatch(document, "pointerlockchange");
+                    });
+                }
+
+                if (window.Element && Element.prototype) installElementPreviewMethods(Element.prototype);
+                if (window.HTMLElement && HTMLElement.prototype) installElementPreviewMethods(HTMLElement.prototype);
+                if (window.SVGElement && SVGElement.prototype) installElementPreviewMethods(SVGElement.prototype);
+
+                function installPreviewMethodsOnExistingElements(root) {
+                    try {
+                        if (root && root.nodeType === 1) installElementPreviewMethods(root);
+                        Array.prototype.forEach.call(
+                            (root || document).querySelectorAll("*"),
+                            installElementPreviewMethods
+                        );
+                    } catch (error) {}
+                }
+
+                if (document.readyState === "loading") {
+                    document.addEventListener("DOMContentLoaded", function () {
+                        installPreviewMethodsOnExistingElements(document);
+                    });
                 } else {
-                    element.removeAttribute("style");
-                }
-                delete element.dataset.pcwPreviewOriginalStyle;
-                delete element.dataset.pcwPreviewOriginalStyleSet;
-                delete element.dataset.pcwPreviewFitTarget;
-            }
-
-            function viewportSize() {
-                var visual = window.visualViewport;
-                return {
-                    width: Math.max(1, Math.floor((visual && visual.width) || window.innerWidth || document.documentElement.clientWidth || 1)),
-                    height: Math.max(1, Math.floor((visual && visual.height) || window.innerHeight || document.documentElement.clientHeight || 1))
-                };
-            }
-
-            function naturalSize(target) {
-                restoreStyle(target);
-                var rect = target.getBoundingClientRect();
-                return {
-                    width: Math.max(rect.width, target.scrollWidth || 0, target.offsetWidth || 0),
-                    height: Math.max(rect.height, target.scrollHeight || 0, target.offsetHeight || 0)
-                };
-            }
-
-            function shouldFit(target) {
-                if (!target || target === document.body || target === document.documentElement) return false;
-                if (target.hasAttribute("data-preview-fit") || target.hasAttribute("data-pcw-fit")) return true;
-                if (/^(CANVAS|SVG|IFRAME)$/i.test(target.tagName)) return true;
-                if (target.querySelector && target.querySelector("canvas, svg, iframe")) return true;
-                if (hasGameWords(target)) return true;
-                return visibleBodyChildren().length === 1 && candidateScore(target) >= 4;
-            }
-
-            function applyFit() {
-                addViewportMeta();
-                addPreviewStyle();
-
-                var target = findFitTarget();
-                if (!shouldFit(target)) {
-                    if (previousTarget) restoreStyle(previousTarget);
-                    previousTarget = null;
-                    return;
+                    installPreviewMethodsOnExistingElements(document);
                 }
 
-                if (previousTarget && previousTarget !== target) restoreStyle(previousTarget);
-                previousTarget = target;
+                try {
+                    new MutationObserver(function (records) {
+                        records.forEach(function (record) {
+                            Array.prototype.forEach.call(record.addedNodes || [], function (node) {
+                                installPreviewMethodsOnExistingElements(node);
+                            });
+                        });
+                    }).observe(document.documentElement, { childList: true, subtree: true });
+                } catch (error) {}
 
-                var size = naturalSize(target);
-                if (size.width <= 2 || size.height <= 2) return;
-
-                var viewport = viewportSize();
-                var padding = viewport.width >= 900 ? 24 : (viewport.width >= 600 ? 16 : 8);
-                var availableWidth = Math.max(1, viewport.width - padding * 2);
-                var availableHeight = Math.max(1, viewport.height - padding * 2);
-                var maxScale = viewport.width >= 900 ? 1.75 : (viewport.width >= 600 ? 1.45 : 1.15);
-                var scale = Math.min(maxScale, availableWidth / size.width, availableHeight / size.height);
-                if (!isFinite(scale) || scale <= 0) scale = 1;
-                scale = Math.max(0.1, scale);
-
-                rememberStyle(target);
-                target.dataset.pcwPreviewFitTarget = "true";
-                target.style.position = "fixed";
-                target.style.left = Math.max(padding, Math.round((viewport.width - size.width * scale) / 2)) + "px";
-                target.style.top = Math.max(padding, Math.round((viewport.height - size.height * scale) / 2)) + "px";
-                target.style.width = size.width + "px";
-                target.style.height = size.height + "px";
-                target.style.maxWidth = "none";
-                target.style.maxHeight = "none";
-                target.style.margin = "0";
-                target.style.transformOrigin = "top left";
-                target.style.transform = "scale(" + scale + ")";
-                target.style.zIndex = "2147483000";
-            }
-
-            function scheduleFit() {
-                if (scheduledFrame) cancelAnimationFrame(scheduledFrame);
-                scheduledFrame = requestAnimationFrame(function () {
-                    scheduledFrame = requestAnimationFrame(applyFit);
+                setGetter(document, "pointerLockElement", function () { return pointerLockElement; });
+                setGetter(document, "webkitPointerLockElement", function () { return pointerLockElement; });
+                setMethod(document, "exitPointerLock", function () {
+                    pointerLockElement = null;
+                    dispatch(document, "pointerlockchange");
                 });
-            }
+                setMethod(document, "webkitExitPointerLock", function () {
+                    pointerLockElement = null;
+                    dispatch(document, "pointerlockchange");
+                });
 
-            window.__pcwLivePreviewApplyFit = scheduleFit;
-            scheduleFit();
-            setTimeout(scheduleFit, 120);
-            setTimeout(scheduleFit, 450);
-            setTimeout(scheduleFit, 1200);
-            window.addEventListener("load", scheduleFit);
-            window.addEventListener("resize", scheduleFit);
-            window.addEventListener("orientationchange", scheduleFit);
-            if (window.visualViewport) {
-                window.visualViewport.addEventListener("resize", scheduleFit);
-                window.visualViewport.addEventListener("scroll", scheduleFit);
-            }
-            try {
-                new MutationObserver(function () {
-                    scheduleFit();
-                }).observe(document.documentElement, { childList: true, subtree: true });
-            } catch (error) {}
-        })();
+                try {
+                    var orientation = screen.orientation || screen;
+                    if (orientation) {
+                        setMethod(orientation, "lock", function () { return Promise.resolve(); });
+                        setMethod(orientation, "unlock", function () {});
+                    }
+                } catch (error) {}
+
+                if (!navigator.wakeLock) {
+                    try {
+                        Object.defineProperty(navigator, "wakeLock", {
+                            configurable: true,
+                            value: {
+                                request: function () {
+                                    return Promise.resolve({
+                                        released: false,
+                                        release: function () {
+                                            this.released = true;
+                                            return Promise.resolve();
+                                        },
+                                        addEventListener: function () {},
+                                        removeEventListener: function () {}
+                                    });
+                                }
+                            }
+                        });
+                    } catch (error) {}
+                }
+            })();
+        </script>
     """.trimIndent()
+
+    return injectIntoHeadStart(html, compatibility)
 }
 
 private fun injectResponsiveBaseline(html: String): String {
@@ -4266,51 +5729,24 @@ private fun injectIntoBodyEnd(html: String, content: String): String {
     }
 }
 
-private fun livePreviewScriptTagFor(file: WebFile, safeUrl: String): String {
-    return if (fileExtension(file.name) == "mjs") {
-        """<script type="module" src="$safeUrl"></script>"""
-    } else {
-        """<script src="$safeUrl"></script>"""
-    }
+private fun isTerminalRunnableScript(fileName: String): Boolean {
+    return fileExtension(fileName) in javascriptFileExtensions
 }
 
-private fun livePreviewStatusHtml(message: String): String {
-    val safeMessage = escapeHtml(message)
-    return """
-        <!DOCTYPE html>
-        <html lang="en">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Preview</title>
-            <style>
-                html, body {
-                    height: 100%;
-                    margin: 0;
-                    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-                    background: #ffffff;
-                    color: #111827;
-                }
-                body {
-                    display: grid;
-                    place-items: center;
-                    padding: 24px;
-                    box-sizing: border-box;
-                }
-            </style>
-        </head>
-        <body>$safeMessage</body>
-        </html>
-    """.trimIndent()
+private fun isLivePreviewFile(fileName: String): Boolean {
+    return fileExtension(fileName) in htmlFileExtensions || fileExtension(fileName) in cssFileExtensions
 }
 
-private fun loadLivePreviewUrl(webView: WebView, previewUrl: String) {
-    webView.stopLoading()
-    webView.clearHistory()
-    webView.clearCache(true)
-    webView.loadUrl("about:blank")
-    webView.post {
-        webView.loadUrl(previewUrl)
+private fun runButtonLabelFor(file: WebFile?): String {
+    return if (file != null && isLivePreviewFile(file.name)) "Preview" else "Run Code"
+}
+
+private fun terminalRunnableJavaScript(file: WebFile, rootDirectory: File): String {
+    val sourceLabel = relativeWorkspacePath(rootDirectory, File(file.filePath))
+    return buildString {
+        append(file.content)
+        append("\n\n//# sourceURL=")
+        append(sourceLabel.replace("\n", " "))
     }
 }
 
@@ -4608,9 +6044,10 @@ private object OfflineWebLspServer {
         val key = "offline-completion|$fileName|${source.length}|${source.hashCode()}|$cursor"
         return completionCache.getOrPutValue(key) {
             val context = completionContextAt(source, cursor, fileName)
+                ?: plainCompletionContextAt(source, cursor)
             EditorCompletionResult(
                 context = context,
-                items = context?.let { webCompletionsForContext(fileName, source, it) }.orEmpty(),
+                items = webCompletionsForContext(fileName, source, context),
                 source = source,
                 cursor = cursor,
                 signatureHelp = if (shouldComputeSignatureHelp(source, cursor)) {
@@ -4655,11 +6092,25 @@ private object OfflineWebLspServer {
             formatWebSource(fileName, source)
         }
     }
+
+    fun clearCaches() {
+        completionCache.clearValues()
+        diagnosticsCache.clearValues()
+        highlightCache.clearValues()
+        formatCache.clearValues()
+    }
 }
 
 private object WebLanguageServices {
     fun completion(file: File, fileName: String, source: String, rawCursor: Int): EditorCompletionResult {
         val cursor = rawCursor.coerceIn(0, source.length)
+        val offlineResult = OfflineWebLspServer.completion(file, fileName, source, cursor)
+        if (offlineResult.items.isNotEmpty()) {
+            return offlineResult
+        }
+        if (source.length > EXTERNAL_LSP_LARGE_FILE_LIMIT) {
+            return offlineResult
+        }
         val externalItems = ExternalLspManager.completions(file, fileName, source, cursor)
         if (!externalItems.isNullOrEmpty()) {
             return EditorCompletionResult(
@@ -4674,7 +6125,7 @@ private object WebLanguageServices {
                 },
             )
         }
-        return OfflineWebLspServer.completion(file, fileName, source, cursor)
+        return offlineResult
     }
 
     fun diagnostics(file: File, fileName: String, source: String): List<CodeDiagnostic> {
@@ -4702,6 +6153,10 @@ private object WebLanguageServices {
             append("\n\n")
             append(ExternalLspManager.status())
         }
+    }
+
+    fun releasePreviewHandoffMemory() {
+        OfflineWebLspServer.clearCaches()
     }
 }
 
@@ -4733,6 +6188,76 @@ private class SmallLruCache<K, V>(
         }
         return value
     }
+
+    fun clearValues() {
+        synchronized(this) {
+            clear()
+        }
+    }
+}
+
+private object ProjectFileCache {
+    private data class CachedFile(
+        val modifiedAt: Long,
+        val sizeBytes: Long,
+        val file: WebFile,
+    )
+
+    private val lock = Any()
+    private val filesByPath = mutableMapOf<String, CachedFile>()
+
+    fun webFileFor(rootDirectory: File, file: File): WebFile? {
+        val canonicalFile = file.canonicalFile
+        if (!isSameOrInside(rootDirectory, canonicalFile)) return null
+
+        val key = canonicalFile.absolutePath
+        val modifiedAt = canonicalFile.lastModified()
+        val sizeBytes = canonicalFile.length()
+        val cached = synchronized(lock) {
+            filesByPath[key]
+                ?.takeIf { it.modifiedAt == modifiedAt && it.sizeBytes == sizeBytes }
+                ?.file
+        }
+        if (cached != null) return cached
+
+        val content = canonicalFile.readText()
+        val webFile = WebFile(
+            id = canonicalFile.canonicalPath.hashCode().toLong(),
+            name = canonicalFile.name,
+            content = content,
+            filePath = canonicalFile.absolutePath,
+            modifiedAt = modifiedAt,
+            sizeBytes = sizeBytes,
+            contentHash = content.hashCode(),
+        )
+        synchronized(lock) {
+            filesByPath[key] = CachedFile(modifiedAt, sizeBytes, webFile)
+        }
+        return webFile
+    }
+
+    fun invalidate(file: File) {
+        val key = runCatching { file.canonicalFile.absolutePath }.getOrNull() ?: return
+        synchronized(lock) {
+            filesByPath.remove(key)
+        }
+    }
+
+    fun prune(rootDirectory: File, livePaths: Set<String>) {
+        val rootPath = rootDirectory.canonicalFile.absolutePath
+        val rootPrefix = rootPath + File.separator
+        synchronized(lock) {
+            filesByPath.keys
+                .filter { path -> (path == rootPath || path.startsWith(rootPrefix)) && path !in livePaths }
+                .forEach { path -> filesByPath.remove(path) }
+        }
+    }
+
+    fun clearAll() {
+        synchronized(lock) {
+            filesByPath.clear()
+        }
+    }
 }
 
 private fun plainCompletionContextAt(source: String, rawCursor: Int): CompletionContext {
@@ -4751,24 +6276,190 @@ private fun plainCompletionContextAt(source: String, rawCursor: Int): Completion
 }
 
 private class WebSyntaxTransformation(
-    private val source: String,
-    private val transformed: AnnotatedString,
     private val fileName: String,
     private val palette: WebPalette,
+    private val diagnostics: List<CodeDiagnostic>,
+    private val cursor: Int,
 ) : VisualTransformation {
+    private var cachedSource: String? = null
+    private var cachedResult: AnnotatedString? = null
+
     override fun filter(text: AnnotatedString): TransformedText {
-        val displayText = if (text.text == source) {
-            transformed
-        } else if (text.text.length <= LIVE_SYNTAX_HIGHLIGHT_CHAR_LIMIT) {
-            // Only perform fast-pass if small, otherwise use unstyled for speed
-            highlightWebSource(fileName, text.text, palette)
-        } else {
-            AnnotatedString(text.text, SpanStyle(color = palette.text))
+        val currentSource = text.text
+        if (currentSource === cachedSource) {
+            return TransformedText(
+                cachedResult ?: text,
+                OffsetMapping.Identity,
+            )
         }
+        val safeCursor = cursor.coerceIn(0, currentSource.length)
+        val rawStart = (safeCursor - LIVE_COLOR_RETARGET_RADIUS).coerceAtLeast(0)
+        val rawEnd = (safeCursor + LIVE_COLOR_RETARGET_RADIUS).coerceAtMost(currentSource.length)
+        val windowStart = currentSource.lastIndexOf('\n', (rawStart - 1).coerceAtLeast(0))
+            .let { if (it < 0) 0 else it + 1 }
+        val windowEnd = currentSource.indexOf('\n', rawEnd)
+            .let { if (it < 0) currentSource.length else it }
+        val localSource = currentSource.substring(windowStart, windowEnd)
+        val localHighlight = highlightWebSource(fileName, localSource, palette)
+        val spans = buildList {
+            localHighlight.spanStyles.forEach { range ->
+                add(
+                    AnnotatedString.Range(
+                        item = range.item,
+                        start = range.start + windowStart,
+                        end = range.end + windowStart,
+                    )
+                )
+            }
+            diagnostics.forEach { diagnostic ->
+                val start = diagnostic.start.coerceIn(windowStart, windowEnd)
+                val end = diagnostic.end.coerceIn(start, windowEnd)
+                if (end > start) {
+                    add(AnnotatedString.Range(diagnosticSpanStyle(palette, diagnostic.severity), start, end))
+                }
+            }
+        }
+        val result = AnnotatedString(currentSource, spanStyles = spans)
+        cachedSource = currentSource
+        cachedResult = result
         return TransformedText(
-            displayText,
+            result,
             OffsetMapping.Identity,
         )
+    }
+}
+
+private fun retargetEditorVisualText(
+    source: String,
+    highlighted: AnnotatedString,
+    currentSource: String,
+    cursorHint: Int? = null,
+    styleRadius: Int = Int.MAX_VALUE,
+): AnnotatedString {
+    if (currentSource == source) return highlighted
+    if (source.isEmpty() || highlighted.spanStyles.isEmpty()) return AnnotatedString(currentSource)
+
+    val lengthDelta = currentSource.length - source.length
+    val hintedPrefix = cursorHint?.let { cursor ->
+        when (lengthDelta) {
+            1 -> (cursor - 1).coerceIn(0, source.length)
+            -1 -> cursor.coerceIn(0, currentSource.length)
+            else -> null
+        }
+    }
+    val commonSuffix = if (hintedPrefix != null) {
+        minOf(source.length, currentSource.length) - hintedPrefix
+    } else if (lengthDelta == 1 || lengthDelta == -1) {
+        // Most editor updates are one-character inserts/deletes. Finding the edit
+        // from the end is fast for the common case of typing near the cursor at the
+        // end of a large document and avoids rescanning the whole leading content.
+        commonSuffixLength(source, currentSource, commonPrefix = 0)
+    } else {
+        0
+    }
+    val inferredPrefix = minOf(source.length, currentSource.length) - commonSuffix
+    val commonPrefix = hintedPrefix ?: if (
+        (lengthDelta == 1 || lengthDelta == -1) &&
+        inferredPrefix >= 0
+    ) {
+        inferredPrefix
+    } else {
+        commonPrefixLength(source, currentSource)
+    }
+    val verifiedSuffix = if (lengthDelta == 1 || lengthDelta == -1) {
+        commonSuffix
+    } else {
+        commonSuffixLength(source, currentSource, commonPrefix)
+    }
+    val oldEditEnd = source.length - verifiedSuffix
+    val newEditEnd = currentSource.length - verifiedSuffix
+    val delta = currentSource.length - source.length
+
+    return buildAnnotatedString {
+        append(currentSource)
+        val styleWindowStart = cursorHint?.minus(styleRadius)?.coerceAtLeast(0) ?: 0
+        val styleWindowEnd = cursorHint?.plus(styleRadius)?.coerceAtMost(currentSource.length)
+            ?: currentSource.length
+        highlighted.spanStyles
+            .asSequence()
+            .filter { range ->
+                styleRadius == Int.MAX_VALUE ||
+                        (range.end >= styleWindowStart && range.start <= styleWindowEnd)
+            }
+            .forEach { range ->
+            addRetargetedStyle(
+                style = range.item,
+                oldStart = range.start,
+                oldEnd = range.end,
+                commonPrefix = commonPrefix,
+                oldEditEnd = oldEditEnd,
+                newEditEnd = newEditEnd,
+                delta = delta,
+                currentLength = currentSource.length,
+            )
+            }
+    }
+}
+
+private fun commonPrefixLength(left: String, right: String): Int {
+    val limit = minOf(left.length, right.length)
+    var index = 0
+    while (index < limit && left[index] == right[index]) {
+        index += 1
+    }
+    return index
+}
+
+private fun commonSuffixLength(left: String, right: String, commonPrefix: Int): Int {
+    val limit = minOf(left.length, right.length) - commonPrefix
+    var count = 0
+    while (
+        count < limit &&
+        left[left.lastIndex - count] == right[right.lastIndex - count]
+    ) {
+        count += 1
+    }
+    return count
+}
+
+private fun AnnotatedString.Builder.addRetargetedStyle(
+    style: SpanStyle,
+    oldStart: Int,
+    oldEnd: Int,
+    commonPrefix: Int,
+    oldEditEnd: Int,
+    newEditEnd: Int,
+    delta: Int,
+    currentLength: Int,
+) {
+    if (oldStart < commonPrefix) {
+        addBoundedStyle(style, oldStart, minOf(oldEnd, commonPrefix), currentLength)
+    }
+
+    val editIsInsertion = oldEditEnd == commonPrefix && newEditEnd > commonPrefix
+    val styleCoversInsertionPoint = editIsInsertion && oldStart < commonPrefix && oldEnd > commonPrefix
+    val styleOverlapsReplacedText = oldStart < oldEditEnd && oldEnd > commonPrefix
+    if ((styleCoversInsertionPoint || styleOverlapsReplacedText) && newEditEnd > commonPrefix) {
+        addBoundedStyle(style, commonPrefix, newEditEnd, currentLength)
+    }
+
+    if (oldEnd > oldEditEnd) {
+        val shiftedStart = maxOf(oldStart, oldEditEnd) + delta
+        val shiftedEnd = oldEnd + delta
+        addBoundedStyle(style, shiftedStart, shiftedEnd, currentLength)
+    }
+}
+
+private fun AnnotatedString.Builder.addBoundedStyle(
+    style: SpanStyle,
+    start: Int,
+    end: Int,
+    length: Int,
+) {
+    val boundedStart = start.coerceIn(0, length)
+    val boundedEnd = end.coerceIn(boundedStart, length)
+    if (boundedEnd > boundedStart) {
+        addStyle(style, boundedStart, boundedEnd)
     }
 }
 
@@ -4875,16 +6566,10 @@ private fun applyRegexColor(
     source: String,
     regex: Regex,
     color: Color,
-    bold: Boolean = false,
-    italic: Boolean = false
 ) {
     regex.findAll(source).forEach { match ->
         builder.addStyle(
-            SpanStyle(
-                color = color,
-                fontWeight = if (bold) FontWeight.Bold else null,
-                fontStyle = if (italic) FontStyle.Italic else null
-            ),
+            SpanStyle(color = color),
             match.range.first,
             match.range.last + 1
         )
@@ -4897,17 +6582,11 @@ private fun applyRegexGroupColor(
     regex: Regex,
     groupIndex: Int,
     color: Color,
-    bold: Boolean = false,
-    italic: Boolean = false
 ) {
     regex.findAll(source).forEach { match ->
         val group = match.groups[groupIndex] ?: return@forEach
         builder.addStyle(
-            SpanStyle(
-                color = color,
-                fontWeight = if (bold) FontWeight.Bold else null,
-                fontStyle = if (italic) FontStyle.Italic else null
-            ),
+            SpanStyle(color = color),
             group.range.first,
             group.range.last + 1
         )
@@ -4920,19 +6599,19 @@ private fun highlightHtml(source: String, palette: WebPalette): AnnotatedString 
     val dark = palette.text == Color.White
 
     // Comments
-    applyRegexColor(this, source, HTML_COMMENT_REGEX, palette.subtleText, italic = true)
+    applyRegexColor(this, source, HTML_COMMENT_REGEX, palette.subtleText)
 
     // Doctype
-    applyRegexColor(this, source, HTML_DOCTYPE_REGEX, if (dark) Color(0xFFFF7AB6) else Color(0xFFB4236E), bold = true)
+    applyRegexColor(this, source, HTML_DOCTYPE_REGEX, if (dark) Color(0xFFFF7AB6) else Color(0xFFB4236E))
 
     // Tag Brackets
     applyRegexColor(this, source, HTML_TAG_BRACKETS_REGEX, palette.text.copy(alpha = 0.7f))
 
     // Tag Names
-    applyRegexGroupColor(this, source, HTML_TAG_NAME_REGEX, 1, if (dark) Color(0xFF569CD6) else Color(0xFF264F78), bold = true)
+    applyRegexGroupColor(this, source, HTML_TAG_NAME_REGEX, 1, if (dark) Color(0xFF569CD6) else Color(0xFF264F78))
 
     // Attribute Names
-    applyRegexGroupColor(this, source, HTML_ATTR_NAME_CORE_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080), bold = true)
+    applyRegexGroupColor(this, source, HTML_ATTR_NAME_CORE_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
     applyRegexGroupColor(this, source, HTML_ATTR_NAME_GENERIC_REGEX, 1, if (dark) Color(0xFF9CDCFE) else Color(0xFF001080))
 
     // Attribute Values (Strings)
@@ -4948,7 +6627,7 @@ private fun highlightCss(source: String, palette: WebPalette): AnnotatedString =
     val dark = palette.text == Color.White
 
     // Comments
-    applyRegexColor(this, source, CSS_COMMENT_REGEX, palette.subtleText, italic = true)
+    applyRegexColor(this, source, CSS_COMMENT_REGEX, palette.subtleText)
 
     // At-rules
     applyRegexColor(this, source, CSS_AT_RULE_REGEX, if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0))
@@ -4979,7 +6658,7 @@ private fun highlightJs(source: String, palette: WebPalette): AnnotatedString = 
     val dark = palette.text == Color.White
 
     // Comments
-    applyRegexColor(this, source, JS_COMMENT_REGEX, palette.subtleText, italic = true)
+    applyRegexColor(this, source, JS_COMMENT_REGEX, palette.subtleText)
 
     // Strings
     applyRegexColor(this, source, JS_STRING_REGEX, if (dark) Color(0xFFCE9178) else Color(0xFFA31515))
@@ -4988,10 +6667,10 @@ private fun highlightJs(source: String, palette: WebPalette): AnnotatedString = 
     val tsKeywords = setOf("type", "interface", "enum", "as", "readonly", "private", "protected", "public", "namespace", "abstract", "declare", "module")
     val allKeywords = javascriptKeywords + tsKeywords
     val jsKeywordsPattern = "\\b(${allKeywords.joinToString("|")})\\b"
-    applyRegexColor(this, source, Regex(jsKeywordsPattern), if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0), bold = true)
+    applyRegexColor(this, source, Regex(jsKeywordsPattern), if (dark) Color(0xFFC586C0) else Color(0xFFAF57A0))
 
     // Booleans/Null
-    applyRegexColor(this, source, JS_BOOLEAN_NULL_REGEX, if (dark) Color(0xFF569CD6) else Color(0xFF0451A5), bold = true)
+    applyRegexColor(this, source, JS_BOOLEAN_NULL_REGEX, if (dark) Color(0xFF569CD6) else Color(0xFF0451A5))
 
     // Builtins/Globals
     val tsBuiltins = setOf("any", "number", "string", "boolean", "void", "never", "unknown", "object", "Record", "Partial", "Pick", "Omit")
@@ -5200,11 +6879,14 @@ internal fun webCompletionsForContext(
         context.trigger == "cssValue" -> cssValueCompletionsFor(source, context.replaceStart)
         context.isDotAccess && language == WebEditorLanguage.JavaScript -> jsDotCompletionsForSource(source, context.replaceStart - 1)
         context.trigger == "tag" && language == WebEditorLanguage.Html -> htmlCompletionItems
-        language == WebEditorLanguage.Html -> userDefinedHtmlCompletions(source) + htmlCompletionItems
+        language == WebEditorLanguage.Html ->
+            userDefinedHtmlCompletions(completionScanWindow(source, context.replaceStart)) + htmlCompletionItems
         language == WebEditorLanguage.Css -> cssContextualCompletions(source, context.replaceStart)
-        language == WebEditorLanguage.JavaScript -> userDefinedJsCompletions(source) + jsCompletionItems + jsLibraryCompletionItems
+        language == WebEditorLanguage.JavaScript ->
+            userDefinedJsCompletions(completionScanWindow(source, context.replaceStart)) +
+                    jsCompletionItems + jsLibraryCompletionItems
         language == WebEditorLanguage.Json -> jsonCompletionItems
-        else -> emptyList()
+        else -> generalCodeCompletions(fileName, completionScanWindow(source, context.replaceStart))
     }
     if (context.trigger == "tag" && prefix.isBlank()) return base.take(12)
     return base
@@ -5213,6 +6895,16 @@ internal fun webCompletionsForContext(
             completionMatchesPrefix(item, prefix)
         }
         .take(16)
+}
+
+private fun completionScanWindow(source: String, rawCursor: Int): String {
+    if (source.length <= COMPLETION_SCAN_CHAR_LIMIT) return source
+    val cursor = rawCursor.coerceIn(0, source.length)
+    val halfWindow = COMPLETION_SCAN_CHAR_LIMIT / 2
+    val start = (cursor - halfWindow).coerceAtLeast(0)
+    val end = (start + COMPLETION_SCAN_CHAR_LIMIT).coerceAtMost(source.length)
+    val adjustedStart = (end - COMPLETION_SCAN_CHAR_LIMIT).coerceAtLeast(0)
+    return source.substring(adjustedStart, end)
 }
 
 private fun completionMatchesPrefix(item: CompletionItem, prefix: String): Boolean {
@@ -5735,7 +7427,6 @@ private val jsLibraryCompletionItems = listOf(
     CompletionItem("d3", "d3", "library"),
     CompletionItem("Chart", "Chart", "library"),
     CompletionItem("dayjs", "dayjs", "library"),
-    CompletionItem("firebase", "firebase", "library"),
     CompletionItem("supabase", "supabase", "library"),
     CompletionItem("p5", "p5", "library"),
     CompletionItem("Phaser", "Phaser", "library"),
@@ -6050,12 +7741,6 @@ private val jsLodashCompletions = listOf(
     CompletionItem("cloneDeep()", "cloneDeep(value)", "lodash", 10),
 )
 
-private val jsFirebaseCompletions = listOf(
-    CompletionItem("initializeApp()", "initializeApp(firebaseConfig)", "firebase", 14),
-    CompletionItem("getAuth()", "getAuth(app)", "firebase", 8),
-    CompletionItem("getFirestore()", "getFirestore(app)", "firebase", 13),
-)
-
 private val jsSupabaseCompletions = listOf(
     CompletionItem("createClient()", "createClient(url, anonKey)", "supabase", 13),
     CompletionItem("from()", "from('table')", "supabase", 5),
@@ -6232,7 +7917,6 @@ private fun jsDotCompletionsForType(type: String?): List<CompletionItem> {
         "d3" -> jsD3Completions
         "jquery" -> jsJqueryCompletions
         "lodash" -> jsLodashCompletions
-        "firebase" -> jsFirebaseCompletions
         "supabase" -> jsSupabaseCompletions
         "classList" -> listOf(
             CompletionItem("add()", "add('')", "dom", 5),
@@ -6329,7 +8013,6 @@ private fun inferJsDotTargetType(source: String, dotIndex: Int): String? {
     if (beforeDot.endsWith("d3")) return "d3"
     if (beforeDot.endsWith("$") || beforeDot.endsWith("jQuery")) return "jquery"
     if (beforeDot.endsWith("_")) return "lodash"
-    if (beforeDot.endsWith("firebase")) return "firebase"
     if (beforeDot.endsWith("supabase")) return "supabase"
     if (beforeDot.endsWith("headers")) return "headers"
     if (beforeDot.endsWith("searchParams")) return "searchParams"
@@ -6469,8 +8152,9 @@ private fun applySmartWebEditorChange(
     requested: TextFieldValue,
     fileName: String,
 ): TextFieldValue {
-    val inserted = singleInsertedText(current.text, requested.text) ?: return requested
-    val insertedText = inserted.second
+    val insertedText = directlyInsertedCharacter(current, requested)
+        ?: singleInsertedText(current.text, requested.text)?.second
+        ?: return requested
     if (insertedText.length != 1) return requested
 
     val char = insertedText.single()
@@ -6491,6 +8175,17 @@ private fun applySmartWebEditorChange(
         '\n' -> if (current.selection.collapsed) insertWebIndentedNewline(current, fileName) else requested
         else -> requested
     }
+}
+
+private fun directlyInsertedCharacter(
+    current: TextFieldValue,
+    requested: TextFieldValue,
+): String? {
+    if (!current.selection.collapsed || !requested.selection.collapsed) return null
+    if (requested.text.length != current.text.length + 1) return null
+    val insertionPoint = current.selection.start
+    if (requested.selection.start != insertionPoint + 1) return null
+    return requested.text.substring(insertionPoint, insertionPoint + 1)
 }
 
 private fun insertWebIndentedNewline(value: TextFieldValue, fileName: String): TextFieldValue {
@@ -7042,7 +8737,9 @@ private fun isWebCompletionPosition(source: String, rawCursor: Int, fileName: St
     var quote: Char? = null
     var lineComment = false
     var blockComment = false
-    var index = 0
+    // Avoid re-parsing an entire large document after every keystroke. This bounded
+    // look-behind still captures the local string/comment state in ordinary code.
+    var index = (cursor - COMMENT_STATE_SCAN_CHAR_LIMIT).coerceAtLeast(0)
     while (index < cursor) {
         val char = source[index]
         val next = source.getOrNull(index + 1)
@@ -7390,7 +9087,10 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
                 PocketCoded Web terminal
 
                 Files: ls, tree, pwd, cd <dir>, cat <file>, touch <file>, mkdir <dir>, rm <path>, mv <from> <to>, cp <from> <to>
+                Git: git init, git status, git add <path>, git commit -m <message>, git log
                 Web: preview, run, serve, lint, validate, format <file>
+                Node: node --version, node <file>, node -e <code>
+                Next.js: npx create-next-app <name>, next dev, next build, next start
                 Packages: npm/pnpm/yarn install <pkg>, npx <tool>, pnpm dlx <tool>, yarn dlx <tool>
                 LSP: offline by default; lsp status, lsp stdio <server> [args...], lsp tcp <host> <port>, lsp stop
                 Libraries: libs, libraries, lib <name>
@@ -7415,12 +9115,13 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
             }
         }
         "git" -> {
-            if (args.getOrNull(1) == "--version" || args.getOrNull(1) == "version") {
-                WebShellResult(output = "git version 2.45.0 (PocketCoded Web built-in JGit compatible)")
-            } else {
-                WebShellResult(error = "git: this Web terminal currently supports git --version only.")
-            }
+            executeGitCommand(args, root)
         }
+        "curl" -> executeCurlCommand(args, root, working)
+        "vim", "vi", "nano" -> openTerminalEditor(args, root, working, executable)
+        "sudo", "apt", "apt-get" -> WebShellResult(
+            error = "$executable is an Android/Linux system command and is not available inside this project sandbox. Use help for built-in Web commands, or use Termux for a full Linux shell."
+        )
         "pwd" -> WebShellResult(output = terminalDirectoryLabel(root, working))
         "ls", "dir" -> WebShellResult(output = listDirectory(working, showHidden = args.any { it.contains("a") && it.startsWith("-") }))
         "tree" -> WebShellResult(output = treeDirectory(root, working))
@@ -7479,7 +9180,7 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
             source.copyTo(target, overwrite = true)
             WebShellResult(output = "Copied ${source.name} -> ${relativeWorkspacePath(root, target)}", workspaceChanged = true)
         }
-        "preview", "run", "open", "serve" -> WebShellResult(output = "Opening responsive Web preview.", openPreview = true)
+        "preview", "run", "open", "serve" -> WebShellResult(output = "Choose where to open the live preview.", openPreview = true)
         "lint", "check", "validate" -> WebShellResult(output = auditWebProject(root))
         "format" -> {
             val target = resolveTerminalPath(root, working, args.getOrNull(1).orEmpty())
@@ -7490,6 +9191,9 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
             WebShellResult(output = "Formatted ${relativeWorkspacePath(root, target)}", workspaceChanged = true)
         }
         "node", "js" -> {
+            if (args.any { it == "--version" || it == "-v" }) {
+                return WebShellResult(output = "Node.js 22-compatible JavaScript runner (PocketCoded Web)")
+            }
             if (args.getOrNull(1) == "-e") {
                 val code = args.drop(2).joinToString(" ")
                 return if (code.isBlank()) {
@@ -7506,12 +9210,48 @@ private fun executeWebShellCommand(command: String, root: File, working: File): 
             WebShellResult(output = "", runJs = target.readText())
         }
         "npm" -> executeNpmCommand(args, root, working)
+        "next" -> runKnownPackageExecutable("next", args.drop(1), root, working, "next")
+            ?: WebShellResult(error = "next: command unavailable")
         "npx" -> executeNpxCommand(args, root, working)
         "pnpm" -> executePnpmCommand(args, root, working)
         "yarn" -> executeYarnCommand(args, root, working)
         "lsp" -> executeLspCommand(args, root)
         else -> WebShellResult(error = "Command not found: $executable. Run help to see available commands.")
     }
+}
+
+private fun generalCodeCompletions(fileName: String, source: String): List<CompletionItem> {
+    val extension = fileExtension(fileName)
+    val keywords = when (extension) {
+        "kt", "kts" -> listOf("class", "data class", "object", "interface", "fun", "val", "var", "when", "if", "else", "for", "while", "return", "import", "package", "private", "public", "internal", "suspend", "override", "null", "true", "false")
+        "java" -> listOf("class", "interface", "enum", "record", "public", "private", "protected", "static", "final", "void", "new", "return", "if", "else", "for", "while", "try", "catch", "import", "package", "null", "true", "false")
+        "py", "pyw" -> listOf("def", "class", "import", "from", "as", "if", "elif", "else", "for", "while", "return", "yield", "async", "await", "try", "except", "with", "lambda", "None", "True", "False", "print()")
+        "c", "h", "cc", "cpp", "cxx", "hpp" -> listOf("class", "struct", "enum", "namespace", "template", "public", "private", "protected", "const", "static", "void", "int", "auto", "new", "delete", "return", "if", "else", "for", "while", "nullptr", "true", "false", "#include")
+        "cs" -> listOf("class", "struct", "interface", "enum", "namespace", "using", "public", "private", "protected", "internal", "static", "readonly", "async", "await", "var", "new", "return", "if", "else", "foreach", "while", "null", "true", "false")
+        "go" -> listOf("package", "import", "func", "type", "struct", "interface", "var", "const", "go", "defer", "select", "chan", "map", "range", "return", "if", "else", "for", "nil", "true", "false")
+        "rs" -> listOf("fn", "struct", "enum", "trait", "impl", "mod", "use", "pub", "let", "mut", "const", "async", "await", "match", "if", "else", "for", "while", "loop", "return", "self", "Some", "None", "Ok", "Err")
+        "php" -> listOf("class", "interface", "trait", "function", "public", "private", "protected", "static", "namespace", "use", "new", "return", "if", "else", "foreach", "while", "null", "true", "false", "echo")
+        "rb" -> listOf("class", "module", "def", "end", "require", "include", "attr_reader", "if", "elsif", "else", "unless", "each", "do", "yield", "return", "nil", "true", "false", "puts")
+        "swift" -> listOf("class", "struct", "enum", "protocol", "extension", "func", "let", "var", "guard", "if", "else", "switch", "for", "while", "return", "import", "async", "await", "nil", "true", "false")
+        "dart" -> listOf("class", "enum", "extension", "mixin", "void", "final", "const", "var", "late", "async", "await", "Future", "import", "return", "if", "else", "for", "while", "null", "true", "false")
+        "sh", "bash", "zsh" -> listOf("if", "then", "elif", "else", "fi", "for", "while", "do", "done", "case", "esac", "function", "local", "export", "source", "echo", "printf")
+        "ps1" -> listOf("function", "param", "if", "elseif", "else", "foreach", "while", "switch", "try", "catch", "finally", "return", "Import-Module", "Write-Output", "Get-ChildItem")
+        "sql" -> listOf("SELECT", "FROM", "WHERE", "JOIN", "LEFT JOIN", "INNER JOIN", "INSERT INTO", "UPDATE", "DELETE FROM", "CREATE TABLE", "ALTER TABLE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "AS", "AND", "OR", "NULL")
+        "yaml", "yml" -> listOf("name:", "version:", "services:", "image:", "build:", "environment:", "dependencies:", "scripts:")
+        "xml" -> listOf("<?xml version=\"1.0\" encoding=\"utf-8\"?>", "<!--  -->")
+        "md" -> listOf("# ", "## ", "### ", "- ", "1. ", "[text](url)", "```")
+        else -> emptyList()
+    }.map { CompletionItem(it, it, "keyword") }
+
+    val identifiers = Regex("""[A-Za-z_][A-Za-z0-9_]{2,}""")
+        .findAll(if (source.length > COMPLETION_SCAN_CHAR_LIMIT) source.takeLast(COMPLETION_SCAN_CHAR_LIMIT) else source)
+        .map { it.value }
+        .filterNot { value -> keywords.any { it.label.equals(value, ignoreCase = true) } }
+        .distinct()
+        .take(80)
+        .map { CompletionItem(it, it, "symbol") }
+        .toList()
+    return keywords + identifiers
 }
 
 private fun executeLspCommand(args: List<String>, root: File): WebShellResult {
@@ -7907,7 +9647,7 @@ private fun runKnownPackageExecutable(
         "vite", "webpack", "webpack-cli", "parcel", "astro", "next", "nuxt",
         "serve", "http-server", "live-server", "browser-sync", "snowpack" -> {
             WebShellResult(
-                output = "$normalized normally starts a Node dev server. PocketCoded Web is opening its built-in live preview with local node_modules support instead.",
+                output = "$normalized normally starts a Node dev server. PocketCoded Web is opening the live preview with local node_modules support instead.",
                 openPreview = true,
             )
         }
@@ -8006,6 +9746,9 @@ private fun scaffoldWebStarter(
     targetDirectory.mkdirs()
 
     val projectName = if (targetName == "." || targetName == "./") root.name else targetDirectory.name
+    if (command == "create-next-app") {
+        return scaffoldNextStarter(targetDirectory, projectName, root)
+    }
     val useReact = command == "create-react-app" || args.any { it.contains("react", ignoreCase = true) }
     File(targetDirectory, "package.json").writeText(scaffoldPackageJson(projectName, useReact))
     File(targetDirectory, "index.html").writeText(scaffoldIndexHtml(projectName, useReact))
@@ -8488,7 +10231,7 @@ private fun runSupportedNpmScript(
     val delegated = when {
         lower == "preview" || lower == "run" || lower == "serve" ||
                 lower.startsWith("preview ") || lower.startsWith("run ") || lower.startsWith("serve ") -> {
-            WebShellResult(output = "Opening responsive Web preview.", openPreview = true)
+            WebShellResult(output = "Choose where to open the live preview.", openPreview = true)
         }
         lower == "lint" || lower == "check" || lower == "validate" -> {
             WebShellResult(output = auditWebProject(root))
@@ -8498,7 +10241,7 @@ private fun runSupportedNpmScript(
         lower.contains("vite") || lower.contains("webpack") || lower.contains("parcel") ||
                 lower.contains("next dev") || lower.contains("astro dev") -> {
             WebShellResult(
-                output = "This script expects a desktop Node dev server. Opening PocketCoded Web preview with local node_modules instead.",
+                output = "This script expects a desktop Node dev server. Opening the live preview with local node_modules instead.",
                 openPreview = true,
             )
         }
@@ -9066,6 +10809,223 @@ private fun appendTerminalOutput(existing: String, addition: String): String {
     )
 }
 
+private fun scaffoldNextStarter(targetDirectory: File, projectName: String, root: File): WebShellResult {
+    val safeJsProjectName = projectName.replace("\\", "\\\\").replace("\"", "\\\"")
+    val packageJson = JSONObject()
+        .put("name", sanitizeNpmPackageName(projectName))
+        .put("version", "0.1.0")
+        .put("private", true)
+        .put("scripts", JSONObject()
+            .put("dev", "next dev")
+            .put("build", "next build")
+            .put("start", "next start")
+            .put("lint", "next lint"))
+        .put("dependencies", JSONObject()
+            .put("next", "^15.0.0")
+            .put("react", "^19.0.0")
+            .put("react-dom", "^19.0.0"))
+    File(targetDirectory, "package.json").writeText(packageJson.toString(2) + "\n")
+    File(targetDirectory, "next.config.mjs").writeText(
+        """
+            /** @type {import('next').NextConfig} */
+            const nextConfig = { output: "export", images: { unoptimized: true } };
+            export default nextConfig;
+        """.trimIndent() + "\n"
+    )
+    val appDirectory = File(targetDirectory, "app").apply { mkdirs() }
+    File(appDirectory, "layout.jsx").writeText(
+        """
+            import "./globals.css";
+            export const metadata = { title: "$safeJsProjectName" };
+            export default function RootLayout({ children }) {
+              return <html lang="en"><body>{children}</body></html>;
+            }
+        """.trimIndent() + "\n"
+    )
+    File(appDirectory, "page.jsx").writeText(
+        """
+            export default function Home() {
+              return <main><h1>${escapeHtml(projectName)}</h1><p>Edit app/page.jsx to get started.</p></main>;
+            }
+        """.trimIndent() + "\n"
+    )
+    File(appDirectory, "globals.css").writeText(scaffoldCss())
+    File(targetDirectory, "index.html").writeText(
+        """
+            <!doctype html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(projectName)}</title><link rel="stylesheet" href="./app/globals.css"></head>
+            <body><main id="app"><h1>${escapeHtml(projectName)}</h1><p>Next.js project ready. Edit app/page.jsx, then run <code>npm run dev</code>.</p></main></body></html>
+        """.trimIndent() + "\n"
+    )
+    File(targetDirectory, ".gitignore").writeText("node_modules\n.next\nout\n.env*.local\n")
+    return WebShellResult(
+        output = "Created ${relativeWorkspacePath(root, targetDirectory)} as a Next.js App Router project. Run npm install, then npm run dev.",
+        workspaceChanged = true,
+    )
+}
+
+private fun openTerminalEditor(
+    args: List<String>,
+    root: File,
+    working: File,
+    command: String,
+): WebShellResult {
+    val rawPath = args.drop(1).firstOrNull { !it.startsWith("+") && !it.startsWith("-") }
+        ?: return WebShellResult(error = "$command: expected a file path")
+    val target = resolveTerminalPath(root, working, rawPath)
+        ?: return WebShellResult(error = "$command: outside project")
+    if (!target.exists()) {
+        if (!isEditableWebFile(target)) return WebShellResult(error = "$command: unsupported file type")
+        target.parentFile?.mkdirs()
+        target.writeText("")
+    }
+    if (!target.isFile || !isEditableWebFile(target)) {
+        return WebShellResult(error = "$command: ${target.name}: expected an editable Web file")
+    }
+    return WebShellResult(
+        output = "Opening ${relativeWorkspacePath(root, target)} in the PocketCoded Web editor.",
+        workspaceChanged = true,
+        openFilePath = target.absolutePath,
+    )
+}
+
+private fun executeCurlCommand(args: List<String>, root: File, working: File): WebShellResult {
+    if (args.any { it == "--version" || it == "-V" }) {
+        return WebShellResult(output = "curl-compatible HTTP client (PocketCoded Web)")
+    }
+    var method = "GET"
+    var outputPath: String? = null
+    var headersOnly = false
+    val headers = linkedMapOf<String, String>()
+    var urlText: String? = null
+    var index = 1
+    while (index < args.size) {
+        when (val argument = args[index]) {
+            "-L", "--location", "-s", "--silent", "-S", "--show-error" -> Unit
+            "-I", "--head" -> { headersOnly = true; method = "HEAD" }
+            "-X", "--request" -> method = args.getOrNull(++index)?.uppercase()
+                ?: return WebShellResult(error = "curl: -X requires a method")
+            "-o", "--output" -> outputPath = args.getOrNull(++index)
+                ?: return WebShellResult(error = "curl: -o requires a project file")
+            "-H", "--header" -> {
+                val header = args.getOrNull(++index) ?: return WebShellResult(error = "curl: -H requires a header")
+                val separator = header.indexOf(':')
+                if (separator <= 0) return WebShellResult(error = "curl: invalid header '$header'")
+                headers[header.substring(0, separator).trim()] = header.substring(separator + 1).trim()
+            }
+            else -> if (argument.startsWith("-")) {
+                return WebShellResult(error = "curl: unsupported option '$argument'")
+            } else urlText = argument
+        }
+        index++
+    }
+    val requestUrl = urlText ?: return WebShellResult(error = "curl: expected an http:// or https:// URL")
+    if (!requestUrl.startsWith("https://", true) && !requestUrl.startsWith("http://", true)) {
+        return WebShellResult(error = "curl: only HTTP and HTTPS URLs are supported")
+    }
+    return runCatching {
+        val connection = URL(requestUrl).openConnection() as HttpURLConnection
+        connection.requestMethod = method
+        connection.instanceFollowRedirects = true
+        connection.connectTimeout = 15_000
+        connection.readTimeout = 30_000
+        connection.setRequestProperty("User-Agent", "PocketCodedWeb/3.1")
+        headers.forEach(connection::setRequestProperty)
+        val status = connection.responseCode
+        val headerText = buildString {
+            append("HTTP ").append(status).append(' ').append(connection.responseMessage.orEmpty()).append('\n')
+            connection.headerFields.filterKeys { it != null }.forEach { (name, values) ->
+                append(name).append(": ").append(values.joinToString(", ")).append('\n')
+            }
+        }.trimEnd()
+        val body = if (headersOnly) ByteArray(0) else {
+            val stream = if (status >= 400) connection.errorStream else connection.inputStream
+            stream?.use { it.readBytes() } ?: ByteArray(0)
+        }
+        connection.disconnect()
+        if (outputPath != null) {
+            val target = resolveTerminalPath(root, working, outputPath!!)
+                ?: return@runCatching WebShellResult(error = "curl: output path is outside project")
+            target.parentFile?.mkdirs()
+            target.writeBytes(body)
+            WebShellResult(
+                output = "Downloaded ${body.size} bytes to ${relativeWorkspacePath(root, target)} (HTTP $status)",
+                workspaceChanged = true,
+            )
+        } else {
+            val rendered = if (headersOnly) headerText else body.toString(Charsets.UTF_8)
+            WebShellResult(output = rendered.take(100_000), error = if (status >= 400) "curl: HTTP $status" else "")
+        }
+    }.getOrElse { WebShellResult(error = "curl: ${it.message ?: "request failed"}") }
+}
+
+private fun executeGitCommand(args: List<String>, root: File): WebShellResult {
+    val subcommand = args.getOrNull(1)?.lowercase().orEmpty()
+    if (subcommand in setOf("--version", "version")) {
+        return WebShellResult(output = "git version 2.45.0 (PocketCoded Web built-in JGit)")
+    }
+    if (subcommand == "init") {
+        return runCatching {
+            Git.init().setDirectory(root).call().close()
+            WebShellResult(output = "Initialized Git repository in ${root.absolutePath}", workspaceChanged = true)
+        }.getOrElse { WebShellResult(error = "git init: ${it.message ?: "failed"}") }
+    }
+    val git = runCatching { Git.open(root) }.getOrElse {
+        return WebShellResult(error = "git: not a repository. Run git init first.")
+    }
+    return git.use { repository ->
+        runCatching {
+            when (subcommand) {
+                "status" -> {
+                    val status = repository.status().call()
+                    val changes = buildList {
+                        status.added.forEach { add("added: $it") }
+                        status.changed.forEach { add("modified: $it") }
+                        status.modified.forEach { add("modified: $it") }
+                        status.missing.forEach { add("deleted: $it") }
+                        status.removed.forEach { add("deleted: $it") }
+                        status.untracked.forEach { add("untracked: $it") }
+                        status.conflicting.forEach { add("conflict: $it") }
+                    }.distinct()
+                    WebShellResult(output = changes.joinToString("\n").ifBlank { "Working tree clean" })
+                }
+                "add" -> {
+                    val path = args.getOrNull(2) ?: return@use WebShellResult(error = "git add: expected a path (use . for all files)")
+                    repository.add().addFilepattern(path.replace('\\', '/')).call()
+                    WebShellResult(output = "Staged $path", workspaceChanged = true)
+                }
+                "commit" -> {
+                    val messageIndex = args.indexOfFirst { it == "-m" || it == "--message" }
+                    val message = args.getOrNull(messageIndex + 1).orEmpty()
+                    if (messageIndex < 0 || message.isBlank()) return@use WebShellResult(error = "git commit: use git commit -m \"message\"")
+                    val commit = repository.commit()
+                        .setMessage(message)
+                        .setAuthor("PocketCoded Web", "user@pocketcoded.local")
+                        .setCommitter("PocketCoded Web", "user@pocketcoded.local")
+                        .call()
+                    WebShellResult(output = "[${commit.name.take(7)}] ${commit.shortMessage}", workspaceChanged = true)
+                }
+                "log" -> {
+                    val commits = repository.log().setMaxCount(20).call().toList()
+                    WebShellResult(output = commits.joinToString("\n") { "${it.name.take(7)} ${it.shortMessage}" }.ifBlank { "No commits yet" })
+                }
+                "", "help", "--help", "-h" -> WebShellResult(output = "git init | git status | git add <path> | git commit -m <message> | git log")
+                else -> WebShellResult(error = "git: unsupported command '$subcommand'. Supported: init, status, add, commit, log.")
+            }
+        }.getOrElse { WebShellResult(error = "git $subcommand: ${it.message ?: "failed"}") }
+    }
+}
+
+private fun compactTerminalSnapshotForPreviewHandoff(text: String): String {
+    val trimmed = trimTerminalBuffer(text)
+    if (trimmed.length <= PREVIEW_HANDOFF_TERMINAL_SNAPSHOT_CHARS) return trimmed
+    val tailStart = trimmed.length - PREVIEW_HANDOFF_TERMINAL_SNAPSHOT_CHARS
+    val nextLineStart = trimmed.indexOf('\n', tailStart)
+        .takeIf { it >= 0 }
+        ?.plus(1)
+        ?: tailStart
+    return "[Earlier terminal output trimmed for browser preview]\n\n${trimmed.substring(nextLineStart)}"
+}
+
 private fun terminalDisplayText(
     text: String,
     promptText: String,
@@ -9507,12 +11467,13 @@ private fun previewSourceLabel(source: String): String {
 private fun buildAiCopilotPrompt(
     rootDirectory: File,
     files: List<WebFile>,
-    activeFile: WebFile,
+    activeFile: WebFile?,
     userPrompt: String,
     terminalText: String,
 ): String {
+    val activeFileId = activeFile?.id
     val contextFiles = files
-        .sortedBy { if (it.id == activeFile.id) 0 else 1 }
+        .sortedBy { if (activeFileId != null && it.id == activeFileId) 0 else 1 }
         .take(AI_CONTEXT_FILE_LIMIT)
     val fileContext = StringBuilder()
     var remaining = AI_CONTEXT_CHAR_LIMIT
@@ -9528,6 +11489,10 @@ private fun buildAiCopilotPrompt(
     val projectTree = files
         .sortedBy { relativeWorkspacePath(rootDirectory, File(it.filePath)) }
         .joinToString("\n") { "- ${relativeWorkspacePath(rootDirectory, File(it.filePath))}" }
+        .ifBlank { "(no editable files)" }
+    val activeFileLabel = activeFile
+        ?.let { relativeWorkspacePath(rootDirectory, File(it.filePath)) }
+        ?: "(none)"
     return """
         You are the built-in copilot for PocketCoded Web, an offline-first Android IDE for HTML, CSS, and JavaScript.
         You can read the project files included below. You can propose real file edits; the app will apply them after the user approves.
@@ -9546,7 +11511,7 @@ private fun buildAiCopilotPrompt(
         {"action":"replace_active_file","content":"...full file content..."}
         {"action":"apply_files","files":[{"path":"index.html","operation":"write","content":"..."},{"path":"old.js","operation":"delete"}]}
 
-        Active file: ${relativeWorkspacePath(rootDirectory, File(activeFile.filePath))}
+        Active file: $activeFileLabel
 
         Project file tree:
         $projectTree
@@ -9560,6 +11525,39 @@ private fun buildAiCopilotPrompt(
         User request:
         $userPrompt
     """.trimIndent()
+}
+
+private const val AI_CHAT_FUNCTION_URL =
+    "https://us-central1-pocketcodedweb-6887b.cloudfunctions.net/aiChat"
+
+private fun callGeminiBackend(modelId: String, prompt: String): String {
+    val user = FirebaseAuth.getInstance().currentUser ?: error("Sign in before using shared AI Chat.")
+    val idToken = Tasks.await(user.getIdToken(false)).token
+        ?: error("Could not verify your sign-in session.")
+    val appCheckToken = Tasks.await(FirebaseAppCheck.getInstance().getAppCheckToken(false)).token
+    if (appCheckToken.isBlank()) error("Could not verify this app installation.")
+    val payload = JSONObject().put("model", modelId).put("prompt", prompt).toString()
+    val connection = (URL(AI_CHAT_FUNCTION_URL).openConnection() as HttpURLConnection).apply {
+        requestMethod = "POST"
+        connectTimeout = 20_000
+        readTimeout = 90_000
+        doOutput = true
+        setRequestProperty("Accept", "application/json")
+        setRequestProperty("Authorization", "Bearer $idToken")
+        setRequestProperty("X-Firebase-AppCheck", appCheckToken)
+        setRequestProperty("Content-Type", "application/json; charset=utf-8")
+    }
+    try {
+        connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
+        val status = connection.responseCode
+        val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+        val responseText = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        val json = runCatching { JSONObject(responseText) }.getOrDefault(JSONObject())
+        if (status !in 200..299) error(json.optString("error").ifBlank { "AI request failed (HTTP $status)." })
+        return json.optString("text").ifBlank { "I could not generate a response." }
+    } finally {
+        connection.disconnect()
+    }
 }
 
 private fun callGeminiDirectly(modelId: String, prompt: String, apiKey: String): String {
@@ -9855,17 +11853,50 @@ private fun applyAiProjectFileChanges(rootDirectory: File, changes: List<AiProje
     }
 }
 
-private fun loadWebFiles(directory: File): List<WebFile> {
-    ensureDefaultWebProject(directory)
-    return directory.walkTopDown()
-        .onEnter { file -> file == directory || !isProjectIgnoredDirectory(file) }
+internal fun loadWebFiles(directory: File): List<WebFile> {
+    val root = directory.canonicalFile.apply { mkdirs() }
+    val loadedFiles = mutableListOf<WebFile>()
+    val livePaths = mutableSetOf<String>()
+
+    root.walkTopDown()
+        .onEnter { file -> file == root || !isProjectIgnoredDirectory(file) }
         .filter { it.isFile && isEditableWebFile(it) && it.length() <= MAX_EDITABLE_PROJECT_FILE_BYTES }
-        .mapNotNull { file -> file.toWebFileOrNull(directory) }
-        .toList()
-        .ifEmpty { listOf(createDefaultWebFile(directory)) }
+        .forEach { file ->
+            file.toWebFileOrNull(root)?.let { webFile ->
+                loadedFiles += webFile
+                livePaths += webFile.filePath
+            }
+        }
+
+    ProjectFileCache.prune(root, livePaths)
+    return loadedFiles
 }
 
-private fun ensureDefaultWebProject(directory: File) {
+internal fun loadInitialWebFiles(directory: File, preferredPath: String?): List<WebFile> {
+    val root = directory.canonicalFile.apply { mkdirs() }
+    val preferred = preferredPath
+        ?.takeIf { it.isNotBlank() }
+        ?.let(::File)
+        ?.takeIf { file ->
+            file.isFile &&
+                isSameOrInside(root, file) &&
+                isEditableWebFile(file) &&
+                file.length() <= MAX_EDITABLE_PROJECT_FILE_BYTES
+        }
+    val entry = preferred
+        ?: listOf("index.html", "index.htm", "main.html")
+            .asSequence()
+            .map { name -> File(root, name) }
+            .firstOrNull { file -> file.isFile && file.length() <= MAX_EDITABLE_PROJECT_FILE_BYTES }
+        ?: root.listFiles()
+            .orEmpty()
+            .asSequence()
+            .filter { file -> file.isFile && isEditableWebFile(file) && file.length() <= MAX_EDITABLE_PROJECT_FILE_BYTES }
+            .minByOrNull { it.name.lowercase() }
+    return entry?.toWebFileOrNull(root)?.let(::listOf).orEmpty()
+}
+
+internal fun ensureDefaultWebProject(directory: File) {
     directory.mkdirs()
     if (directory.walkTopDown().any { it.isFile && isEditableWebFile(it) }) return
     File(directory, "index.html").writeText(defaultIndexHtml(directory.name))
@@ -9873,20 +11904,9 @@ private fun ensureDefaultWebProject(directory: File) {
     File(directory, "script.js").writeText(defaultJs())
 }
 
-private fun createDefaultWebFile(directory: File): WebFile {
-    ensureDefaultWebProject(directory)
-    val file = File(directory, "index.html")
-    return file.toWebFile(directory)
-}
-
 private fun File.toWebFile(rootDirectory: File): WebFile {
-    return WebFile(
-        id = canonicalPath.hashCode().toLong(),
-        name = name,
-        content = readText(),
-        filePath = absolutePath,
-        modifiedAt = lastModified(),
-    )
+    return ProjectFileCache.webFileFor(rootDirectory, this)
+        ?: error("File is outside the project.")
 }
 
 private fun File.toWebFileOrNull(rootDirectory: File): WebFile? {
@@ -9894,8 +11914,13 @@ private fun File.toWebFileOrNull(rootDirectory: File): WebFile? {
     return runCatching { toWebFile(rootDirectory) }.getOrNull()
 }
 
-private fun saveFileContent(path: String, content: String) {
-    runCatching { File(path).writeText(content) }
+private fun saveFileContent(path: String, content: String, modifiedAt: Long? = null) {
+    runCatching {
+        val file = File(path)
+        file.writeText(content)
+        modifiedAt?.let { file.setLastModified(it) }
+        ProjectFileCache.invalidate(file)
+    }
 }
 
 private fun defaultContentForFile(name: String, projectName: String): String = when (fileExtension(name)) {
@@ -9984,44 +12009,88 @@ private fun buildExplorerEntries(
     search: String,
 ): List<ExplorerEntry> {
     val normalizedSearch = search.trim()
+    val searchActive = normalizedSearch.isNotBlank()
     val entries = mutableListOf<ExplorerEntry>()
+    val root = runCatching { rootDirectory.canonicalFile }.getOrDefault(rootDirectory)
+    val rootPath = root.path
     val expanded = expandedFolderPaths.mapTo(mutableSetOf()) { runCatching { File(it).canonicalPath }.getOrDefault(it) }
 
-    fun fileMatches(file: WebFile): Boolean {
-        if (normalizedSearch.isBlank()) return true
-        val localFile = File(file.filePath)
-        return file.name.contains(normalizedSearch, ignoreCase = true) ||
-                relativeWorkspacePath(rootDirectory, localFile).contains(normalizedSearch, ignoreCase = true)
+    data class ExplorerFileInfo(
+        val file: WebFile,
+        val parentPath: String,
+        val relativePath: String,
+    )
+
+    fun isPathSameOrInside(parentPath: String, childPath: String): Boolean {
+        return childPath == parentPath || childPath.startsWith(parentPath + File.separator)
     }
 
-    fun directoryMatches(directory: File): Boolean {
-        if (normalizedSearch.isBlank()) return true
-        return directory.name.contains(normalizedSearch, ignoreCase = true) ||
-                files.any { file ->
-                    val localFile = File(file.filePath)
-                    isSameOrInside(directory, localFile) && fileMatches(file)
-                }
+    fun addAncestorDirectories(path: String, matches: MutableSet<String>) {
+        var current: File? = File(path)
+        while (current != null) {
+            val currentPath = current.path
+            if (!isPathSameOrInside(rootPath, currentPath)) break
+            matches += currentPath
+            if (currentPath == rootPath) break
+            current = current.parentFile
+        }
+    }
+
+    val fileInfos = files.mapNotNull { file ->
+        val localFile = runCatching { File(file.filePath).canonicalFile }.getOrNull() ?: return@mapNotNull null
+        val parentPath = localFile.parentFile?.path ?: return@mapNotNull null
+        if (!isPathSameOrInside(rootPath, localFile.path)) return@mapNotNull null
+        ExplorerFileInfo(
+            file = file,
+            parentPath = parentPath,
+            relativePath = relativeWorkspacePath(rootDirectory, localFile),
+        )
+    }
+    val filesByParent = fileInfos.groupBy { it.parentPath }
+    val matchingDirectoryPaths = mutableSetOf<String>()
+    val matchingFileIds = if (searchActive) {
+        fileInfos
+            .filter { info ->
+                info.file.name.contains(normalizedSearch, ignoreCase = true) ||
+                        info.relativePath.contains(normalizedSearch, ignoreCase = true)
+            }
+            .onEach { info -> addAncestorDirectories(info.parentPath, matchingDirectoryPaths) }
+            .mapTo(mutableSetOf()) { it.file.id }
+    } else {
+        emptySet<Long>()
+    }
+
+    fun directoryMatches(directory: File, directoryPath: String): Boolean {
+        if (!searchActive) return true
+        return directoryPath in matchingDirectoryPaths ||
+                directory.name.contains(normalizedSearch, ignoreCase = true) ||
+                relativeWorkspacePath(rootDirectory, directory).contains(normalizedSearch, ignoreCase = true)
     }
 
     fun appendDirectory(directory: File, depth: Int) {
-        directory.listFiles { file -> file.isDirectory && !isProjectIgnoredDirectory(file) }
+        val canonicalDirectory = runCatching { directory.canonicalFile }.getOrDefault(directory)
+        val directoryPath = canonicalDirectory.path
+
+        canonicalDirectory.listFiles { file -> file.isDirectory && !isProjectIgnoredDirectory(file) }
             .orEmpty()
-            .filter(::directoryMatches)
+            .mapNotNull { childDirectory -> runCatching { childDirectory.canonicalFile }.getOrNull() }
+            .filter { childDirectory -> directoryMatches(childDirectory, childDirectory.path) }
             .sortedBy { it.name.lowercase() }
             .forEach { childDirectory ->
                 val target = childDirectory.toFolderTarget(rootDirectory)
-                val isExpanded = normalizedSearch.isNotBlank() || expanded.any { samePath(it, childDirectory.absolutePath) }
+                val isExpanded = searchActive || childDirectory.path in expanded
                 entries += ExplorerEntry.Directory(target, depth, isExpanded)
                 if (isExpanded) appendDirectory(childDirectory, depth + 1)
             }
-        files
-            .filter { file -> File(file.filePath).parentFile?.let { samePath(it.absolutePath, directory.absolutePath) } == true }
-            .filter(::fileMatches)
-            .sortedBy { it.name.lowercase() }
-            .forEach { entries += ExplorerEntry.SourceFile(it, depth) }
+        filesByParent[directoryPath]
+            .orEmpty()
+            .asSequence()
+            .filter { info -> !searchActive || info.file.id in matchingFileIds }
+            .sortedBy { it.file.name.lowercase() }
+            .forEach { entries += ExplorerEntry.SourceFile(it.file, depth) }
     }
 
-    appendDirectory(rootDirectory, 0)
+    appendDirectory(root, 0)
     return entries
 }
 
@@ -10204,12 +12273,22 @@ private fun SnapshotStateList<String>.addUniquePath(path: String) {
     if (none { samePath(it, path) }) add(path)
 }
 
+private fun WebFile.withContent(content: String, modifiedAt: Long = this.modifiedAt): WebFile {
+    return copy(
+        content = content,
+        modifiedAt = modifiedAt,
+        sizeBytes = content.length.toLong(),
+        contentHash = content.hashCode(),
+    )
+}
+
 private fun WebFile.withPendingEditorText(pendingTexts: Map<Long, String>): WebFile {
     val pending = pendingTexts[id]
-    return if (pending != null) copy(content = pending) else this
+    return if (pending != null) withContent(pending) else this
 }
 
 private fun List<WebFile>.withPendingEditorTexts(pendingTexts: Map<Long, String>): List<WebFile> {
+    if (pendingTexts.isEmpty()) return this
     return map { it.withPendingEditorText(pendingTexts) }
 }
 
@@ -10253,8 +12332,53 @@ private fun saveWebIdeTheme(context: Context, theme: WebTheme) {
     }
 }
 
+internal fun clearLocalCodingData(context: Context) {
+    listOf(
+        File(context.filesDir, "projects"),
+        File(context.filesDir, "workspace"),
+        File(context.filesDir, ".runtime"),
+    ).forEach { directory ->
+        runCatching { directory.deleteRecursively() }
+    }
+    File(context.filesDir, "projects").mkdirs()
+
+    context.getSharedPreferences(IDE_PREFS_NAME, Context.MODE_PRIVATE).edit().clear().commit()
+    File(context.applicationInfo.dataDir, "shared_prefs")
+        .listFiles()
+        .orEmpty()
+        .filter { file -> file.name.startsWith("${IDE_PREFS_NAME}_") }
+        .forEach { file -> runCatching { file.delete() } }
+
+    context.contentResolver.persistedUriPermissions.forEach { permission ->
+        val flags = (if (permission.isReadPermission) Intent.FLAG_GRANT_READ_URI_PERMISSION else 0) or
+            (if (permission.isWritePermission) Intent.FLAG_GRANT_WRITE_URI_PERMISSION else 0)
+        if (flags != 0) {
+            runCatching {
+                context.contentResolver.releasePersistableUriPermission(permission.uri, flags)
+            }
+        }
+    }
+}
+
 private fun loadWebIdeSession(context: Context, rootDirectory: File): WebSession {
     val preferences = context.getSharedPreferences("${IDE_PREFS_NAME}_${rootDirectory.absolutePath.hashCode()}", Context.MODE_PRIVATE)
+    val savedTerminalText = preferences.getString(PREF_TERMINAL_TEXT, "").orEmpty()
+    val savedTerminalAt = preferences.getLong(PREF_TERMINAL_TEXT_SAVED_AT, 0L)
+    val terminalText = if (
+        savedTerminalText.isNotBlank() &&
+        savedTerminalAt > 0L &&
+        System.currentTimeMillis() - savedTerminalAt < TERMINAL_ACTIVITY_RETENTION_MS
+    ) {
+        savedTerminalText
+    } else {
+        if (savedTerminalText.isNotBlank()) {
+            preferences.edit {
+                remove(PREF_TERMINAL_TEXT)
+                remove(PREF_TERMINAL_TEXT_SAVED_AT)
+            }
+        }
+        ""
+    }
     return WebSession(
         activeFileId = preferences.getLong(PREF_ACTIVE_FILE_ID, -1L),
         activeFilePath = preferences.getString(PREF_ACTIVE_FILE_PATH, null),
@@ -10264,7 +12388,7 @@ private fun loadWebIdeSession(context: Context, rootDirectory: File): WebSession
         explorerVisible = preferences.getBoolean(PREF_EXPLORER_VISIBLE, true),
         fileSearch = preferences.getString(PREF_FILE_SEARCH, "").orEmpty(),
         terminalInput = preferences.getString(PREF_TERMINAL_INPUT, "").orEmpty(),
-        terminalText = preferences.getString(PREF_TERMINAL_TEXT, "").orEmpty(),
+        terminalText = terminalText,
         fullScreenMode = preferences.getString(PREF_FULL_SCREEN_MODE, null)?.let { raw ->
             runCatching { WebFullScreenMode.valueOf(raw) }.getOrNull()
         },
@@ -10272,7 +12396,12 @@ private fun loadWebIdeSession(context: Context, rootDirectory: File): WebSession
     )
 }
 
-private fun saveWebIdeSession(context: Context, rootDirectory: File, session: WebSession) {
+private fun saveWebIdeSession(
+    context: Context,
+    rootDirectory: File,
+    session: WebSession,
+    persistTerminalText: Boolean = false,
+) {
     context.getSharedPreferences("${IDE_PREFS_NAME}_${rootDirectory.absolutePath.hashCode()}", Context.MODE_PRIVATE).edit {
         putLong(PREF_ACTIVE_FILE_ID, session.activeFileId)
         session.activeFilePath?.let { putString(PREF_ACTIVE_FILE_PATH, it) } ?: remove(PREF_ACTIVE_FILE_PATH)
@@ -10282,7 +12411,13 @@ private fun saveWebIdeSession(context: Context, rootDirectory: File, session: We
         putBoolean(PREF_EXPLORER_VISIBLE, session.explorerVisible)
         putString(PREF_FILE_SEARCH, session.fileSearch)
         putString(PREF_TERMINAL_INPUT, session.terminalInput)
-        remove(PREF_TERMINAL_TEXT)
+        if (persistTerminalText && session.terminalText.isNotBlank()) {
+            putString(PREF_TERMINAL_TEXT, compactTerminalSnapshotForPreviewHandoff(session.terminalText))
+            putLong(PREF_TERMINAL_TEXT_SAVED_AT, System.currentTimeMillis())
+        } else {
+            remove(PREF_TERMINAL_TEXT)
+            remove(PREF_TERMINAL_TEXT_SAVED_AT)
+        }
         remove(PREF_FULL_SCREEN_MODE)
         session.userAiApiKey?.let { putString(PREF_USER_AI_API_KEY, it) } ?: remove(PREF_USER_AI_API_KEY)
     }

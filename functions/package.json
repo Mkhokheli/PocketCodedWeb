@@ -1,11 +1,11 @@
 {
-  "name": "PocketCodedWeb-functions",
+  "name": "pocketcodedweb-functions",
   "version": "1.0.0",
-  "description": "Backend quota proxy for PocketCodedWeb AI Chat",
+  "description": "Backend quota and profile sync functions for PocketCodedWeb",
   "private": true,
   "main": "index.js",
   "engines": {
-    "node": "20"
+    "node": "22"
   },
   "scripts": {
     "lint": "node --check index.js",
@@ -14,10 +14,13 @@
   },
   "dependencies": {
     "firebase-admin": "^13.10.0",
-    "firebase-functions": "^7.2.5"
+    "firebase-functions": "^7.2.5",
+    "googleapis": "^160.0.0"
   },
   "devDependencies": {
     "firebase-tools": "^15.22.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }
-

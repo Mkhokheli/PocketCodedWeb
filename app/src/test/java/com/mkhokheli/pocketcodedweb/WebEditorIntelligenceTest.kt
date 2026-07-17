@@ -436,6 +436,26 @@ class WebEditorIntelligenceTest {
     }
 
     @Test
+    fun nonWebLanguagesReceiveFastOfflineKeywordAndDocumentSuggestions() {
+        val scenarios = listOf(
+            Triple("Main.kt", "fu", "fun"),
+            Triple("main.py", "pri", "print()"),
+            Triple("query.sql", "SEL", "SELECT"),
+            Triple("notes.txt", "customSymbol\ncus", "customSymbol"),
+        )
+
+        scenarios.forEach { (fileName, source, expected) ->
+            val context = completionContextAt(source, source.length, fileName)
+            assertNotNull("$fileName should create a completion context", context)
+            val completions = webCompletionsForContext(fileName, source, context!!)
+            assertTrue(
+                "$fileName should suggest $expected",
+                completions.any { it.label == expected },
+            )
+        }
+    }
+
+    @Test
     fun estimatedLongestLineLengthStopsAtCap() {
         val text = "short\n${"x".repeat(10_000)}"
 

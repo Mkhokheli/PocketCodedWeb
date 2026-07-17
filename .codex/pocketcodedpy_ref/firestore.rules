@@ -1,0 +1,85 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{userId} {
+      function ownsProfile() {
+        return request.auth != null && request.auth.uid == userId;
+      }
+
+      function validTrialStartOnCreate() {
+        return !('trialStartedAt' in request.resource.data)
+          || request.resource.data.trialStartedAt == request.time;
+      }
+
+      function validTrialCheckOnCreate() {
+        return !('trialCheckedAt' in request.resource.data)
+          || request.resource.data.trialCheckedAt == request.time;
+      }
+
+      function validTrialLockOnCreate() {
+        return !('trialLockedAt' in request.resource.data)
+          || request.resource.data.trialLockedAt == request.time;
+      }
+
+      function trialStartIsImmutable() {
+        return (
+          !('trialStartedAt' in resource.data)
+          && (
+            !('trialStartedAt' in request.resource.data)
+            || request.resource.data.trialStartedAt == request.time
+          )
+        ) || (
+          'trialStartedAt' in resource.data
+          && request.resource.data.trialStartedAt == resource.data.trialStartedAt
+        );
+      }
+
+      function trialCheckIsServerTimeOrUnchanged() {
+        return !('trialCheckedAt' in request.resource.data)
+          || request.resource.data.trialCheckedAt == request.time
+          || (
+            'trialCheckedAt' in resource.data
+            && request.resource.data.trialCheckedAt == resource.data.trialCheckedAt
+          );
+      }
+
+      function trialLockIsImmutable() {
+        return (
+          !('trialLockedAt' in resource.data)
+          && (
+            !('trialLockedAt' in request.resource.data)
+            || request.resource.data.trialLockedAt == request.time
+          )
+        ) || (
+          'trialLockedAt' in resource.data
+          && request.resource.data.trialLockedAt == resource.data.trialLockedAt
+        );
+      }
+
+      allow read: if ownsProfile();
+      allow create: if ownsProfile()
+        && validTrialStartOnCreate()
+        && validTrialCheckOnCreate()
+        && validTrialLockOnCreate();
+      allow update: if ownsProfile()
+        && trialStartIsImmutable()
+        && trialCheckIsServerTimeOrUnchanged()
+        && trialLockIsImmutable();
+      allow delete: if false;
+    }
+
+    // AI quotas and entitlement overrides are maintained only by Cloud Functions/Admin SDK.
+    match /aiDailyUsage/{usageId} {
+      allow read, write: if false;
+    }
+
+    match /aiEntitlements/{userId} {
+      allow read, write: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
