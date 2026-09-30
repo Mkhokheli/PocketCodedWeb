@@ -26,7 +26,6 @@ import java.util.concurrent.Executors
 import org.json.JSONObject
 
 internal const val LIFETIME_PRODUCT_ID = "pocketcodedweb_lifetime"
-internal const val DEFAULT_LIFETIME_PRICE = "R149.99"
 private const val BILLING_PREFS_NAME = "play_billing"
 private const val PURCHASE_ACCOUNT_GRACE_MS = 24L * 60L * 60L * 1000L
 private const val BILLING_LOG_TAG = "PlayBilling"
@@ -41,7 +40,7 @@ internal data class BillingUiState(
     val isPurchasePending: Boolean = false,
     val productDetailsLoaded: Boolean = false,
     val productAvailable: Boolean = false,
-    val formattedPrice: String = DEFAULT_LIFETIME_PRICE,
+    val formattedPrice: String = "",
     val message: String? = null,
 )
 
@@ -65,6 +64,14 @@ internal class PlayBillingManager(
                 .remove(legacyPremiumKey(accountId))
                 .apply()
         }
+
+        fun updateLocalPremiumFromServer(context: Context, accountId: String, isPremium: Boolean) {
+            val prefs = context.getSharedPreferences(BILLING_PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putBoolean(premiumKey(accountId), isPremium)
+                .remove(legacyPremiumKey(accountId))
+                .apply()
+        }
     }
 
     private val appContext = context.applicationContext
@@ -73,6 +80,8 @@ internal class PlayBillingManager(
     private val preferences = appContext.getSharedPreferences(BILLING_PREFS_NAME, Context.MODE_PRIVATE)
     private var state = BillingUiState(isPremium = cachedPremium())
     private var productDetails: ProductDetails? = null
+    private var serverEntitlementKnown = cachedPremium()
+    private var serverPremium = cachedPremium()
     private var isClosed = false
     @Volatile private var purchaseTokenBeingVerified: String? = null
     private val verificationExecutor = Executors.newSingleThreadExecutor()
@@ -154,6 +163,20 @@ internal class PlayBillingManager(
         if (billingClient.isReady) queryPurchases()
     }
 
+    fun applyServerEntitlement(isPremium: Boolean) {
+        if (isClosed) return
+        serverEntitlementKnown = true
+        serverPremium = isPremium
+        cachePremium(isPremium)
+        update(
+            purchasesLoaded = true,
+            isPremium = isPremium,
+            premiumVerified = true,
+            isPurchasePending = false,
+            message = if (isPremium) null else state.message,
+        )
+    }
+
     fun close() {
         isClosed = true
         billingClient.endConnection()
@@ -185,17 +208,21 @@ internal class PlayBillingManager(
                 update(
                     productDetailsLoaded = true,
                     productAvailable = false,
+                    formattedPrice = "",
                     message = billingMessage(result, "Could not load the purchase price."),
                 )
                 return@queryProductDetailsAsync
             }
-            productDetails = queryResult.productDetailsList.firstOrNull()
-            val productIsAvailable = productDetails != null
+            productDetails = queryResult.productDetailsList.firstOrNull {
+                it.productId == LIFETIME_PRODUCT_ID
+            }
             val price = productDetails
                 ?.oneTimePurchaseOfferDetailsList
-                ?.firstOrNull()
-                ?.formattedPrice
-                ?: DEFAULT_LIFETIME_PRICE
+                ?.map { it.formattedPrice }
+                ?.let(::localizedGooglePlayPrice)
+                .orEmpty()
+            val productIsAvailable = productDetails != null && price.isNotBlank()
+            if (!productIsAvailable) productDetails = null
             update(
                 productDetailsLoaded = true,
                 productAvailable = productIsAvailable,
@@ -242,13 +269,15 @@ internal class PlayBillingManager(
             return
         }
 
-        cachePremium(false)
+        val retainedServerPremium = serverEntitlementKnown && serverPremium
+        cachePremium(retainedServerPremium)
         update(
             purchasesLoaded = true,
-            isPremium = false,
-            premiumVerified = false,
+            isPremium = retainedServerPremium,
+            premiumVerified = serverEntitlementKnown,
             isPurchasePending = pending,
             message = when {
+                retainedServerPremium -> null
                 pending -> "Your payment is pending. Premium unlocks after Google Play confirms it."
                 restoring -> "No completed purchase was found for this Google Play account."
                 else -> state.message
@@ -257,6 +286,8 @@ internal class PlayBillingManager(
     }
 
     private fun unlockPremium(purchase: Purchase, restoring: Boolean) {
+        serverEntitlementKnown = true
+        serverPremium = true
         cachePremium(true)
         update(
             purchasesLoaded = true,
@@ -326,11 +357,12 @@ internal class PlayBillingManager(
                 purchaseTokenBeingVerified = null
                 verification.onSuccess { unlockPremium(purchase, restoring) }
                     .onFailure { error ->
-                        cachePremium(false)
+                        val retainedServerPremium = serverEntitlementKnown && serverPremium
+                        cachePremium(retainedServerPremium)
                         update(
                             purchasesLoaded = true,
-                            isPremium = false,
-                            premiumVerified = false,
+                            isPremium = retainedServerPremium,
+                            premiumVerified = serverEntitlementKnown,
                             message = error.message ?: "Could not verify this purchase securely.",
                         )
                     }
@@ -428,6 +460,9 @@ internal fun purchaseAccountMatchesExpected(
 internal fun purchaseTimeFitsAccount(purchaseTime: Long, trialStartTime: Long): Boolean {
     return purchaseTime > 0L && purchaseTime >= trialStartTime - PURCHASE_ACCOUNT_GRACE_MS
 }
+
+internal fun localizedGooglePlayPrice(formattedPrices: List<String>): String =
+    formattedPrices.firstOrNull { it.isNotBlank() }.orEmpty()
 
 private fun premiumKey(accountId: String): String = "premium_v2_${sha256(accountId)}"
 

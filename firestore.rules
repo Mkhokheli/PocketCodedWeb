@@ -68,18 +68,27 @@ service cloud.firestore {
       function noClientEntitlementOnCreate() {
         return !request.resource.data.keys().hasAny([
           'isPremium', 'premium', 'premiumVerified', 'entitlement',
-          'purchaseToken', 'purchaseOrderId', 'trialStartedAtMillis',
-          'trialEndsAtMillis'
+          'purchaseToken', 'purchaseOrderId', 'premiumProductId',
+          'premiumPurchaseTokenHash', 'premiumVerifiedAt', 'premiumRevokedAt',
+          'purchaseTokenHash', 'orderId', 'active', 'verifiedAt', 'voidedAt',
+          'revokedAt', 'acknowledgementState', 'acknowledgementPending',
+          'trialStartedAtMillis', 'trialEndsAtMillis'
         ]);
+      }
+
+      function profileUidMatchesPath() {
+        return !('uid' in request.resource.data) || request.resource.data.uid == userId;
       }
 
       allow read: if ownsProfile();
       allow create: if ownsProfile()
+        && profileUidMatchesPath()
         && noClientEntitlementOnCreate()
         && validTrialStartOnCreate()
         && validTrialCheckOnCreate()
         && validTrialLockOnCreate();
       allow update: if ownsProfile()
+        && profileUidMatchesPath()
         && backendFieldsAreUnchanged()
         && trialStartIsImmutable()
         && trialCheckIsServerTimeOrUnchanged()

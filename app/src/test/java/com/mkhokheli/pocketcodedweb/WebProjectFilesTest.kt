@@ -8,6 +8,19 @@ import java.io.File
 import java.nio.file.Files
 
 class WebProjectFilesTest {
+    @Test fun largeRefreshReusesLiveDocumentsAndStillDetectsChanges() {
+        withTempProject { root ->
+            repeat(200) { File(root, "module$it.js").writeText("const value = $it;") }
+            val first = loadWebFiles(root).associateBy { it.filePath }
+            val second = loadWebFiles(root)
+            assertTrue(second.all { first[it.filePath] === it })
+            val changed = File(root, "module0.js")
+            changed.writeText("const changedValue = 12345;")
+            val third = loadWebFiles(root).first { it.name == changed.name }
+            assertEquals("const changedValue = 12345;", third.content)
+        }
+    }
+
     @Test
     fun loadWebFilesAllowsEmptyProjectAfterDeletion() {
         withTempProject { root ->

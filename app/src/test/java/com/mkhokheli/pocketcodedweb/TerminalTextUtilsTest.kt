@@ -4,8 +4,23 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
 
 class TerminalTextUtilsTest {
+    @Test fun localhostUrlsHaveClickableAnnotationsWithoutChangingOutput() {
+        val source = "[preview] http://127.0.0.1:3000/\nOpen (http://localhost:5173/api?q=1).\nhttp://[::1]:8080/"
+        val result = linkifyTerminalOutput(AnnotatedString(source))
+        assertEquals(source, result.text)
+        assertEquals(listOf("http://127.0.0.1:3000/", "http://localhost:5173/api?q=1", "http://[::1]:8080/"),
+            result.getLinkAnnotations(0, result.length).map { (it.item as LinkAnnotation.Url).url })
+    }
+
+    @Test fun invalidAndNonWebAddressesAreNotLinked() {
+        val result = linkifyTerminalOutput(AnnotatedString("javascript:alert(1) file:///data http:// http://localhost:99999"))
+        assertTrue(result.getLinkAnnotations(0, result.length).isEmpty())
+    }
+
     @Test
     fun redactsCredentialsFromRemoteUrls() {
         val command = "git clone https://student:secret-token@gitlab.example.com/team/project.git"

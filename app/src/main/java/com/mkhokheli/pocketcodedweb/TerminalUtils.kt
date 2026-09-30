@@ -3,12 +3,14 @@ package com.mkhokheli.pocketcodedweb
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 
-private const val MAX_TERMINAL_BUFFER_CHARS = 200_000
 private const val TERMINAL_TRUNCATION_NOTICE = "[Earlier terminal output trimmed]\n"
 
 private val terminalRemoteCredentialRegex = Regex("(?i)(https?://)[^/@\\s]+@")
@@ -21,6 +23,22 @@ private val terminalZeroFailedRegex = Regex("\\b0 failed\\b")
 private val terminalErrorRegex = Regex("\\b(error|failed|failure|exception|fatal)\\b")
 private val terminalWarningRegex = Regex("\\b(warning|warn|deprecated|skipped)\\b")
 private val terminalRanTestsRegex = Regex("^ran \\d+ tests?")
+private val terminalUrlRegex = Regex("https?://[^\\s<>\\\"'\\u001B]+", RegexOption.IGNORE_CASE)
+
+internal fun linkifyTerminalOutput(text: AnnotatedString): AnnotatedString = buildAnnotatedString {
+    append(text)
+    terminalUrlRegex.findAll(text.text).forEach { match ->
+        var url = match.value.trimEnd('.', ',', ';', ':')
+        for ((open, close) in listOf('(' to ')', '[' to ']', '{' to '}')) {
+            while (url.endsWith(close) && url.count { it == close } > url.count { it == open }) url = url.dropLast(1)
+        }
+        if (normalizePreviewLink(url) != null) {
+            addLink(LinkAnnotation.Url(url, TextLinkStyles(style = SpanStyle(
+                color = Color(0xFF448AFF), textDecoration = TextDecoration.Underline,
+            ))), match.range.first, match.range.first + url.length)
+        }
+    }
+}
 
 /**
  * Redacts sensitive information from terminal commands before displaying them.
@@ -43,9 +61,10 @@ fun redactTerminalCommandForDisplay(command: String): String {
  * and ensuring we break at a line boundary.
  */
 fun trimTerminalBuffer(text: String): String {
-    if (text.length <= MAX_TERMINAL_BUFFER_CHARS) return text
+    val maxChars = DeviceEfficiency.budget.terminalHistoryChars
+    if (text.length <= maxChars) return text
     
-    val tailStart = text.length - MAX_TERMINAL_BUFFER_CHARS
+    val tailStart = text.length - maxChars
     val nextLineStart = text.indexOf('\n', tailStart)
         .takeIf { it >= 0 }
         ?.plus(1)
@@ -143,7 +162,7 @@ internal fun parseAnsiTerminalOutput(
             }
         }
 
-        text.split('\n').forEachIndexed { index, line ->
+        text.lineSequence().forEachIndexed { index, line ->
             if (index > 0) append('\n')
             when {
                 line == promptText -> withStyle(promptStyle) {

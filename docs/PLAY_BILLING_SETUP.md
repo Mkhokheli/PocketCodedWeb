@@ -7,7 +7,7 @@ PocketCodedWeb uses a one-time, non-consumable Google Play product.
 - Product ID: `pocketcodedweb_lifetime`
 - Product type: One-time product
 - Suggested display name: `PocketCodedWeb Premium`
-- Base price: `R149.99` in South African rand
+- Base price: keep the price already configured in Google Play Console
 
 The Android app must be listed as free to install. Google Play does not support changing an app
 from paid to free-trial-plus-IAP behavior automatically. Premium access is sold through the
@@ -19,7 +19,7 @@ one-time product above.
 2. Open **Monetize with Play > Products > One-time products**.
 3. Create `pocketcodedweb_lifetime` exactly. Product IDs cannot be changed later.
 4. Add and activate a purchase option for a one-time, non-consumable purchase.
-5. Set the South African base price to `R149.99`.
+5. Keep the existing South African base price unless you intentionally want to change the product price.
 6. Review every regional price. Google Play converts the base price automatically. Manually adjust
    supported currencies to the closest locally valid price ending in `.99`. Some currencies, such
    as currencies without minor units, cannot use `.99`; use the closest valid local price there.
@@ -49,7 +49,13 @@ The app validates the Google Play product ID, Google Play order ID prefix, obfus
 ID, and purchase timing before unlocking Premium. Premium state is cached locally for offline
 continuity and mirrored to `users/{uid}.isPremium` in Firestore for backend quota decisions.
 
-This is still on-device Billing validation, not hosted purchase-token verification. For the
-strongest production fraud protection, add a trusted backend that verifies purchase tokens with the
-Google Play Android Developer API before granting Premium or custom claims.
+Purchases are verified by the `verifyPlayPurchase` Firebase Function using the Google Play
+Developer API before Premium is granted. Firestore billing fields and complete `playPurchases`
+records are server-only. Real-time developer notifications and scheduled voided-purchase
+reconciliation remove refunded or revoked entitlements.
+
+The paywall never treats this document's base-price description as a price source. It displays the
+localized `formattedPrice` returned by Google Play for the active tester, country, and purchase
+option. See [FIREBASE_PREMIUM_DEPLOYMENT.md](FIREBASE_PREMIUM_DEPLOYMENT.md) for the complete
+backend, Firebase, App Check, Pub/Sub, and deployment procedure.
 

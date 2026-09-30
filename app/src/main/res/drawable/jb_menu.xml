@@ -1,0 +1,4 @@
+<!-- JetBrains New UI icon from @jetbrains/icons 5.23.0, Apache-2.0. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="16dp" android:height="16dp" android:viewportWidth="16" android:viewportHeight="16">
+    <path android:fillColor="#FF000000" android:pathData="M1.375 3.5c0-.345.28-.625.625-.625h12a.625.625 0 1 1 0 1.25H2a.625.625 0 0 1-.625-.625Zm0 4c0-.345.28-.625.625-.625h12a.625.625 0 1 1 0 1.25H2a.625.625 0 0 1-.625-.625Zm0 4c0-.345.28-.625.625-.625v1.25a.625.625 0 0 1-.625-.625Zm.625 0v.625h12a.625.625 0 1 0 0-1.25H2v.625Z" />
+</vector>

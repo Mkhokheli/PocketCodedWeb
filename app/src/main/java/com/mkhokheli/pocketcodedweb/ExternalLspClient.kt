@@ -590,6 +590,11 @@ private fun parseCompletionItems(result: Any?): List<CompletionItem> {
             insertText = insertText,
             detail = detail,
             cursorOffset = insertText.length,
+            documentation = when (val documentation = item.opt("documentation")) {
+                is JSONObject -> documentation.optString("value")
+                is String -> documentation
+                else -> ""
+            },
         )
     }.filter { it.label.isNotBlank() }
 }
@@ -669,7 +674,7 @@ private fun lspLanguageIdForFile(fileName: String): String {
         "rs" -> "rust"
         "swift" -> "swift"
         "dart" -> "dart"
-        "php" -> "php"
+        "php", "phtml" -> "php"
         "rb" -> "ruby"
         "sh", "bash", "zsh" -> "shellscript"
         "ps1" -> "powershell"

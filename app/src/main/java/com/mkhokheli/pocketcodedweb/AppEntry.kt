@@ -3,7 +3,12 @@ package com.mkhokheli.pocketcodedweb
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
+import android.net.Uri
+import android.provider.OpenableColumns
+import android.util.Log
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.credentials.ClearCredentialStateRequest
 import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
@@ -42,6 +47,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -55,13 +61,15 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.gms.tasks.Task
-import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.gms.tasks.Tasks
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.android.libraries.identity.googleid.GoogleIdTokenParsingException
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseUser
 import com.google.firebase.auth.GoogleAuthProvider
 import com.google.firebase.auth.UserProfileChangeRequest
+import com.google.firebase.appcheck.FirebaseAppCheck
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.SetOptions
@@ -71,15 +79,24 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.zip.ZipInputStream
+import org.json.JSONObject
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-private const val TRIAL_DURATION_MS = 72L * 60L * 60L * 1000L
-private const val TRIAL_REMINDER_INTERVAL_MS = 60L * 60L * 1000L
+private const val DAY_MS = 24L * 60L * 60L * 1000L
+private const val TRIAL_DURATION_MS = 14L * DAY_MS
+private const val TRIAL_REMINDER_INTERVAL_MS = DAY_MS
 private const val TRIAL_PREFS_NAME = "premium_trial"
+private const val PROFILE_SYNC_FUNCTION_URL =
+    "https://us-central1-pocketcodedweb-6887b.cloudfunctions.net/syncUserProfile"
+private const val ENTRY_LOG_TAG = "PocketCodedWebEntry"
 
 private data class LocalUser(
     val id: String,
@@ -122,7 +139,9 @@ internal fun PocketCodedWebEntry(
     val auth = remember {
         FirebaseAuth.getInstance().apply { useAppLanguage() }
     }
-    var firebaseUser by remember { mutableStateOf(auth.currentUser) }
+    // Firebase reload updates and may return the same FirebaseUser object. Force a
+    // state invalidation on reassignment so verified users leave this screen at once.
+    var firebaseUser by remember { mutableStateOf(auth.currentUser, neverEqualPolicy()) }
     val localUser = remember(firebaseUser?.uid, firebaseUser?.displayName, firebaseUser?.email, firebaseUser?.isEmailVerified) {
         firebaseUser?.takeIf { it.isVerifiedForAppAccess() }?.toLocalUser()
     }
@@ -133,8 +152,6 @@ internal fun PocketCodedWebEntry(
     var trialStartedAt by remember { mutableLongStateOf(0L) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lastTrialContinuationAt by remember { mutableLongStateOf(0L) }
-    var eraseWarningOpen by remember { mutableStateOf(false) }
-    var isErasingTrialData by remember { mutableStateOf(false) }
 
     fun signOut() {
         selectedProjectPath = null
@@ -149,6 +166,11 @@ internal fun PocketCodedWebEntry(
         }
         auth.addAuthStateListener(listener)
         onDispose { auth.removeAuthStateListener(listener) }
+    }
+
+    // Firebase auth sessions survive restarts, so synchronize returning users too.
+    LaunchedEffect(firebaseUser?.uid, firebaseUser?.displayName, firebaseUser?.email) {
+        firebaseUser?.let { syncUserProfileWithServer(it) }
     }
 
     DisposableEffect(accountId) {
@@ -180,8 +202,6 @@ internal fun PocketCodedWebEntry(
 
     LaunchedEffect(accountId) {
         selectedProjectPath = null
-        eraseWarningOpen = false
-        isErasingTrialData = false
         val activeAccountId = accountId
         if (activeAccountId == null) {
             trialStartedAt = 0L
@@ -192,15 +212,46 @@ internal fun PocketCodedWebEntry(
             trialStartedAt = startedAt
             lastTrialContinuationAt = loadLastTrialContinuation(context, activeAccountId)
             now = System.currentTimeMillis()
-            FirebaseFirestore.getInstance().collection("users").document(activeAccountId).get()
-                .addOnSuccessListener { snapshot ->
-                    val serverStartedAt = snapshot.getTimestamp("trialStartedAt")?.toDate()?.time
+        }
+    }
+
+    DisposableEffect(accountId) {
+        val activeAccountId = accountId
+        if (activeAccountId == null) {
+            onDispose {}
+        } else {
+            val registration = FirebaseFirestore.getInstance()
+                .collection("users")
+                .document(activeAccountId)
+                .addSnapshotListener { snapshot, error ->
+                    if (error != null) {
+                        Log.w(ENTRY_LOG_TAG, "Could not observe premium/trial profile.", error)
+                        return@addSnapshotListener
+                    }
+                    if (snapshot?.contains("isPremium") == true) {
+                        val serverPremium = snapshot.getBoolean("isPremium") == true
+                        PlayBillingManager.updateLocalPremiumFromServer(context, activeAccountId, serverPremium)
+                        val activeBillingManager = billingManager
+                        if (activeBillingManager != null) {
+                            activeBillingManager.applyServerEntitlement(serverPremium)
+                        } else {
+                            billingState = billingState.copy(
+                                purchasesLoaded = true,
+                                isPremium = serverPremium,
+                                premiumVerified = true,
+                                isPurchasePending = false,
+                            )
+                        }
+                    }
+                    val serverStartedAt = snapshot?.getTimestamp("trialStartedAt")?.toDate()?.time
                     if (serverStartedAt != null && serverStartedAt > 0L) {
-                        saveTrialStart(context, activeAccountId, serverStartedAt)
-                        trialStartedAt = serverStartedAt
+                        val authoritativeStart = earliestTrialStart(trialStartedAt, serverStartedAt)
+                        saveTrialStart(context, activeAccountId, authoritativeStart)
+                        trialStartedAt = authoritativeStart
                         now = System.currentTimeMillis()
                     }
                 }
+            onDispose { registration.remove() }
         }
     }
 
@@ -237,7 +288,7 @@ internal fun PocketCodedWebEntry(
             isPremium = billingState.isPremium,
         )
 
-    BackHandler(enabled = showPaywall && !eraseWarningOpen) {}
+    BackHandler(enabled = showPaywall) {}
 
     Box(modifier = Modifier.fillMaxSize()) {
         when {
@@ -283,6 +334,7 @@ internal fun PocketCodedWebEntry(
             PremiumPaywall(
                 palette = palette,
                 darkMode = darkMode,
+                now = now,
                 trialEndsAt = trialEndsAt,
                 trialExpired = trialExpired,
                 billingState = billingState,
@@ -291,40 +343,16 @@ internal fun PocketCodedWebEntry(
                 },
                 onRestore = { billingManager?.restorePurchases() },
                 onContinueTrial = {
-                    if (!trialExpired) eraseWarningOpen = true
-                },
-            )
-        }
-
-        if (eraseWarningOpen) {
-            FreeTrialEraseWarning(
-                palette = palette,
-                isErasing = isErasingTrialData,
-                onDismiss = { if (!isErasingTrialData) eraseWarningOpen = false },
-                onConfirm = {
-                    val activeAccountId = accountId
-                    if (!isErasingTrialData && activeAccountId != null) {
-                        val confirmationTime = System.currentTimeMillis()
-                        if (isTrialExpired(confirmationTime, trialEndsAt)) {
-                            now = confirmationTime
-                            eraseWarningOpen = false
-                        } else {
-                            isErasingTrialData = true
-                            coroutineScope.launch {
-                                withContext(Dispatchers.IO) { clearLocalCodingData(context) }
-                                val continuedAt = System.currentTimeMillis()
-                                selectedProjectPath = null
-                                saveLastTrialContinuation(context, activeAccountId, continuedAt)
-                                lastTrialContinuationAt = continuedAt
-                                now = continuedAt
-                                trialStartedAt = loadTrialStart(context, activeAccountId)
-                                    ?: continuedAt.also { saveTrialStart(context, activeAccountId, it) }
-                                isErasingTrialData = false
-                                eraseWarningOpen = false
-                            }
+                    if (!trialExpired) {
+                        val continuedAt = System.currentTimeMillis()
+                        accountId?.let { activeAccountId ->
+                            saveLastTrialContinuation(context, activeAccountId, continuedAt)
                         }
+                        lastTrialContinuationAt = continuedAt
+                        now = continuedAt
                     }
                 },
+                onSignOut = { signOut() },
             )
         }
     }
@@ -448,6 +476,7 @@ private fun FirebaseAuthScreen(
                 }
                 .onFailure { error ->
                     isBusy = false
+                    Log.w(ENTRY_LOG_TAG, "Google sign-in failed.", error)
                     message = friendlyGoogleSignInMessage(error)
                     onUserChanged(auth.currentUser)
                 }
@@ -724,6 +753,33 @@ private fun FirebaseAuthScreen(
     }
 }
 
+private fun refreshFirebaseVerification(
+    auth: FirebaseAuth,
+    onComplete: (FirebaseUser?, Exception?) -> Unit,
+) {
+    val currentUser = auth.currentUser
+    if (currentUser == null) {
+        onComplete(null, null)
+        return
+    }
+    currentUser.reload().addOnCompleteListener { reloadTask ->
+        if (!reloadTask.isSuccessful) {
+            onComplete(auth.currentUser, reloadTask.exception)
+            return@addOnCompleteListener
+        }
+        val reloadedUser = auth.currentUser
+        if (reloadedUser?.isEmailVerified == true) {
+            // Force a fresh ID token so backend rules and profile sync observe the
+            // verified claim immediately as the UI advances.
+            reloadedUser.getIdToken(true).addOnCompleteListener {
+                onComplete(auth.currentUser, null)
+            }
+        } else {
+            onComplete(reloadedUser, null)
+        }
+    }
+}
+
 @Composable
 private fun FirebaseVerificationScreen(
     palette: EntryPalette,
@@ -735,6 +791,7 @@ private fun FirebaseVerificationScreen(
     onUserChanged: (FirebaseUser?) -> Unit,
     onSignOut: () -> Unit,
 ) {
+    val lifecycleOwner = LocalContext.current.findActivity() as? LifecycleOwner
     var isBusy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     val email = user?.email.orEmpty()
@@ -747,18 +804,33 @@ private fun FirebaseVerificationScreen(
         }
         isBusy = true
         message = null
-        currentUser.reload()
-            .addOnCompleteListener { task ->
+        refreshFirebaseVerification(auth) { refreshedUser, error ->
                 isBusy = false
-                val refreshedUser = auth.currentUser
                 syncUserProfileToFirestore(refreshedUser)
                 onUserChanged(refreshedUser)
                 message = when {
-                    !task.isSuccessful -> friendlyAuthMessage(task.exception, "Could not check verification.")
+                    error != null -> friendlyAuthMessage(error, "Could not check verification. Check your connection and try again.")
                     refreshedUser?.isEmailVerified == true -> "Email verified."
-                    else -> "Still waiting for email verification."
+                    else -> "We have not received confirmation yet. Open the newest verification link, then try again."
+                }
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, auth) {
+        if (lifecycleOwner == null) {
+            onDispose {}
+        } else {
+            val observer = LifecycleEventObserver { _, event ->
+                if (
+                    event == Lifecycle.Event.ON_RESUME &&
+                    auth.currentUser?.isEmailVerified != true
+                ) {
+                    refreshUser()
                 }
             }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
     }
 
     fun resendVerification() {
@@ -773,7 +845,7 @@ private fun FirebaseVerificationScreen(
             .addOnCompleteListener { task ->
                 isBusy = false
                 message = if (task.isSuccessful) {
-                    "Verification email sent."
+                    "Verification email sent. Check your spam or junk folder if it is not in your inbox."
                 } else {
                     friendlyAuthMessage(task.exception, "Could not send verification email.")
                 }
@@ -812,7 +884,7 @@ private fun FirebaseVerificationScreen(
             }
             Spacer(Modifier.height(18.dp))
             Text("Verify your email", color = palette.text, fontSize = 26.sp, fontWeight = FontWeight.Bold)
-            Text(email.ifBlank { "Your Firebase account" }, color = palette.mutedText, fontSize = 14.sp, textAlign = TextAlign.Center)
+            Text(email.ifBlank { "Your account" }, color = palette.mutedText, fontSize = 14.sp, textAlign = TextAlign.Center)
             Spacer(Modifier.height(20.dp))
             Surface(
                 color = palette.panel,
@@ -822,7 +894,8 @@ private fun FirebaseVerificationScreen(
             ) {
                 Column(modifier = Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
-                        text = "Open the verification email from Firebase, then come back and check again.",
+                        text = "Open the verification email we sent you, then come back and tap the button below. " +
+                                "If you do not see it in your inbox, check your spam or junk folder.",
                         color = palette.mutedText,
                         textAlign = TextAlign.Center,
                         fontSize = 14.sp,
@@ -840,12 +913,19 @@ private fun FirebaseVerificationScreen(
                     Button(
                         onClick = { refreshUser() },
                         enabled = !isBusy,
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = Color.White),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = palette.accent,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                        ),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.fillMaxWidth().height(52.dp),
                     ) {
                         if (isBusy) {
-                            CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                            )
                         } else {
                             Icon(Icons.Rounded.Refresh, contentDescription = null)
                         }
@@ -1073,13 +1153,57 @@ private fun GoogleAuthButton(
 private fun syncUserProfileToFirestore(user: FirebaseUser?) {
     if (user == null) return
 
+    kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
+        syncUserProfileWithServer(user)
+    }
+}
+
+private suspend fun syncUserProfileWithServer(user: FirebaseUser): Result<Unit> =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val idToken = Tasks.await(user.getIdToken(false)).token
+                ?: error("Could not verify the Firebase sign-in session.")
+            val appCheckToken = Tasks.await(
+                FirebaseAppCheck.getInstance().getAppCheckToken(false),
+            ).token ?: error("Could not verify this app installation.")
+            val connection = (URL(PROFILE_SYNC_FUNCTION_URL).openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"
+                connectTimeout = 15_000
+                readTimeout = 20_000
+                doOutput = true
+                setRequestProperty("Authorization", "Bearer $idToken")
+                setRequestProperty("X-Firebase-AppCheck", appCheckToken)
+                setRequestProperty("Content-Type", "application/json; charset=utf-8")
+            }
+            val body = JSONObject().apply {
+                user.displayName?.trim()?.takeIf { it.isNotBlank() }?.let { put("displayName", it) }
+            }.toString()
+            connection.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+            val status = connection.responseCode
+            val response = (if (status in 200..299) connection.inputStream else connection.errorStream)
+                ?.bufferedReader()?.use { it.readText() }.orEmpty()
+            connection.disconnect()
+            if (status !in 200..299) error("Profile sync failed ($status): $response")
+            Unit
+        }.recoverCatching { serverError ->
+            Log.w(ENTRY_LOG_TAG, "Server profile sync failed; trying Firestore directly.", serverError)
+            Tasks.await(syncUserProfileDirectly(user))
+            Unit
+        }.onFailure { error ->
+            Log.e(ENTRY_LOG_TAG, "User profile could not be written for ${user.uid}.", error)
+        }
+    }
+
+private fun syncUserProfileDirectly(user: FirebaseUser): Task<Void> {
+
     val reference = FirebaseFirestore.getInstance()
         .collection("users")
         .document(user.uid)
 
-    reference.get()
-        .addOnCompleteListener { task ->
-            val snapshot = task.takeIf { it.isSuccessful }?.result
+    return reference.get()
+        .continueWithTask { task ->
+            if (!task.isSuccessful) throw task.exception ?: IllegalStateException("Profile lookup failed.")
+            val snapshot = task.result
             val existingTrialStart = snapshot?.getLong("trialStartedAtMillis")
                 ?: snapshot?.getTimestamp("trialStartedAt")?.toDate()?.time
             val shouldStartTrial = snapshot == null ||
@@ -1141,7 +1265,7 @@ private fun FirebaseUser.toLocalUser(): LocalUser {
     return LocalUser(
         id = uid,
         displayName = displayName?.takeIf { it.isNotBlank() } ?: fallbackName,
-        email = cleanEmail.ifBlank { "Firebase account" },
+        email = cleanEmail.ifBlank { "Signed-in account" },
         emailVerified = isEmailVerified,
     )
 }
@@ -1170,10 +1294,8 @@ private suspend fun signInWithGoogle(
         ?: error("Google sign-in is missing the Firebase web client id.")
     val activity = context.findActivity()
         ?: error("Google sign-in requires an active screen. Please try again.")
-    val googleIdOption = GetGoogleIdOption.Builder()
-        .setFilterByAuthorizedAccounts(false)
-        .setServerClientId(serverClientId)
-        .setAutoSelectEnabled(false)
+    // Explicit button sign-in also supports adding or reauthenticating an account.
+    val googleIdOption = GetSignInWithGoogleOption.Builder(serverClientId)
         .build()
     val request = GetCredentialRequest.Builder()
         .addCredentialOption(googleIdOption)
@@ -1212,7 +1334,7 @@ private suspend fun <T> Task<T>.awaitTask(): T = suspendCancellableCoroutine { c
 
 private fun friendlyGoogleSignInMessage(error: Throwable): String = when (error) {
     is GetCredentialCancellationException -> "Google sign-in cancelled."
-    is NoCredentialException -> "No Google account is available on this device. Add an account and try again."
+    is NoCredentialException -> "Google could not complete sign-in with an available account. Check your Google account in device Settings and try again."
     is GetCredentialProviderConfigurationException -> googleSignInConfigurationMessage()
     is GetCredentialUnsupportedException -> "Google sign-in is unavailable on this device. Update Google Play services and try again."
     is GetCredentialInterruptedException -> "Google sign-in was interrupted. Please try again."
@@ -1229,13 +1351,16 @@ private fun googleSignInConfigurationMessage(): String {
 private fun PremiumPaywall(
     palette: EntryPalette,
     darkMode: Boolean,
+    now: Long,
     trialEndsAt: Long,
     trialExpired: Boolean,
     billingState: BillingUiState,
     onBuy: () -> Unit,
     onRestore: () -> Unit,
     onContinueTrial: () -> Unit,
+    onSignOut: () -> Unit,
 ) {
+    val daysRemaining = trialDaysRemaining(now, trialEndsAt)
     Surface(
         color = palette.background,
         modifier = Modifier.fillMaxSize(),
@@ -1272,9 +1397,9 @@ private fun PremiumPaywall(
             BrandTitle(palette, fontSize = 30)
             Text(
                 text = if (trialExpired) {
-                    "72 hour trial is over"
+                    "14-day trial is over"
                 } else {
-                    "Upgrade to Premium or continue your trial"
+                    "$daysRemaining ${if (daysRemaining == 1L) "day" else "days"} left"
                 },
                 color = palette.mutedText,
                 fontSize = 17.sp,
@@ -1286,7 +1411,7 @@ private fun PremiumPaywall(
                 shape = RoundedCornerShape(18.dp),
             ) {
                 Text(
-                    text = if (trialExpired) "TRIAL ENDED" else "72 HOUR FREE TRIAL",
+                    text = if (trialExpired) "TRIAL ENDED" else "14 DAY FREE TRIAL",
                     color = if (trialExpired) palette.error else palette.accentAlt,
                     fontWeight = FontWeight.Bold,
                     fontSize = 12.sp,
@@ -1299,16 +1424,6 @@ private fun PremiumPaywall(
                 color = palette.mutedText,
                 fontSize = 13.sp,
             )
-            if (!trialExpired) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "Continuing clears local coding data and resumes access until the next hourly check.",
-                    color = palette.error,
-                    fontSize = 12.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 18.dp),
-                )
-            }
 
             Spacer(Modifier.height(22.dp))
             Surface(
@@ -1340,7 +1455,7 @@ private fun PremiumPaywall(
                 ) {
                     Text("One-time payment", color = palette.mutedText, fontSize = 14.sp)
                     Text(
-                        text = billingState.formattedPrice,
+                        text = billingState.formattedPrice.ifBlank { "Google Play price" },
                         color = palette.accent,
                         fontSize = 38.sp,
                         fontWeight = FontWeight.Bold,
@@ -1363,7 +1478,7 @@ private fun PremiumPaywall(
                         enabled = purchaseButtonEnabled,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = palette.accent,
-                            contentColor = Color.White,
+                            contentColor = MaterialTheme.colorScheme.onPrimary,
                         ),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
@@ -1400,12 +1515,15 @@ private fun PremiumPaywall(
                     Text("Continue Free Trial", color = palette.text)
                 }
                 Text(
-                    text = "Continuing the trial requires clearing local coding data. You will see a warning first.",
-                    color = palette.error,
+                    text = "Your projects and coding data will stay on this device.",
+                    color = palette.mutedText,
                     fontSize = 11.sp,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.padding(horizontal = 18.dp),
                 )
+            }
+            TextButton(onClick = onSignOut) {
+                Text("Sign out", color = palette.mutedText)
             }
             Spacer(Modifier.height(12.dp))
         }
@@ -1453,55 +1571,6 @@ private fun PremiumFeature(
 }
 
 @Composable
-private fun FreeTrialEraseWarning(
-    palette: EntryPalette,
-    isErasing: Boolean,
-    onDismiss: () -> Unit,
-    onConfirm: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = palette.elevatedPanel,
-        title = { Text("Clear all coding data?", color = palette.text) },
-        text = {
-            Column {
-                Text(
-                    text = "Continuing the free trial permanently deletes the app's local coding data:",
-                    color = palette.mutedText,
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "Projects and source files\nTerminal history and editor state\nImported folders and preview cache\nPackages and local workspace data",
-                    color = palette.text,
-                    fontSize = 13.sp,
-                )
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    text = "This cannot be undone. Export anything you need before continuing. Files already exported outside the app are not deleted.",
-                    color = palette.error,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 13.sp,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onConfirm, enabled = !isErasing) {
-                if (isErasing) {
-                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
-                }
-                Text(if (isErasing) "Clearing..." else "Erase and Continue", color = palette.error)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !isErasing) {
-                Text("Go Back", color = palette.text)
-            }
-        },
-    )
-}
-
-@Composable
 private fun ProjectHomeScreen(
     user: LocalUser,
     darkMode: Boolean,
@@ -1518,10 +1587,27 @@ private fun ProjectHomeScreen(
     var refreshVersion by remember { mutableLongStateOf(0L) }
     var search by rememberSaveable { mutableStateOf("") }
     var createDialogOpen by remember { mutableStateOf(false) }
+    var newProjectMenuOpen by remember { mutableStateOf(false) }
     var deleteProject by remember { mutableStateOf<LocalProject?>(null) }
     var renameProject by remember { mutableStateOf<LocalProject?>(null) }
     var profileMenuOpen by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+
+    val importProjectLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            coroutineScope.launch {
+                val result = withContext(Dispatchers.IO) { importLocalProject(context, uri) }
+                result.fold(
+                    onSuccess = { project ->
+                        message = null
+                        refreshVersion += 1L
+                        onOpenProject(project)
+                    },
+                    onFailure = { error -> message = error.message ?: "Could not import the project." },
+                )
+            }
+        }
+    }
 
     LaunchedEffect(refreshVersion) {
         projects = withContext(Dispatchers.IO) { discoverLocalProjects(context) }
@@ -1609,7 +1695,7 @@ private fun ProjectHomeScreen(
             border = BorderStroke(1.dp, palette.border),
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { createDialogOpen = true },
+                .clickable { newProjectMenuOpen = true },
         ) {
             Row(
                 modifier = Modifier.padding(18.dp),
@@ -1622,16 +1708,16 @@ private fun ProjectHomeScreen(
                         .background(palette.accent),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Rounded.Add, contentDescription = null, tint = Color.White, modifier = Modifier.size(30.dp))
+                    Icon(painterResource(R.drawable.jb_add), contentDescription = null, tint = Color.White, modifier = Modifier.size(30.dp))
                 }
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("New Project", color = palette.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                    Text("Create a new Web project", color = palette.mutedText, fontSize = 13.sp)
+                    Text("New or Import Project", color = palette.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
+                    Text("Create one, or import a file or ZIP", color = palette.mutedText, fontSize = 13.sp)
                 }
                 Icon(
                     Icons.AutoMirrored.Rounded.ArrowForward,
-                    contentDescription = "Create project",
+                    contentDescription = "Create or import project",
                     tint = palette.accent,
                 )
             }
@@ -1649,14 +1735,14 @@ private fun ProjectHomeScreen(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
-            Icon(Icons.Rounded.Search, contentDescription = null, tint = palette.mutedText)
+            Icon(painterResource(R.drawable.jb_search), contentDescription = null, tint = palette.mutedText)
         }
         Spacer(Modifier.height(10.dp))
         OutlinedTextField(
             value = search,
             onValueChange = { search = it },
             placeholder = { Text("Search projects") },
-            leadingIcon = { Icon(Icons.Rounded.Search, contentDescription = null) },
+            leadingIcon = { Icon(painterResource(R.drawable.jb_search), contentDescription = null) },
             singleLine = true,
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier.fillMaxWidth(),
@@ -1674,7 +1760,7 @@ private fun ProjectHomeScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                Icon(Icons.Rounded.Folder, contentDescription = null, tint = palette.mutedText, modifier = Modifier.size(48.dp))
+                Icon(painterResource(R.drawable.jb_project), contentDescription = null, tint = palette.mutedText, modifier = Modifier.size(48.dp))
                 Spacer(Modifier.height(10.dp))
                 Text(
                     text = if (search.isBlank()) "No projects yet" else "No matching projects",
@@ -1706,6 +1792,34 @@ private fun ProjectHomeScreen(
                 item { Spacer(Modifier.height(12.dp)) }
             }
         }
+    }
+
+    if (newProjectMenuOpen) {
+        AlertDialog(
+            onDismissRequest = { newProjectMenuOpen = false },
+            containerColor = palette.elevatedPanel,
+            title = { Text("Add Project", color = palette.text, fontSize = 24.sp) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ProjectChoiceCard(
+                        title = "Create blank project",
+                        description = "Start with a new HTML, CSS, and JavaScript project",
+                        iconRes = R.drawable.jb_add,
+                        palette = palette,
+                        onClick = { newProjectMenuOpen = false; createDialogOpen = true },
+                    )
+                    ProjectChoiceCard(
+                        title = "Import project",
+                        description = "Open a Web file or ZIP archive",
+                        iconRes = R.drawable.jb_import,
+                        palette = palette,
+                        onClick = { newProjectMenuOpen = false; importProjectLauncher.launch(arrayOf("*/*")) },
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { newProjectMenuOpen = false }) { Text("Cancel") } },
+        )
     }
 
     if (createDialogOpen) {
@@ -1774,6 +1888,32 @@ private fun ProjectHomeScreen(
 }
 
 @Composable
+private fun ProjectChoiceCard(
+    title: String,
+    description: String,
+    iconRes: Int,
+    palette: EntryPalette,
+    onClick: () -> Unit,
+) {
+    Surface(
+        color = palette.panel,
+        shape = RoundedCornerShape(10.dp),
+        border = BorderStroke(1.dp, palette.border),
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+    ) {
+        Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(painterResource(iconRes), contentDescription = null, tint = palette.accent, modifier = Modifier.size(26.dp))
+            Spacer(Modifier.width(16.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(title, color = palette.text, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Spacer(Modifier.height(3.dp))
+                Text(description, color = palette.mutedText, fontSize = 13.sp, lineHeight = 18.sp)
+            }
+        }
+    }
+}
+
+@Composable
 private fun ProjectRow(
     project: LocalProject,
     palette: EntryPalette,
@@ -1801,7 +1941,7 @@ private fun ProjectRow(
                     .background(palette.accentAlt.copy(alpha = 0.18f)),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Rounded.Code, contentDescription = null, tint = palette.accentAlt)
+                Icon(painterResource(R.drawable.jb_project), contentDescription = null, tint = palette.accentAlt)
             }
             Spacer(Modifier.width(13.dp))
             Column(modifier = Modifier.weight(1f)) {
@@ -1816,7 +1956,7 @@ private fun ProjectRow(
             if (project.canDelete) {
                 Box {
                     IconButton(onClick = { menuOpen = true }) {
-                        Icon(Icons.Rounded.MoreVert, contentDescription = "Project options", tint = palette.mutedText)
+                        Icon(painterResource(R.drawable.jb_menu), contentDescription = "Project options", tint = palette.mutedText)
                     }
                     DropdownMenu(
                         expanded = menuOpen,
@@ -1826,7 +1966,7 @@ private fun ProjectRow(
                         DropdownMenuItem(
                             text = { Text("Open", color = palette.text) },
                             onClick = { menuOpen = false; onOpen() },
-                            leadingIcon = { Icon(Icons.Rounded.Folder, null, tint = palette.accent) },
+                            leadingIcon = { Icon(painterResource(R.drawable.jb_project), null, tint = palette.accent) },
                         )
                         DropdownMenuItem(
                             text = { Text("Rename", color = palette.text) },
@@ -2146,7 +2286,18 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
 
 internal fun isTrialExpired(now: Long, trialEndsAt: Long): Boolean = now >= trialEndsAt
 
+internal fun trialDaysRemaining(now: Long, trialEndsAt: Long): Long {
+    val remaining = (trialEndsAt - now).coerceAtLeast(0L)
+    return (remaining + DAY_MS - 1L) / DAY_MS
+}
+
 internal fun trialEndTimestamp(trialStartedAt: Long): Long = trialStartedAt + TRIAL_DURATION_MS
+
+internal fun earliestTrialStart(localStart: Long, serverStart: Long): Long = when {
+    localStart <= 0L -> serverStart
+    serverStart <= 0L -> localStart
+    else -> minOf(localStart, serverStart)
+}
 
 internal fun nextTrialReminderAt(trialStartedAt: Long, lastContinuationAt: Long): Long {
     val baseline = if (lastContinuationAt > trialStartedAt) lastContinuationAt else trialStartedAt
@@ -2324,6 +2475,95 @@ button?.addEventListener('click', () => {
         modifiedAt = projectModifiedAt(projectDirectory),
         canDelete = true,
     )
+}
+
+internal fun importLocalProject(context: Context, uri: Uri): Result<LocalProject> = runCatching {
+    val sourceName = importedDisplayName(context, uri)
+    val isZip = sourceName.endsWith(".zip", ignoreCase = true)
+    val requestedName = sourceName.substringBeforeLast('.', sourceName).ifBlank { "Imported project" }
+    val projectsDirectory = File(context.filesDir, "projects").apply { mkdirs() }.canonicalFile
+    val projectDirectory = uniqueProjectDirectory(projectsDirectory, requestedName)
+    check(projectDirectory.mkdirs()) { "Could not create the imported project folder." }
+    try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            if (isZip) {
+                extractProjectZip(input, projectDirectory)
+                flattenSingleZipRoot(projectDirectory)
+                check(projectDirectory.walkTopDown().any { it.isFile }) { "The selected ZIP is empty." }
+            } else {
+                File(projectDirectory, sanitizeImportedProjectFileName(sourceName)).outputStream().use(input::copyTo)
+            }
+        } ?: error("Could not open the selected file.")
+    } catch (error: Throwable) {
+        projectDirectory.deleteRecursively()
+        throw error
+    }
+    LocalProject(projectDirectory.name, projectDirectory, projectModifiedAt(projectDirectory), true)
+}
+
+private fun importedDisplayName(context: Context, uri: Uri): String {
+    val providerName = runCatching {
+        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getString(0) else null
+        }
+    }.getOrNull()
+    return providerName?.takeIf(String::isNotBlank)
+        ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf(String::isNotBlank)
+        ?: "index.html"
+}
+
+private fun uniqueProjectDirectory(parent: File, rawName: String): File {
+    val cleaned = rawName.trim().replace(Regex("[\\\\/:*?\"<>|]"), "_").trim('.', ' ').take(60).ifBlank { "Imported project" }
+    var candidate = File(parent, cleaned)
+    var suffix = 2
+    while (candidate.exists()) candidate = File(parent, "$cleaned (${suffix++})")
+    check(candidate.canonicalFile.parentFile == parent) { "Invalid imported project name." }
+    return candidate
+}
+
+private fun sanitizeImportedProjectFileName(rawName: String): String =
+    rawName.substringAfterLast('/').substringAfterLast('\\')
+        .replace(Regex("[\\\\/:*?\"<>|]"), "_").trim('.', ' ').take(120).ifBlank { "index.html" }
+
+private fun extractProjectZip(input: java.io.InputStream, destination: File) {
+    val root = destination.canonicalFile
+    var entries = 0
+    var extractedBytes = 0L
+    ZipInputStream(input.buffered()).use { zip ->
+        while (true) {
+            val entry = zip.nextEntry ?: break
+            check(++entries <= 10_000) { "The ZIP contains too many files." }
+            val name = entry.name.replace('\\', '/').trimStart('/')
+            if (name.isBlank()) { zip.closeEntry(); continue }
+            check(name.split('/').none { it == ".." }) { "The ZIP contains an unsafe path." }
+            val target = File(root, name).canonicalFile
+            check(target.path.startsWith(root.path + File.separator)) { "The ZIP contains an unsafe path." }
+            if (entry.isDirectory) {
+                check(target.mkdirs() || target.isDirectory) { "Could not create ${entry.name}." }
+            } else {
+                check(target.parentFile?.mkdirs() != false || target.parentFile?.isDirectory == true) { "Could not create a folder for ${entry.name}." }
+                FileOutputStream(target).use { output ->
+                    val buffer = ByteArray(16 * 1024)
+                    while (true) {
+                        val count = zip.read(buffer)
+                        if (count < 0) break
+                        extractedBytes += count
+                        check(extractedBytes <= 100L * 1024L * 1024L) { "The ZIP is larger than 100 MB when extracted." }
+                        output.write(buffer, 0, count)
+                    }
+                }
+            }
+            zip.closeEntry()
+        }
+    }
+}
+
+private fun flattenSingleZipRoot(destination: File) {
+    val nestedRoot = destination.listFiles().orEmpty().singleOrNull()?.takeIf(File::isDirectory) ?: return
+    nestedRoot.listFiles().orEmpty().forEach { child ->
+        check(child.renameTo(File(destination, child.name))) { "Could not unpack ${child.name}." }
+    }
+    check(nestedRoot.delete()) { "Could not finish unpacking the ZIP." }
 }
 
 internal fun validateProjectName(rawName: String): String? {

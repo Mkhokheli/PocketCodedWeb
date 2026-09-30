@@ -6,6 +6,12 @@ import org.junit.Test
 
 class PlayBillingManagerTest {
     @Test
+    fun priceComesOnlyFromGooglePlayLocalizedOffers() {
+        assertTrue(localizedGooglePlayPrice(listOf("", "R 149,99")) == "R 149,99")
+        assertTrue(localizedGooglePlayPrice(emptyList()).isEmpty())
+    }
+
+    @Test
     fun googlePlayOrderIdsMustUseGpaPrefix() {
         assertTrue(isGooglePlayOrderId("GPA.1234-5678-9012-34567"))
         assertFalse(isGooglePlayOrderId(null))

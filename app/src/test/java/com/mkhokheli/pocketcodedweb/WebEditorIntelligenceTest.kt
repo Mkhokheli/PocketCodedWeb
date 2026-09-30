@@ -456,6 +456,42 @@ class WebEditorIntelligenceTest {
     }
 
     @Test
+    fun sqlCompletionsIncludeAdvancedSQLiteKeywords() {
+        val source = "RET"
+        val context = completionContextAt(source, source.length, "query.sql")
+
+        assertNotNull(context)
+        val completions = webCompletionsForContext("query.sql", source, context!!)
+        assertTrue(completions.any { it.label == "RETURNING" })
+    }
+
+    @Test
+    fun backendLanguageFilesReceiveBaselineDelimiterDiagnostics() {
+        listOf("main.py", "index.php", "query.sql").forEach { fileName ->
+            val diagnostics = inspectWebSource(fileName, "call(value]")
+
+            assertTrue("$fileName should report a mismatched delimiter", diagnostics.any { it.severity == "error" })
+        }
+    }
+
+    @Test
+    fun phpTemplateExtensionReceivesPhpCompletions() {
+        val source = "fun"
+        val context = completionContextAt(source, source.length, "page.phtml")
+
+        assertNotNull(context)
+        val completions = webCompletionsForContext("page.phtml", source, context!!)
+        assertTrue(completions.any { it.label == "function" })
+    }
+
+    @Test
+    fun recognizesCommonSQLiteDatabaseExtensions() {
+        listOf("app.db", "app.db3", "app.sqlite", "app.sqlite3", "app.duckdb").forEach {
+            assertTrue("$it should be recognized as a database", isDatabaseFileName(it))
+        }
+    }
+
+    @Test
     fun estimatedLongestLineLengthStopsAtCap() {
         val text = "short\n${"x".repeat(10_000)}"
 

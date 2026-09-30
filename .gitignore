@@ -15,3 +15,7 @@
 local.properties
 /package.json
 /package-lock.json
+/.codex-tmp/
+/release/
+app/release/
+app/build/
