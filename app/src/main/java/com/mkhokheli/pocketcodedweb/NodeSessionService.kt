@@ -51,10 +51,18 @@ class NodeSessionService : Service() {
             try {
                 System.loadLibrary("node")
                 System.loadLibrary("pocketcoded-node")
-                val code = NativeNodeBridge.start(arrayOf(
-                    "node", File(directory, "session.cjs").absolutePath,
-                    File(directory, "config.json").absolutePath,
-                ))
+                val config = JSONObject(File(directory, "config.json").readText())
+                if (config.optBoolean("browserPreview", false) &&
+                    DeviceEfficiency.budget.terminalRenderLines != Int.MAX_VALUE) {
+                    // Leave interactive browser rendering more CPU headroom while
+                    // keeping the development server alive in the foreground.
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND)
+                }
+                val arguments = mutableListOf("node")
+                if (config.optString("mode") == "tests") arguments += "--test-reporter=tap"
+                arguments += File(directory, "session.cjs").absolutePath
+                arguments += File(directory, "config.json").absolutePath
+                val code = NativeNodeBridge.start(arguments.toTypedArray())
                 File(directory, "status.json").writeText(JSONObject()
                     .put("state", if (code == 0) "exited" else "failed")
                     .put("exitCode", code).toString())

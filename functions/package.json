@@ -9,6 +9,7 @@
   },
   "scripts": {
     "lint": "node --check index.js",
+    "test:rules": "firebase emulators:exec --project demo-pocketcodedweb --only firestore \"node --test test/firestore.rules.test.js\"",
     "serve": "firebase emulators:start --only functions",
     "deploy": "firebase deploy --only functions"
   },
@@ -18,6 +19,8 @@
     "googleapis": "^160.0.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.0",
+    "firebase": "^12.2.1",
     "firebase-tools": "^15.22.0"
   },
   "overrides": {

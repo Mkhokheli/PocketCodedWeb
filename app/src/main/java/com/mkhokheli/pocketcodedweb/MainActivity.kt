@@ -1,13 +1,20 @@
 package com.mkhokheli.pocketcodedweb
 
+import com.mkhokheli.pocketcodedweb.ui.theme.spaceThemeColors
 import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.ContentCopy
 import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
+import androidx.compose.ui.input.key.*
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -93,6 +100,8 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Visibility
 import androidx.compose.material.icons.rounded.VpnKey
+import androidx.compose.material.icons.automirrored.rounded.Redo
+import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -182,6 +191,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.google.firebase.FirebaseApp
 import com.google.firebase.appcheck.FirebaseAppCheck
 import com.mkhokheli.pocketcodedweb.ui.theme.PocketCodedWebTheme
+import com.mkhokheli.pocketcodedweb.ui.theme.readableTextColor
+import com.mkhokheli.pocketcodedweb.ui.theme.withReadableText
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
@@ -211,6 +222,11 @@ import kotlinx.coroutines.withContext
 import org.eclipse.jgit.api.Git
 import org.json.JSONArray
 import org.json.JSONObject
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.testTag
 
 private const val IDE_PREFS_NAME = "web_ide"
 
@@ -325,7 +341,7 @@ private val editableWebExtensions =
                 cssFileExtensions +
                 javascriptFileExtensions +
                 generalCodeFileExtensions +
-                setOf("json", "md", "txt")
+                setOf("json", "md", "txt", "db", "db3", "s3db", "sl3", "sqlite", "sqlite3", "database")
 private val defaultWebFileNames = listOf("index.html", "style.css", "script.js")
 private val workspaceMetadataNames = setOf(".git", ".ssh", ".pocketcodedweb")
 private val aiEditableFilePathRegex =
@@ -468,6 +484,9 @@ private val aiModelOptions =
                         AiProvider.OpenAiCompatible,
                         "https://api.mistral.ai/v1/chat/completions"
                 ),
+                AiModelOption("meta-llama/Llama-3.3-70B-Instruct-Turbo", "Together — Llama 3.3", "Together OpenAI-compatible inference.", AiProvider.OpenAiCompatible, "https://api.together.xyz/v1/chat/completions"),
+                AiModelOption("deployment", "Azure OpenAI", "Your Azure deployment chat-completions endpoint.", AiProvider.AzureOpenAi),
+                AiModelOption("local-model", "Custom / Ollama", "A local or remote OpenAI-compatible endpoint.", AiProvider.OpenAiCompatible),
         )
 
 @Stable
@@ -496,6 +515,7 @@ private sealed class ExplorerEntry {
 }
 
 private enum class WebFullScreenMode {
+    Explorer,
     Editor,
     Terminal,
     Ai,
@@ -511,7 +531,7 @@ private data class InAppLivePreviewState(
         val url: String,
 )
 
-private enum class WebTheme(
+internal enum class WebTheme(
         val displayName: String,
         val isDark: Boolean,
 ) {
@@ -528,7 +548,13 @@ private enum class WebTheme(
     MonochromeProDark("Monochrome Pro Dark", true),
     MonochromeProLight("Monochrome Pro Light", false),
     VSCodeDefaultDark("VS Code Default Dark", true),
-    VSCodeDefaultLight("VS Code Default Light", false);
+    VSCodeDefaultLight("VS Code Default Light", false),
+    CyanOrbitDark("Cyan Orbit Dark", true),
+    CyanOrbitLight("Cyan Orbit Light", false),
+    BlueHorizonDark("Blue Horizon Dark", true),
+    BlueHorizonLight("Blue Horizon Light", false),
+    GreenCometDark("Green Comet Dark", true),
+    GreenCometLight("Green Comet Light", false);
 
     fun next(): WebTheme = entries[(ordinal + 1) % entries.size]
 }
@@ -555,6 +581,8 @@ internal data class WebPalette(
         val warning: Color,
         val success: Color,
         val info: Color,
+        val editorBackground: Color = panel,
+        val terminalBackground: Color = panel,
 )
 
 private data class WebSession(
@@ -651,7 +679,8 @@ private data class EmbeddedWebBlock(
 private enum class AiProvider {
     Gemini,
     Anthropic,
-    OpenAiCompatible
+    OpenAiCompatible,
+    AzureOpenAi
 }
 
 private data class AiModelOption(
@@ -660,11 +689,17 @@ private data class AiModelOption(
         val description: String,
         val provider: AiProvider,
         val endpoint: String = "",
-)
+) {
+    val defaultEndpoint: String get() = endpoint.ifBlank {
+        if (provider == AiProvider.Gemini) "https://generativelanguage.googleapis.com/v1beta" else ""
+    }
+    val connectionKey: String get() = if (provider == AiProvider.Gemini) "gemini" else label
+}
 
 private data class AiChatMessage(
         val role: AiChatRole,
         val text: String,
+        val modifiedFiles: List<String> = emptyList(),
 )
 
 private enum class AiChatRole {
@@ -807,7 +842,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun WebIdeApp(
+internal fun WebIdeApp(
         ideTheme: WebTheme,
         onToggleTheme: () -> Unit,
         projectDirectory: File,
@@ -818,6 +853,29 @@ private fun WebIdeApp(
     val coroutineScope = rememberCoroutineScope()
     val rootDirectory =
             remember(projectDirectory.absolutePath) { projectDirectory.apply { mkdirs() } }
+    val editorSessions = remember(rootDirectory.absolutePath) { EditorSessionRegistry() }
+    val fileStore = remember(rootDirectory.absolutePath) { ProjectFileStore(rootDirectory) }
+    val development = remember(rootDirectory.absolutePath) { WebDevelopmentController(context, rootDirectory) }
+    val commandHistory = remember(rootDirectory.absolutePath) { DailyTerminalCommandHistory() }
+    val historyLifecycle = (context as? androidx.lifecycle.LifecycleOwner)?.lifecycle
+    LaunchedEffect(commandHistory, historyLifecycle) {
+        suspend fun refreshDailyHistory() {
+            while (true) {
+                commandHistory.refresh()
+                val midnight = java.util.Calendar.getInstance().apply {
+                    add(java.util.Calendar.DAY_OF_YEAR, 1)
+                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                    set(java.util.Calendar.MINUTE, 0)
+                    set(java.util.Calendar.SECOND, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                }
+                delay((midnight.timeInMillis - System.currentTimeMillis()).coerceAtLeast(1_000L))
+            }
+        }
+        if (historyLifecycle != null) {
+            historyLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { refreshDailyHistory() }
+        } else refreshDailyHistory()
+    }
     val savedSession =
             remember(rootDirectory.absolutePath) { loadWebIdeSession(context, rootDirectory) }
     val initialFiles =
@@ -880,6 +938,7 @@ private fun WebIdeApp(
     val dirtyFileIds = remember { mutableSetOf<Long>() }
     val pendingEditorTextByFileId =
             remember(rootDirectory.absolutePath) { mutableMapOf<Long, String>() }
+    val pendingFileEdits = remember(rootDirectory.absolutePath) { mutableMapOf<Long, PendingFileEdit>() }
     val pendingEditorSaveJobs = remember { mutableMapOf<Long, Job>() }
     val fileRefreshGeneration = remember(rootDirectory.absolutePath) { AtomicLong(0L) }
     var lastPersistedSession by
@@ -962,10 +1021,15 @@ private fun WebIdeApp(
             }
     val selectedAiModel =
             aiModelOptions.firstOrNull { it.id == selectedAiModelId } ?: aiModelOptions.first()
-    var userAiApiKey by
-            rememberSaveable(rootDirectory.absolutePath) {
-                mutableStateOf(savedSession.userAiApiKey.orEmpty())
-            }
+    val aiConnections = remember { AiConnectionStore(context) }
+    remember(aiConnections) { aiConnections.migrateLegacy(aiModelOptions.first().connectionKey, savedSession.userAiApiKey) }
+    var userAiApiKey by remember(selectedAiModel.connectionKey) {
+        mutableStateOf(aiConnections.key(selectedAiModel.connectionKey).orEmpty())
+    }
+    var aiEndpointOverride by remember(selectedAiModel.id) { mutableStateOf(aiConnections.endpoint(selectedAiModel.id)) }
+    var aiModelOverride by remember(selectedAiModel.id) { mutableStateOf(aiConnections.model(selectedAiModel.id)) }
+    var aiUndoChange by remember(rootDirectory.absolutePath) { mutableStateOf<AiFileUndo?>(null) }
+    var aiActionTargetPath by remember(rootDirectory.absolutePath) { mutableStateOf<String?>(null) }
     val aiMessages =
             remember(rootDirectory.absolutePath) {
                 mutableStateListOf(
@@ -978,6 +1042,7 @@ private fun WebIdeApp(
             }
     var aiInput by rememberSaveable(rootDirectory.absolutePath) { mutableStateOf("") }
     var aiBusy by remember { mutableStateOf(false) }
+    var aiApplying by remember { mutableStateOf(false) }
     var aiError by remember { mutableStateOf<String?>(null) }
     var aiPendingAction by remember { mutableStateOf<AiSuggestedAction?>(null) }
     var aiVerificationMessage by remember { mutableStateOf<String?>(null) }
@@ -1005,7 +1070,7 @@ private fun WebIdeApp(
                 terminalInput = terminalInput,
                 terminalText = terminalSnapshot,
                 fullScreenMode = fullScreenMode,
-                userAiApiKey = userAiApiKey.takeIf { it.isNotBlank() },
+                userAiApiKey = null,
         )
     }
 
@@ -1064,6 +1129,10 @@ private fun WebIdeApp(
             val observer = LifecycleEventObserver { _, event ->
                 when (event) {
                     Lifecycle.Event.ON_STOP -> {
+                        val draftsToStage = pendingFileEdits.values.toList()
+                        (context as? ComponentActivity)?.lifecycleScope?.launch(Dispatchers.IO) {
+                            draftsToStage.forEach { fileStore.stageDraft(it) }
+                        }
                         persistTerminalForBackground()
                         if (browserPreviewReturnPending) {
                             releaseBrowserPreviewHandoffMemory()
@@ -1308,7 +1377,10 @@ private fun WebIdeApp(
     }
 
     fun discardEditorState(fileId: Long) {
+        files.firstOrNull { it.id == fileId }?.let { editorSessions.invalidate(it.filePath) }
         pendingEditorSaveJobs.remove(fileId)?.cancel()
+        pendingFileEdits.remove(fileId)
+        files.firstOrNull { it.id == fileId }?.let { fileStore.invalidatePendingEdit(it.filePath) }
         pendingEditorTextByFileId.remove(fileId)
         dirtyFileIds.remove(fileId)
     }
@@ -1346,14 +1418,20 @@ private fun WebIdeApp(
 
     fun updateActiveContent(newCode: String) {
         val fileToSync = activeFile ?: return
+        development.relocateBreakpoints(fileToSync.filePath, pendingEditorTextByFileId[fileToSync.id] ?: fileToSync.content, newCode)
+        val pendingEdit = fileStore.prepareEdit(fileToSync.filePath, newCode)
+        pendingFileEdits[fileToSync.id] = pendingEdit
         pendingEditorTextByFileId[fileToSync.id] = newCode
         dirtyFileIds += fileToSync.id
         pendingEditorSaveJobs.remove(fileToSync.id)?.cancel()
         pendingEditorSaveJobs[fileToSync.id] =
                 coroutineScope.launch {
-                    delay(EDITOR_SAVE_DEBOUNCE_MS)
+                    delay(150)
+                    withContext(Dispatchers.IO) { fileStore.stageDraft(pendingEdit) }
+                    delay(EDITOR_SAVE_DEBOUNCE_MS - 150)
                     if (files.none { it.id == fileToSync.id }) {
                         pendingEditorTextByFileId.remove(fileToSync.id)
+                        pendingFileEdits.remove(fileToSync.id)
                         dirtyFileIds.remove(fileToSync.id)
                         pendingEditorSaveJobs.remove(fileToSync.id)
                         return@launch
@@ -1362,8 +1440,15 @@ private fun WebIdeApp(
                         return@launch
                     }
                     val modifiedAt = System.currentTimeMillis()
-                    withContext(Dispatchers.IO) {
-                        saveFileContent(fileToSync.filePath, newCode, modifiedAt)
+                    val saved = withContext(Dispatchers.IO) {
+                        fileStore.save(pendingEdit).onSuccess {
+                            ProjectFileCache.invalidate(File(fileToSync.filePath))
+                            ProjectSemanticIndexer.invalidate()
+                        }
+                    }
+                    if (saved.isFailure) {
+                        terminalText = appendTerminalOutput(terminalText, "Save failed: ${saved.exceptionOrNull()?.message}")
+                        return@launch
                     }
                     // A newer edit may have arrived while the file write was in progress.
                     // Never publish this older snapshot back into Compose/editor state.
@@ -1375,6 +1460,7 @@ private fun WebIdeApp(
                     }
                     if (pendingEditorTextByFileId[fileToSync.id] == newCode) {
                         pendingEditorTextByFileId.remove(fileToSync.id)
+                        pendingFileEdits.remove(fileToSync.id)
                         dirtyFileIds.remove(fileToSync.id)
                         pendingEditorSaveJobs.remove(fileToSync.id)
                     }
@@ -1387,7 +1473,8 @@ private fun WebIdeApp(
         if (!isSameOrInside(rootDirectory, target)) return "File must stay inside this project."
         if (target.exists()) return "A file named $cleanName already exists here."
         target.parentFile?.mkdirs()
-        target.writeText(defaultContentForFile(cleanName, rootDirectory.name))
+        if (isDatabaseFileName(cleanName)) SQLiteDatabase.openOrCreateDatabase(target, null).close()
+        else target.writeText(defaultContentForFile(cleanName, rootDirectory.name))
         refreshFiles(
                 selectPath = target.absolutePath,
                 workingPath = target.parentFile?.absolutePath
@@ -1588,7 +1675,11 @@ private fun WebIdeApp(
                             pendingFiles.forEach {
                                 saveFileContent(it.filePath, it.content, it.modifiedAt)
                             }
-                            prepareProjectServerPreview(rootDirectory, workingDirectory)
+                            prepareProjectServerPreview(
+                                    rootDirectory,
+                                    workingDirectory,
+                                    browserPreview = destination == WebPreviewDestination.Browser,
+                            )
                         }
                 previewDestinationDialogOpen = false
                 if (server == null) {
@@ -1651,7 +1742,7 @@ private fun WebIdeApp(
         }
         terminalJsToRun = terminalRunnableJavaScript(committedFile, rootDirectory)
         when (fullScreenMode) {
-            WebFullScreenMode.Editor, WebFullScreenMode.Ai ->
+            WebFullScreenMode.Editor, WebFullScreenMode.Ai, WebFullScreenMode.Explorer ->
                     fullScreenMode = WebFullScreenMode.Terminal
             WebFullScreenMode.Terminal -> Unit
             null -> terminalRevealRequest += 1L
@@ -1660,6 +1751,10 @@ private fun WebIdeApp(
 
     fun runActiveFile() {
         val fileToRun = activeFile
+        if (fileToRun != null && isDatabaseFileName(fileToRun.name)) {
+            fullScreenMode = WebFullScreenMode.Editor
+            return
+        }
         if (fileToRun == null) {
             terminalText =
                     appendTerminalOutput(
@@ -1678,7 +1773,7 @@ private fun WebIdeApp(
                         withContext(Dispatchers.IO) { runSqlScript(rootDirectory, sqlFile.content) }
                 terminalText = appendTerminalOutput(terminalText, output)
                 when (fullScreenMode) {
-                    WebFullScreenMode.Editor, WebFullScreenMode.Ai ->
+                    WebFullScreenMode.Editor, WebFullScreenMode.Ai, WebFullScreenMode.Explorer ->
                             fullScreenMode = WebFullScreenMode.Terminal
                     else -> terminalRevealRequest += 1L
                 }
@@ -1693,6 +1788,7 @@ private fun WebIdeApp(
 
     fun submitTerminalCommand(commandOverride: String? = null) {
         val command = commandOverride ?: terminalInput.trim()
+        commandHistory.record(command)
         if (command.isBlank()) return
         terminalInput = ""
         terminalText =
@@ -1736,10 +1832,41 @@ private fun WebIdeApp(
         }
     }
 
+    suspend fun flushPendingEditorEdits() {
+        val edits = pendingFileEdits.toMap()
+        val jobs = edits.keys.mapNotNull { pendingEditorSaveJobs.remove(it) }
+        jobs.forEach { it.cancel() }
+        jobs.forEach { it.join() }
+        for ((id, edit) in edits) {
+            withContext(Dispatchers.IO) { fileStore.save(edit).getOrThrow() }
+            if (pendingFileEdits[id] == edit) {
+                pendingFileEdits.remove(id)
+                pendingEditorTextByFileId.remove(id)
+                dirtyFileIds.remove(id)
+                files.replaceFile(id) { withContent(content = edit.content, modifiedAt = File(edit.filePath).lastModified()) }
+            }
+        }
+    }
+
+
     fun submitAiMessage() {
         val promptText = aiInput.trim()
         if (promptText.isBlank() || aiBusy) return
         val apiKey = userAiApiKey.trim()
+        val requestModel = selectedAiModel.copy(id = aiModelOverride ?: selectedAiModel.id,
+            endpoint = aiEndpointOverride ?: selectedAiModel.defaultEndpoint)
+        if (apiKey.isBlank() && selectedAiModel.label != "Custom / Ollama") {
+            aiError = "Add this provider's API key in AI settings."; return
+        }
+        val endpointCheck = runCatching { validatedAiEndpoint(requestModel.endpoint, requestModel.provider == AiProvider.AzureOpenAi) }
+        if (endpointCheck.isFailure) { aiError = endpointCheck.exceptionOrNull()?.message; return }
+        val contextFiles = files.withPendingEditorTexts(pendingEditorTextByFileId)
+        val contextActive = activeFile?.withPendingEditorText(pendingEditorTextByFileId)
+        val terminalSnapshot = terminalText
+        val conversation = aiMessages.takeLast(12).joinToString("\n\n") { "${it.role}: ${it.text.take(4000)}" }
+        aiActionTargetPath = contextActive?.filePath
+        aiPendingAction = null
+        aiBusy = true
         aiInput = ""
         aiError = null
         aiVerificationMessage = null
@@ -1753,20 +1880,13 @@ private fun WebIdeApp(
                                     buildAiCopilotPrompt(
                                             rootDirectory = rootDirectory,
                                             files =
-                                                    files.withPendingEditorTexts(
-                                                            pendingEditorTextByFileId
-                                                    ),
+                                                    contextFiles,
                                             activeFile =
-                                                    activeFile?.withPendingEditorText(
-                                                            pendingEditorTextByFileId
-                                                    ),
-                                            userPrompt = promptText,
-                                            terminalText = terminalText,
+                                                    contextActive,
+                                            userPrompt = "Recent conversation:\n$conversation\n\nCurrent request:\n$promptText",
+                                            terminalText = terminalSnapshot,
                                     )
-                            if (apiKey.isBlank()) {
-                                error("Add a personal API key to use ${selectedAiModel.label}.")
-                            }
-                            requestPersonalAiCompletion(selectedAiModel, fullPrompt, apiKey)
+                            requestPersonalAiCompletion(requestModel, fullPrompt, apiKey)
                         }
                     }
             result
@@ -1776,9 +1896,7 @@ private fun WebIdeApp(
                                 suggestedActionFromAiText(
                                         text = response,
                                         activeFile =
-                                                activeFile?.withPendingEditorText(
-                                                        pendingEditorTextByFileId
-                                                ),
+                                                contextActive,
                                 )
                     }
                     .onFailure { error -> aiError = friendlyAiError(error.message.orEmpty()) }
@@ -1787,57 +1905,75 @@ private fun WebIdeApp(
     }
 
     fun applyAiAction(action: AiSuggestedAction) {
+        if (aiBusy) return
         aiVerificationMessage = null
-        when (action) {
-            is AiSuggestedAction.RunTerminalCommand -> {
-                fullScreenMode = WebFullScreenMode.Terminal
-                submitTerminalCommand(action.command)
-                aiVerificationMessage = "Started suggested terminal command."
-            }
-            is AiSuggestedAction.ReplaceActiveFile -> {
-                val targetFile = activeFile
-                if (targetFile == null) {
-                    aiVerificationMessage =
-                            "Create or open a file before replacing the active file."
-                } else {
-                    updateActiveContent(action.code)
-                    aiVerificationMessage = "Replaced ${targetFile.name}."
-                }
-            }
-            is AiSuggestedAction.ApplyProjectFileChanges -> {
-                runCatching {
-                    action.changes
-                            .filter { it.operation == AiProjectFileOperation.Delete }
-                            .forEach { change ->
-                                val target = File(rootDirectory, change.path).canonicalFile
-                                files
-                                        .firstOrNull { file ->
-                                            samePath(file.filePath, target.absolutePath)
-                                        }
-                                        ?.let { file -> discardEditorState(file.id) }
-                            }
-                    applyAiProjectFileChanges(rootDirectory, action.changes)
-                }
-                        .onSuccess { message ->
-                            val selectedPath =
-                                    action.changes
-                                            .firstOrNull {
-                                                it.operation == AiProjectFileOperation.Write
-                                            }
-                                            ?.let { File(rootDirectory, it.path).absolutePath }
-                                            ?: activeFile?.filePath
-                            refreshFiles(
-                                    selectPath = selectedPath,
-                                    workingPath = workingDirectory.absolutePath
-                            )
-                            aiVerificationMessage = message
-                        }
-                        .onFailure { error ->
-                            aiVerificationMessage = error.message ?: "Could not apply AI changes."
-                        }
-            }
+        if (action is AiSuggestedAction.RunTerminalCommand) {
+            fullScreenMode = WebFullScreenMode.Terminal
+            submitTerminalCommand(action.command)
+            aiVerificationMessage = "Started suggested terminal command."
+            aiPendingAction = null
+            return
         }
-        aiPendingAction = null
+        val changes = when (action) {
+            is AiSuggestedAction.ApplyProjectFileChanges -> action.changes
+            is AiSuggestedAction.ReplaceActiveFile -> {
+                val path = aiActionTargetPath ?: activeFile?.filePath
+                if (path == null) { aiError = "Open a file before applying this edit."; return }
+                listOf(AiProjectFileChange(AiProjectFileOperation.Write, relativeWorkspacePath(rootDirectory, File(path)), action.code))
+            }
+            else -> return
+        }
+        aiBusy = true
+        aiApplying = true
+        coroutineScope.launch {
+            try {
+                flushPendingEditorEdits()
+                val result = withContext(Dispatchers.IO) {
+                    val targets = resolveAiEditTargets(rootDirectory, changes)
+                    val before = AiFileUndo.capture(targets)
+                    try {
+                        val message = applyAiProjectFileChanges(rootDirectory, changes, fileStore)
+                        Triple(message, AiFileUndo.completed(before), targets)
+                    } catch (error: Exception) {
+                        runCatching { AiFileUndo.completed(before).undo() }.onFailure(error::addSuppressed)
+                        throw error
+                    }
+                }
+                aiUndoChange = result.second
+                result.third.forEach { file ->
+                    files.firstOrNull { samePath(it.filePath, file.path) }?.let { discardEditorState(it.id) }
+                    editorSessions.invalidate(file.path)
+                    ProjectFileCache.invalidate(file)
+                }
+                refreshFiles(workingPath = workingDirectoryPath)
+                aiVerificationMessage = result.first
+                aiMessages += AiChatMessage(AiChatRole.Assistant, result.first, result.third.filter { it.exists() }.map { it.path })
+                aiPendingAction = null
+            } catch (error: Exception) { aiError = error.message ?: "Could not apply AI changes." }
+            finally { aiBusy = false; aiApplying = false }
+        }
+    }
+
+    fun undoAiChanges() {
+        val change = aiUndoChange ?: return
+        if (aiBusy) return
+        aiBusy = true
+        aiApplying = true
+        coroutineScope.launch {
+            try {
+                flushPendingEditorEdits()
+                withContext(Dispatchers.IO) { change.undo(fileStore) }
+                change.paths.forEach { path ->
+                    files.firstOrNull { samePath(it.filePath, path) }?.let { discardEditorState(it.id) }
+                    editorSessions.invalidate(path)
+                    ProjectFileCache.invalidate(File(path))
+                }
+                refreshFiles(workingPath = workingDirectoryPath)
+                aiUndoChange = null
+                aiVerificationMessage = "Undid the last AI file changes."
+            } catch (error: Exception) { aiError = error.message ?: "Could not undo AI changes." }
+            finally { aiBusy = false; aiApplying = false }
+        }
     }
 
     LaunchedEffect(
@@ -1857,6 +1993,124 @@ private fun WebIdeApp(
         saveCurrentWebIdeSession(persistTerminalText = browserPreviewReturnPending)
     }
 
+    PocketCodedWebTheme(darkTheme = ideTheme.isDark, themeName = ideTheme.name, dynamicColor = false) {
+    androidx.compose.runtime.CompositionLocalProvider(LocalEditorSessions provides editorSessions,
+        LocalWebDevelopmentActions provides WebDevelopmentActions(
+            fileStore = fileStore,
+            development = development,
+            source = { path, line ->
+                val target = runCatching { File(path).canonicalFile }.getOrNull()
+                if (target == null || !isSameOrInside(rootDirectory, target) || !target.isFile || target == rootDirectory) {
+                    development.error = "Source is outside this project or unavailable."
+                } else {
+                    development.sourceJump = WebSourceJump(target.path, line.coerceAtLeast(1))
+                    files.firstOrNull { samePath(it.filePath, target.path) }?.let { selectFile(it.id) }
+                        ?: refreshFiles(selectPath = target.path, workingPath = target.parent)
+                    development.panel = null
+                    fullScreenMode = WebFullScreenMode.Editor
+                }
+            },
+            startDevelopment = { mode, path, testPaths ->
+                development.panel = when (mode) { "debug" -> "Debugger"; "profile" -> "Profiler"; else -> "Tests" }
+                if (!development.starting) {
+                    development.starting = true
+                    development.error = null
+                    val snapshot = pendingFileEdits.values.toList()
+                    coroutineScope.launch {
+                        val result = withContext(Dispatchers.IO) { runCatching {
+                            check(!NodeSessionRuntime.isRunning()) { "Stop the current Node session before starting another run." }
+                            snapshot.forEach { fileStore.save(it).getOrThrow() }
+                            val target = File(path).canonicalFile
+                            require(target.extension.lowercase() in setOf("js", "cjs", "mjs")) { "Select a JavaScript .js, .cjs or .mjs file." }
+                            NodeSessionRuntime.start(rootDirectory, rootDirectory, target, emptyList(), mode = mode,
+                                breakpoints = development.breakpointList(), testFiles = testPaths.map(::File))
+                        } }
+                        result.onSuccess { shell ->
+                            development.error = shell.error.takeIf { it.isNotBlank() }
+                            terminalText = appendTerminalOutput(terminalText, appendShellResult(shell))
+                        }.onFailure { development.error = it.message }
+                        development.starting = false
+                    }
+                }
+            },
+            recover = { path, done ->
+                files.firstOrNull { samePath(it.filePath, path) }?.let { file ->
+                    pendingEditorSaveJobs.remove(file.id)?.cancel()
+                }
+                coroutineScope.launch {
+                    val result = withContext(Dispatchers.IO) { fileStore.recoverDraft(path) }
+                    result.onSuccess {
+                        files.firstOrNull { samePath(it.filePath, path) }?.let { file ->
+                            pendingFileEdits.remove(file.id)
+                            pendingEditorTextByFileId.remove(file.id)
+                            dirtyFileIds.remove(file.id)
+                        }
+                        editorSessions.invalidate(path)
+                        ProjectFileCache.invalidate(File(path))
+                        refreshFiles(selectPath = path, workingPath = File(path).parent)
+                    }
+                    done(result.exceptionOrNull()?.message)
+                }
+            },
+            discardRecovery = { path, done ->
+                val file = files.firstOrNull { samePath(it.filePath, path) }
+                val pending = file?.let { pendingEditorTextByFileId[it.id] }
+                file?.let { pendingEditorSaveJobs.remove(it.id)?.cancel() }
+                coroutineScope.launch {
+                    val result = withContext(Dispatchers.IO) { runCatching {
+                        fileStore.discardDraft(path).getOrThrow()
+                        if (pending != null) fileStore.save(path, pending).getOrThrow()
+                    } }
+                    if (result.isSuccess && file != null && pending != null && pendingEditorTextByFileId[file.id] == pending) {
+                        pendingEditorTextByFileId.remove(file.id)
+                        pendingFileEdits.remove(file.id)
+                        dirtyFileIds.remove(file.id)
+                        files.replaceFile(file.id) { withContent(content = pending, modifiedAt = System.currentTimeMillis()) }
+                        ProjectFileCache.invalidate(File(path))
+                    }
+                    done(result.exceptionOrNull()?.message)
+                }
+            },
+            clearOutput = { terminalText = "" },
+            history = commandHistory.entries,
+            recall = { terminalInput = it },
+            scripts = { runCatching {
+                val scripts = JSONObject(File(rootDirectory, "package.json").readText()).optJSONObject("scripts")
+                scripts?.keys()?.asSequence()?.toList().orEmpty()
+            }.getOrDefault(emptyList()) },
+            command = { command ->
+                val snapshot = pendingFileEdits.values.toList()
+                fullScreenMode = WebFullScreenMode.Terminal
+                coroutineScope.launch {
+                    val saved = withContext(Dispatchers.IO) {
+                        runCatching { snapshot.forEach { fileStore.save(it).getOrThrow() } }
+                    }
+                    saved.onSuccess { submitTerminalCommand(command) }
+                        .onFailure { terminalText = appendTerminalOutput(terminalText, "Save failed: ${it.message}") }
+                }
+            },
+            preview = {
+                android.webkit.WebView.setWebContentsDebuggingEnabled(true)
+                runActiveFile()
+            },
+            prepareSearch = { withContext(kotlinx.coroutines.NonCancellable) { flushPendingEditorEdits() } },
+            filesChanged = { changed ->
+                changed.forEach { file ->
+                    ProjectFileCache.invalidate(file)
+                    editorSessions.invalidate(file.path)
+                }
+                if (changed.isNotEmpty()) refreshFiles(workingPath = workingDirectoryPath)
+            },
+            refreshHistory = { commandHistory.refresh() },
+        )) {
+    WebDevelopmentPanels(development)
+    if (aiApplying) AlertDialog(
+        onDismissRequest = {}, title = { Text("Updating project files") },
+        text = { Row(verticalAlignment = Alignment.CenterVertically) {
+            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(12.dp)); Text("Saving AI file changes...")
+        } }, confirmButton = {},
+    )
     Box(
             modifier =
                     Modifier.fillMaxSize()
@@ -1868,6 +2122,25 @@ private fun WebIdeApp(
                             .systemBarsPadding(),
     ) {
         when (fullScreenMode) {
+            WebFullScreenMode.Explorer -> Column(Modifier.fillMaxSize().imePadding().padding(10.dp)) {
+                ExplorerPanel(
+                    files = files, activeFileId = activeFileId,
+                    rootDirectory = rootDirectory, workingDirectory = workingDirectory,
+                    search = fileSearch, expandedFolderPaths = expandedFolderPaths,
+                    palette = palette, modifier = Modifier.fillMaxSize(), directoryVersion = directoryVersion,
+                    expanded = true, onFullScreen = { fullScreenMode = null },
+                    onSearchChange = { fileSearch = it },
+                    onToggleFolder = { folder ->
+                        if (expandedFolderPaths.any { samePath(it, folder.path) })
+                            expandedFolderPaths.removeAll { samePath(it, folder.path) }
+                        else expandedFolderPaths.addUniquePath(folder.path)
+                    },
+                    onSelectFolder = ::selectFolder, onSelectFile = { selectFile(it); fullScreenMode = WebFullScreenMode.Editor },
+                    onNewFile = { newFileDialogOpen = true }, onNewFolder = { newFolderDialogOpen = true },
+                    onRenameFile = { renameFileTarget = it }, onRenameFolder = { renameFolderTarget = it },
+                    onDeleteFile = { deleteFileTarget = it }, onDeleteFolder = { deleteFolderTarget = it },
+                )
+            }
             WebFullScreenMode.Editor -> {
                 val currentFile = activeFile
                 if (currentFile == null) {
@@ -1918,12 +2191,18 @@ private fun WebIdeApp(
                             palette = palette,
                             modelOptions = aiModelOptions,
                             selectedModel = selectedAiModel,
-                            onSelectedModel = { selectedAiModelId = it.id },
+                            onSelectedModel = { if (!aiBusy) selectedAiModelId = it.id },
                             messages = aiMessages,
                             input = aiInput,
                             onInputChange = { aiInput = it },
                             userAiApiKey = userAiApiKey,
-                            onUserAiApiKeyChange = { userAiApiKey = it },
+                            endpointOverride = aiEndpointOverride, modelOverride = aiModelOverride,
+                            onSaveSettings = { key, endpoint, model ->
+                                aiConnections.save(selectedAiModel.connectionKey, selectedAiModel.id, key, endpoint, model)
+                                userAiApiKey = key.orEmpty(); aiEndpointOverride = endpoint; aiModelOverride = model
+                            },
+                            onClearChat = { aiMessages.clear(); aiPendingAction = null; aiError = null; aiVerificationMessage = null },
+                            canUndo = aiUndoChange != null, onUndo = ::undoAiChanges,
                             busy = aiBusy,
                             error = aiError,
                             pendingAction = aiPendingAction,
@@ -2134,6 +2413,8 @@ private fun WebIdeApp(
                 },
         )
     }
+    }
+}
 }
 
 private fun configureFirebaseAppCheck(context: Context) {
@@ -2264,6 +2545,7 @@ private fun PreviewDestinationDialog(
                         singleLine = true,
                         isError = link.isNotBlank() && normalizedLink == null,
                         modifier = Modifier.fillMaxWidth(),
+                    colors = readableFieldColors(),
                 )
                 Text(
                         text =
@@ -2275,6 +2557,7 @@ private fun PreviewDestinationDialog(
                         onClick = { normalizedLink?.let(onOpenLink) },
                         enabled = normalizedLink != null && !busy,
                         modifier = Modifier.fillMaxWidth(),
+                    colors = readableOutlinedButtonColors(),
                 ) { Text("Open link") }
             }
         }
@@ -2656,6 +2939,7 @@ private fun WebIdeHomeScreen(
                             onDeleteFile = onDeleteFile,
                             onDeleteFolder = onDeleteFolder,
                             directoryVersion = directoryVersion,
+                            onFullScreen = { onFullScreen(WebFullScreenMode.Explorer) },
                     )
                     ResizeHandle(
                             palette = palette,
@@ -2685,6 +2969,7 @@ private fun WebIdeHomeScreen(
                                 modifier = Modifier.weight(1f - explorerFraction),
                                 height = editorHeight,
                                 compact = true,
+                                darkMode = darkMode, nextThemeName = nextThemeName, onToggleTheme = onToggleTheme,
                                 onCodeChange = onCodeChange,
                                 onRunPreview = onRunPreview,
                                 onFullScreen = { onFullScreen(WebFullScreenMode.Editor) },
@@ -2706,6 +2991,7 @@ private fun WebIdeHomeScreen(
                             modifier = Modifier.fillMaxWidth(),
                             height = editorHeight,
                             compact = false,
+                            darkMode = darkMode, nextThemeName = nextThemeName, onToggleTheme = onToggleTheme,
                             onCodeChange = onCodeChange,
                             onRunPreview = onRunPreview,
                             onFullScreen = { onFullScreen(WebFullScreenMode.Editor) },
@@ -2728,6 +3014,7 @@ private fun WebIdeHomeScreen(
                     text = terminalText,
                     input = terminalInput,
                     height = terminalHeight,
+                    darkMode = darkMode, nextThemeName = nextThemeName, onToggleTheme = onToggleTheme,
                     onInputChange = onTerminalInputChange,
                     onSend = onTerminalCommandSubmit,
                     onFullScreen = { onFullScreen(WebFullScreenMode.Terminal) },
@@ -2892,13 +3179,16 @@ internal fun ExplorerPanel(
         onRenameFolder: (FolderTarget) -> Unit,
         onDeleteFile: (WebFile) -> Unit,
         onDeleteFolder: (FolderTarget) -> Unit,
+        expanded: Boolean = false,
+        onFullScreen: (() -> Unit)? = null,
 ) {
     var addMenuOpen by remember { mutableStateOf(false) }
+    var searchAndReplace by rememberSaveable { mutableStateOf(false) }
 
     Panel(
             palette = palette,
             modifier = modifier,
-    ) {
+    ) panelContent@{
         Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
@@ -2934,7 +3224,7 @@ internal fun ExplorerPanel(
                         onDismissRequest = { addMenuOpen = false },
                         containerColor = palette.elevatedPanel,
                 ) {
-                    DropdownMenuItem(
+                    DropdownMenuItem(colors = readableMenuItemColors(),
                             text = { Text("Create file", color = palette.text) },
                             leadingIcon = {
                                 Icon(Icons.Rounded.Description, null, tint = palette.accent)
@@ -2944,7 +3234,7 @@ internal fun ExplorerPanel(
                                 onNewFile()
                             },
                     )
-                    DropdownMenuItem(
+                    DropdownMenuItem(colors = readableMenuItemColors(),
                             text = { Text("Create folder", color = palette.text) },
                             leadingIcon = {
                                 Icon(
@@ -2959,6 +3249,29 @@ internal fun ExplorerPanel(
                             },
                     )
                 }
+            }
+            onFullScreen?.let { toggle ->
+                IconButton(onClick = toggle, modifier = Modifier.size(34.dp)) {
+                    Icon(if (expanded) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                        contentDescription = if (expanded) "Minimize explorer" else "Fullscreen explorer",
+                        tint = palette.text, modifier = Modifier.size(22.dp))
+                }
+            }
+        }
+        if (expanded) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = { searchAndReplace = false }, modifier = Modifier.weight(1f), colors = readableTextButtonColors()) {
+                    Text("Files", color = if (!searchAndReplace) palette.accent else palette.mutedText)
+                }
+                TextButton(onClick = { searchAndReplace = true }, modifier = Modifier.weight(1f), colors = readableTextButtonColors()) {
+                    Text("Search & Replace", color = if (searchAndReplace) palette.accent else palette.mutedText)
+                }
+            }
+            if (searchAndReplace) {
+                WebProjectSearchReplace(rootDirectory, workingDirectory,
+                    files.firstOrNull { it.id == activeFileId }?.let { File(it.filePath) },
+                    palette, Modifier.weight(1f))
+                return@panelContent
             }
         }
         Spacer(Modifier.height(10.dp))
@@ -2993,13 +3306,19 @@ internal fun ExplorerPanel(
                             }
                 }
         val currentFiles = remember(files.toList()) { files.associateBy { it.id } }
+        val measurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 512)
+        val labelStyle = androidx.compose.material3.LocalTextStyle.current.merge(TextStyle(fontSize = 13.sp))
         val density = LocalDensity.current
-        var treeWidth by remember(rootDirectory.absolutePath, search) { mutableStateOf(0.dp) }
-        fun recordLabelWidth(pixels: Float, depth: Int) {
-            val required = with(density) { pixels.toDp() } + (90 + depth * 14).dp
-            if (required > treeWidth) treeWidth = required
+        val treeWidth = remember(entries, measurer, labelStyle, density) {
+            entries.maxOfOrNull { entry ->
+                val (name, fixed) = when (entry) {
+                    is ExplorerEntry.Directory -> entry.target.name to (87 + entry.depth * 14).dp
+                    is ExplorerEntry.SourceFile -> entry.file.name to (84 + entry.depth * 14).dp
+                }
+                fixed + with(density) { measurer.measure(name, labelStyle, softWrap = false, maxLines = 1).size.width.toDp() }
+            } ?: 0.dp
         }
-        BoxWithConstraints(Modifier.fillMaxSize()) {
+        BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
             val contentWidth = maxOf(maxWidth, treeWidth)
             Box(Modifier.fillMaxSize().horizontalScroll(rememberScrollState())) {
                 LazyColumn(
@@ -3020,7 +3339,6 @@ internal fun ExplorerPanel(
                                     ExplorerFolderRow(
                                             folder = entry.target,
                                             depth = entry.depth,
-                                            onLabelWidth = { recordLabelWidth(it, entry.depth) },
                                             expanded = entry.expanded,
                                             selected =
                                                     samePath(
@@ -3045,7 +3363,6 @@ internal fun ExplorerPanel(
                                     ExplorerFileRow(
                                             file = currentFiles[entry.file.id] ?: entry.file,
                                             depth = entry.depth,
-                                            onLabelWidth = { recordLabelWidth(it, entry.depth) },
                                             selected = entry.file.id == activeFileId,
                                             palette = palette,
                                             onSelect = { onSelectFile(entry.file.id) },
@@ -3130,7 +3447,6 @@ private fun ExplorerFolderRow(
         onCreateFolder: () -> Unit,
         onRename: () -> Unit,
         onDelete: () -> Unit,
-        onLabelWidth: (Float) -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
@@ -3175,7 +3491,6 @@ private fun ExplorerFolderRow(
         Spacer(Modifier.width(8.dp))
         Text(
                 text = folder.name,
-                onTextLayout = { onLabelWidth(it.multiParagraph.maxIntrinsicWidth) },
                 color = palette.text,
                 fontSize = 13.sp,
                 maxLines = 1,
@@ -3199,7 +3514,7 @@ private fun ExplorerFolderRow(
                     onDismissRequest = { menuOpen = false },
                     containerColor = palette.elevatedPanel,
             ) {
-                DropdownMenuItem(
+                DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Create file", color = palette.text) },
                         leadingIcon = {
                             Icon(Icons.Rounded.Description, null, tint = palette.accent)
@@ -3209,7 +3524,7 @@ private fun ExplorerFolderRow(
                             onCreateFile()
                         },
                 )
-                DropdownMenuItem(
+                DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Create folder", color = palette.text) },
                         leadingIcon = {
                             Icon(
@@ -3223,7 +3538,7 @@ private fun ExplorerFolderRow(
                             onCreateFolder()
                         },
                 )
-                DropdownMenuItem(
+                DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Rename", color = palette.text) },
                         leadingIcon = { Icon(Icons.Rounded.Edit, null, tint = palette.text) },
                         onClick = {
@@ -3231,7 +3546,7 @@ private fun ExplorerFolderRow(
                             onRename()
                         },
                 )
-                DropdownMenuItem(
+                DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Delete", color = palette.error) },
                         leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = palette.error) },
                         onClick = {
@@ -3253,7 +3568,6 @@ private fun ExplorerFileRow(
         onSelect: () -> Unit,
         onRename: () -> Unit,
         onDelete: () -> Unit,
-        onLabelWidth: (Float) -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
@@ -3271,7 +3585,6 @@ private fun ExplorerFileRow(
         Spacer(Modifier.width(9.dp))
         Text(
                 text = file.name,
-                onTextLayout = { onLabelWidth(it.multiParagraph.maxIntrinsicWidth) },
                 color = palette.text,
                 fontSize = 13.sp,
                 maxLines = 1,
@@ -3295,7 +3608,7 @@ private fun ExplorerFileRow(
                     onDismissRequest = { menuOpen = false },
                     containerColor = palette.elevatedPanel,
             ) {
-                DropdownMenuItem(
+                DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Rename", color = palette.text) },
                         leadingIcon = { Icon(Icons.Rounded.Edit, null, tint = palette.text) },
                         onClick = {
@@ -3303,7 +3616,7 @@ private fun ExplorerFileRow(
                             onRename()
                         },
                 )
-                DropdownMenuItem(
+                DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Delete", color = palette.error) },
                         leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = palette.error) },
                         onClick = {
@@ -3338,60 +3651,74 @@ private fun WebCodeEditorPanel(
                 modifier.height(height)
             }
 
+    if (isDatabaseFileName(file.name)) {
+        Panel(palette, panelModifier, backgroundColor = palette.editorBackground) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Database", color = palette.text, modifier = Modifier.weight(1f))
+                IconButton(onClick = onFullScreen) {
+                    Icon(if (showKeyboardAccessory) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                        if (showKeyboardAccessory) "Minimize editor" else "Fullscreen editor", tint = palette.text)
+                }
+            }
+            SQLiteDataPanel(File(file.filePath), palette, Modifier.weight(1f))
+        }
+        return
+    }
     Panel(
             palette = palette,
             modifier = panelModifier,
+            backgroundColor = palette.editorBackground,
     ) {
-        Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                    imageVector = Icons.Rounded.Description,
-                    contentDescription = null,
-                    tint = palette.accent,
-                    modifier = Modifier.size(18.dp),
-            )
-            Spacer(Modifier.width(7.dp))
-            Text(
-                    text = codeEditorTitle(file.name, compact),
-                    color = palette.text,
-                    fontSize = if (compact) 16.sp else 18.sp,
-                    lineHeight = 21.sp,
-                    maxLines = if (compact) 3 else 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-            )
-            if (darkMode != null && onToggleTheme != null) {
-                IdeThemeCycleButton(
-                        darkMode = darkMode,
-                        nextThemeName = nextThemeName,
-                        buttonColor = palette.elevatedPanel,
-                        borderColor = palette.border,
-                        contentColor = palette.text,
-                        onClick = onToggleTheme,
-                        modifier = Modifier.size(28.dp),
-                        iconSize = 17.dp,
-                )
-                Spacer(Modifier.width(4.dp))
-            }
-            IconButton(onClick = onFullScreen, modifier = Modifier.size(34.dp)) {
-                Icon(
-                        imageVector = Icons.Rounded.Fullscreen,
-                        contentDescription = "Fullscreen editor",
-                        tint = palette.text,
-                        modifier = Modifier.size(22.dp),
-                )
-            }
-        }
-        Spacer(Modifier.height(8.dp))
-        HorizontalRule(palette)
-        Spacer(Modifier.height(7.dp))
         SmartCodeEditor(
                 file = file,
                 palette = palette,
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 showKeyboardAccessory = showKeyboardAccessory,
+                header = { tools ->
+                    @Composable fun editorActions() {
+                        if (darkMode != null && onToggleTheme != null) {
+                            IdeThemeCycleButton(
+                                    darkMode = darkMode,
+                                    nextThemeName = nextThemeName,
+                                    buttonColor = palette.elevatedPanel,
+                                    borderColor = palette.border,
+                                    contentColor = palette.text,
+                                    onClick = onToggleTheme,
+                                    modifier = Modifier.size(28.dp),
+                                    iconSize = 17.dp,
+                            )
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        tools()
+                        IconButton(onClick = onFullScreen, modifier = Modifier.size(34.dp)) {
+                            Icon(
+                                    imageVector = if (showKeyboardAccessory) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                                    contentDescription = if (showKeyboardAccessory) "Minimize editor" else "Fullscreen editor",
+                                    tint = palette.text,
+                                    modifier = Modifier.size(22.dp),
+                            )
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        WebFileIcon(file.name, palette, Modifier.size(18.dp))
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                                text = codeEditorTitle(file.name, false),
+                                color = palette.text,
+                                fontSize = if (compact) 16.sp else 18.sp,
+                                lineHeight = 21.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                        )
+                        if (!compact) editorActions()
+                    }
+                    if (compact) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically) { editorActions() }
+                    Spacer(Modifier.height(8.dp))
+                    HorizontalRule(palette)
+                    Spacer(Modifier.height(7.dp))
+                },
                 onCodeChange = onCodeChange,
         )
     }
@@ -3462,7 +3789,7 @@ private fun EmptyEditorPanel(
                 )
                 Button(
                         onClick = onNewFile,
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent),
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent, disabledContainerColor = palette.tab, disabledContentColor = palette.mutedText),
                         shape = RoundedCornerShape(8.dp),
                 ) {
                     Icon(
@@ -3484,15 +3811,40 @@ internal fun SmartCodeEditor(
         palette: WebPalette,
         modifier: Modifier = Modifier,
         showKeyboardAccessory: Boolean = false,
+        header: @Composable (tools: @Composable () -> Unit) -> Unit = { tools -> tools() },
         onCodeChange: (String) -> Unit,
 ) {
     val usePlatformEditor = remember(file.id) { file.content.length > 100_000 }
-    var editorValue by
-            remember(file.id) {
-                mutableStateOf(
-                        TextFieldValue(file.content, selection = TextRange(file.content.length))
-                )
+    val sessions = LocalEditorSessions.current
+    val sessionGeneration = sessions?.generation
+    val session = remember(file.filePath, sessions, sessionGeneration) {
+        sessions?.open(file.filePath, file.content) ?: EditorSession(file.content)
+    }
+    var editorValue by remember(session) { mutableStateOf(session.value) }
+    var editorFocused by remember(session) { mutableStateOf(false) }
+    var followCursor by remember(session) { mutableStateOf(session.followCursor) }
+    var caretRevealVersion by remember(session) { mutableIntStateOf(0) }
+    fun revealEditedCursor() {
+        followCursor = true
+        session.followCursor = true
+        caretRevealVersion++
+    }
+    val history = session.history
+    val developmentActions = LocalWebDevelopmentActions.current
+    val development = developmentActions?.development
+    val developmentScope = rememberCoroutineScope()
+    val fileBreakpoints = development?.breakpoints?.get(file.filePath).orEmpty()
+    fun toggleBreakpoint(line: Int) {
+        development?.toggleBreakpoint(file.filePath, line)
+        developmentScope.launch(Dispatchers.IO) {
+            if (development != null && NodeSessionRuntime.isRunningFor(development.root)) {
+                NodeSessionRuntime.debugCommand(development.root, "breakpoints", breakpoints = development.breakpointList())
             }
+        }
+    }
+    DisposableEffect(session) {
+        onDispose { session.value = editorValue }
+    }
     var completionsVisible by remember(file.id) { mutableStateOf(false) }
     var suppressCompletionsForText by remember(file.id) { mutableStateOf<String?>(null) }
     var diagnostics by remember(file.id) { mutableStateOf<List<CodeDiagnostic>>(emptyList()) }
@@ -3502,7 +3854,10 @@ internal fun SmartCodeEditor(
     LaunchedEffect(file.id, file.content) {
         if (file.content != editorValue.text) {
             val cursor = min(editorValue.selection.start, file.content.length).coerceAtLeast(0)
-            editorValue = TextFieldValue(file.content, selection = TextRange(cursor))
+            val updated = TextFieldValue(file.content, selection = TextRange(cursor))
+            history.record(editorValue, updated)
+            editorValue = updated
+            session.value = updated
             completionResult = EditorCompletionResult()
             completionsVisible = false
         }
@@ -3568,10 +3923,26 @@ internal fun SmartCodeEditor(
             textMetrics = metrics
         }
     }
-    val editorVerticalScroll = key(file.id) { rememberScrollState() }
-    val editorHorizontalScroll = key(file.id) { rememberScrollState() }
+    val editorVerticalScroll = key(file.id) { rememberScrollState(session.verticalScroll) }
+    val editorHorizontalScroll = key(file.id) { rememberScrollState(session.horizontalScroll) }
+    DisposableEffect(session, editorVerticalScroll, editorHorizontalScroll) {
+        onDispose {
+            if (!usePlatformEditor) {
+                session.verticalScroll = editorVerticalScroll.value
+                session.horizontalScroll = editorHorizontalScroll.value
+            }
+        }
+    }
     val density = LocalDensity.current
     var editorLayout by remember(file.id) { mutableStateOf<TextLayoutResult?>(null) }
+    val onGutterTap by rememberUpdatedState<(Offset) -> Unit>({ tap ->
+        editorLayout?.takeIf { it.layoutInput.text.text == editorValue.text }?.let { layout ->
+            val sourceY = tap.y + editorVerticalScroll.value
+            if (layout.lineCount > 0 && sourceY >= 0f && sourceY < layout.getLineBottom(layout.lineCount - 1)) {
+                toggleBreakpoint(layout.getLineForVerticalPosition(sourceY) + 1)
+            }
+        }
+    })
     var visibleCode by remember(file.id) { mutableStateOf(EditorHighlightWindow(0, 0)) }
     fun highlightCurrentSection() {
         if (editorVerticalScroll.isScrollInProgress || editorHorizontalScroll.isScrollInProgress)
@@ -3597,15 +3968,30 @@ internal fun SmartCodeEditor(
         }
     }
 
+    val sourceJump = development?.sourceJump
+    LaunchedEffect(sourceJump, file.filePath) {
+        if (sourceJump != null && samePath(sourceJump.file, file.filePath) && session.lastSourceJumpVersion != sourceJump.version) {
+            var offset = 0
+            repeat((sourceJump.line - 1).coerceAtMost(editorValue.text.length)) {
+                val next = editorValue.text.indexOf('\n', offset)
+                offset = if (next < 0) editorValue.text.length else next + 1
+            }
+            editorValue = editorValue.copy(selection = TextRange(offset), composition = null)
+            session.value = editorValue
+            revealEditedCursor()
+            session.lastSourceJumpVersion = sourceJump.version
+            if (!usePlatformEditor) editorVerticalScroll.scrollTo(with(density) { ((sourceJump.line - 1) * 20).sp.toPx().toInt() })
+        }
+    }
     val lineCount = textMetrics.lineCount
     val lineNumbers =
-            remember(lineCount, diagnostics, palette, usePlatformEditor) {
-                if (usePlatformEditor) AnnotatedString("") else diagnosticLineNumberText(lineCount, diagnostics, palette)
+            remember(lineCount, diagnostics, palette, usePlatformEditor, fileBreakpoints) {
+                if (usePlatformEditor) AnnotatedString("") else {
+                    val base = diagnosticLineNumberText(lineCount, diagnostics, palette)
+                    AnnotatedString(maskBreakpointLineNumbers(base.text, fileBreakpoints), base.spanStyles)
+                }
             }
-    val gutterWidth =
-            remember(lineCount) { maxOf(20.dp, (lineCount.toString().length * 8 + 10).dp) }
     val maxLineCharacters = textMetrics.longestLineLength.coerceAtLeast(48)
-    val editorContentWidth = maxOf(640.dp, (maxLineCharacters * 9).dp)
     val codeStyle =
             TextStyle(
                     color = palette.text,
@@ -3614,7 +4000,40 @@ internal fun SmartCodeEditor(
                     lineHeight = 20.sp,
                     platformStyle = PlatformTextStyle(includeFontPadding = false),
             )
+    val editorTextMeasurer = rememberTextMeasurer()
+    val gutterDigits = lineCount.toString().length
+    val measuredGutterWidth = remember(editorTextMeasurer, gutterDigits, codeStyle) {
+        editorTextMeasurer.measure("0".repeat(gutterDigits), codeStyle).size.width
+    }
+    val measuredCharacterWidth = remember(editorTextMeasurer, codeStyle) {
+        editorTextMeasurer.measure("M", codeStyle).size.width
+    }
+    val gutterWidth = (with(density) { measuredGutterWidth.toDp() } + 12.dp).coerceAtLeast(22.dp)
+    val editorContentWidth = maxOf(640.dp, with(density) { (maxLineCharacters * measuredCharacterWidth).toDp() } + 48.dp)
     val showQuickKeys = showKeyboardAccessory && WindowInsets.ime.getBottom(density) > 0
+    LaunchedEffect(
+            editorLayout, editorValue.selection, editorValue.text, editorFocused, followCursor,
+            caretRevealVersion, editorVerticalScroll.viewportSize, editorHorizontalScroll.viewportSize,
+            editorVerticalScroll.isScrollInProgress, editorHorizontalScroll.isScrollInProgress,
+            completionSurfaceVisible, showQuickKeys,
+    ) {
+        if (usePlatformEditor || !editorFocused || !followCursor ||
+                editorVerticalScroll.isScrollInProgress || editorHorizontalScroll.isScrollInProgress) return@LaunchedEffect
+        val layout = editorLayout ?: return@LaunchedEffect
+        if (layout.layoutInput.text.text != editorValue.text) return@LaunchedEffect
+        val cursor = layout.getCursorRect(editorValue.selection.end.coerceIn(0, editorValue.text.length))
+        val margin = with(density) { 12.dp.toPx() }
+        val vertical = editorCursorScrollTarget(editorVerticalScroll.value,
+                editorVerticalScroll.viewportSize, editorVerticalScroll.maxValue,
+                cursor.top, cursor.bottom, margin)
+        val horizontal = editorCursorScrollTarget(editorHorizontalScroll.value,
+                editorHorizontalScroll.viewportSize, editorHorizontalScroll.maxValue,
+                cursor.left, cursor.right.coerceAtLeast(cursor.left + 2f), margin)
+        // The viewport has already excluded the completion strip and keyboard. Reveal only
+        // the hidden caret, without animating or moving the surrounding page on each key.
+        if (vertical != editorVerticalScroll.value) editorVerticalScroll.scrollTo(vertical)
+        if (horizontal != editorHorizontalScroll.value) editorHorizontalScroll.scrollTo(horizontal)
+    }
     val editorBottomComfort = 16.dp
     val editorVisualTransformation =
             remember(
@@ -3638,7 +4057,10 @@ internal fun SmartCodeEditor(
         )
                 return
         val inserted = applyCompletion(editorValue, context, item)
+        history.record(editorValue, inserted)
         editorValue = inserted
+        session.value = inserted
+        revealEditedCursor()
         completionResult = EditorCompletionResult()
         suppressCompletionsForText = inserted.text
         completionsVisible = false
@@ -3649,7 +4071,10 @@ internal fun SmartCodeEditor(
         val previousValue = editorValue
         val textChanged = requestedValue.text !== previousValue.text
         val updatedValue = applySmartWebEditorChange(previousValue, requestedValue, file.name)
+        history.record(previousValue, updatedValue)
         editorValue = updatedValue
+        session.value = updatedValue
+        if (textChanged || updatedValue.selection != previousValue.selection) revealEditedCursor()
         if (textChanged || requestedValue.selection != previousValue.selection) highlightCurrentSection()
         if (textChanged) {
             suppressCompletionsForText = null
@@ -3660,13 +4085,48 @@ internal fun SmartCodeEditor(
         }
         if (updatedValue.text !== previousValue.text) onCodeChange(updatedValue.text)
     }
-    ManualScrollEditor(modifier = modifier) {
+    fun restoreEdit(redo: Boolean) {
+        val restored = (if (redo) history.redo(editorValue) else history.undo(editorValue)) ?: return
+        editorValue = restored
+        session.value = restored
+        revealEditedCursor()
+        completionResult = EditorCompletionResult()
+        completionsVisible = false
+        suppressCompletionsForText = restored.text
+        onCodeChange(restored.text)
+    }
+    ManualScrollEditor(modifier = modifier.onPreviewKeyEvent { event ->
+        if (event.type == KeyEventType.KeyDown && (event.isCtrlPressed || event.isMetaPressed)) {
+            when (event.key) {
+                Key.Z -> { restoreEdit(event.isShiftPressed); true }
+                Key.Y -> { restoreEdit(true); true }
+                else -> false
+            }
+        } else false
+    }) {
+        header {
+            WebDevelopmentMenu(file, editorValue.text, palette) { restored ->
+                val updated = TextFieldValue(restored, TextRange(minOf(editorValue.selection.end, restored.length)))
+                history.record(editorValue, updated)
+                editorValue = updated
+                session.value = updated
+                revealEditedCursor()
+                completionResult = EditorCompletionResult()
+                completionsVisible = false
+                onCodeChange(restored)
+            }
+        }
+
         if (usePlatformEditor) {
             key(file.id) { LargeFileCodeEditor(
                 value = editorValue,
+                session = session,
                 palette = palette,
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 highlight = { highlightWebSource(file.name, it, palette) },
+                breakpoints = fileBreakpoints,
+                onBreakpoint = ::toggleBreakpoint,
+                sourceJump = sourceJump?.takeIf { samePath(it.file, file.filePath) },
                 onValueChange = ::updateEditorValue,
             ) }
         } else
@@ -3674,21 +4134,34 @@ internal fun SmartCodeEditor(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
         ) {
             Box(
-                    modifier = Modifier.width(gutterWidth).fillMaxHeight().clipToBounds(),
+                    modifier = Modifier.width(gutterWidth).fillMaxHeight().clipToBounds()
+                        .pointerInput(file.filePath) {
+                            detectTapGestures { tap -> onGutterTap(tap) }
+                        },
             ) {
                 Text(
                         text = lineNumbers,
                         color = palette.subtleText,
                         style = codeStyle,
-                        textAlign = TextAlign.End,
+                        textAlign = TextAlign.Center,
                         modifier =
                                 Modifier.fillMaxWidth()
                                         .wrapContentHeight(unbounded = true, align = Alignment.Top)
                                         .graphicsLayer {
                                             translationY = -editorVerticalScroll.value.toFloat()
-                                        }
-                                        .padding(end = 3.dp),
+                                        },
                 )
+                Canvas(Modifier.fillMaxSize()) {
+                    val layout = editorLayout?.takeIf { it.layoutInput.text.text == editorValue.text }
+                            ?: return@Canvas
+                    for (line in fileBreakpoints) {
+                        val index = line - 1
+                        if (index !in 0 until layout.lineCount) continue
+                        val centerY = (layout.getLineTop(index) + layout.getLineBottom(index)) / 2f - editorVerticalScroll.value
+                        if (centerY in 0f..size.height) drawCircle(palette.error,
+                                radius = 3.dp.toPx(), center = Offset(size.width / 2f, centerY))
+                    }
+                }
             }
             Box(
                     modifier =
@@ -3706,7 +4179,8 @@ internal fun SmartCodeEditor(
                                 Modifier.width(editorContentWidth)
                                         .fillMaxHeight()
                                         .heightIn(min = 240.dp)
-                                        .verticalScroll(editorVerticalScroll),
+                                        .verticalScroll(editorVerticalScroll)
+                                        .testTag("editor-vertical-scroll"),
                 ) {
                     if (editorValue.text.isBlank()) {
                         Text(
@@ -3736,7 +4210,10 @@ internal fun SmartCodeEditor(
                             visualTransformation = editorVisualTransformation,
                             modifier =
                                     Modifier.fillMaxSize()
-                                            .pointerInput(file.id) {
+                                            .onFocusChanged {
+                                                editorFocused = it.isFocused
+                                            }
+                                            .pointerInput(file.id, session) {
                                                 // Observe taps without consuming editor selection
                                                 // or scrolling gestures.
                                                 awaitEachGesture {
@@ -3763,8 +4240,13 @@ internal fun SmartCodeEditor(
                                                                 dragged = true
                                                         val pressed =
                                                                 event.changes.any { it.pressed }
-                                                        if (!pressed && !dragged)
-                                                                highlightTouchedSection()
+                                                        if (dragged) {
+                                                            followCursor = false
+                                                            session.followCursor = false
+                                                        } else if (!pressed) {
+                                                            revealEditedCursor()
+                                                            highlightTouchedSection()
+                                                        }
                                                     } while (pressed)
                                                 }
                                             }
@@ -3803,8 +4285,15 @@ internal fun SmartCodeEditor(
                     palette = palette,
                     editorValue = editorValue,
                     fileName = file.name,
+                    canUndo = history.canUndo,
+                    canRedo = history.canRedo,
+                    onUndo = { restoreEdit(false) },
+                    onRedo = { restoreEdit(true) },
                     onEditorValueChange = { updated ->
+                        history.record(editorValue, updated)
                         editorValue = updated
+                        session.value = updated
+                        revealEditedCursor()
                         suppressCompletionsForText = updated.text
                         completionsVisible = false
                         onCodeChange(updated.text)
@@ -4101,10 +4590,14 @@ private fun InspectionStrip(
 }
 
 @Composable
-private fun EditorQuickKeys(
+internal fun EditorQuickKeys(
         palette: WebPalette,
         editorValue: TextFieldValue,
         fileName: String,
+        canUndo: Boolean = false,
+        canRedo: Boolean = false,
+        onUndo: () -> Unit = {},
+        onRedo: () -> Unit = {},
         modifier: Modifier = Modifier,
         onEditorValueChange: (TextFieldValue) -> Unit,
 ) {
@@ -4115,6 +4608,8 @@ private fun EditorQuickKeys(
             modifier = modifier.horizontalScroll(rememberScrollState()),
     ) {
         QuickKey("Tab", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "    ")) }
+        QuickKeyIcon(Icons.AutoMirrored.Rounded.Undo, "Undo", palette, canUndo, onUndo)
+        QuickKeyIcon(Icons.AutoMirrored.Rounded.Redo, "Redo", palette, canRedo, onRedo)
 
         when (language) {
             WebEditorLanguage.Html -> {
@@ -4157,7 +4652,7 @@ private fun EditorQuickKeys(
             else -> {}
         }
 
-        if (language != WebEditorLanguage.Html) {
+        if (language != WebEditorLanguage.Html && language != WebEditorLanguage.JavaScript) {
             QuickKey("{}", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "{", "}")) }
         }
 
@@ -4165,6 +4660,17 @@ private fun EditorQuickKeys(
         QuickKey("''", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "'", "'")) }
         QuickKey("=", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "=")) }
         QuickKey(".", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ".")) }
+        if (language !in setOf(WebEditorLanguage.Css, WebEditorLanguage.JavaScript)) {
+            QuickKey("()", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "(", ")")) }
+            QuickKey(";", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ";")) }
+        }
+        if (language != WebEditorLanguage.Css) {
+            QuickKey(":", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ":")) }
+            QuickKey("#", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "#")) }
+        }
+        listOf("_", "+", "-", "*", "\\").forEach { symbol ->
+            QuickKey(symbol, palette) { onEditorValueChange(insertCodeAtSelection(editorValue, symbol)) }
+        }
         QuickKey("/", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "/")) }
 
         if (language == WebEditorLanguage.JavaScript) {
@@ -4172,6 +4678,26 @@ private fun EditorQuickKeys(
             QuickKey("&", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "&")) }
             QuickKey("|", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "|")) }
         }
+    }
+}
+
+@Composable
+private fun QuickKeyIcon(
+        icon: ImageVector,
+        label: String,
+        palette: WebPalette,
+        enabled: Boolean,
+        onClick: () -> Unit,
+) {
+    Box(contentAlignment = Alignment.Center,
+            modifier = Modifier.size(width = 40.dp, height = 32.dp)
+                    .clip(RoundedCornerShape(9.dp))
+                    .background(palette.selectedTab)
+                    .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(9.dp))
+                    .clickable(enabled = enabled, role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)) {
+        Icon(icon, contentDescription = label,
+                tint = if (enabled) palette.text else palette.mutedText,
+                modifier = Modifier.size(22.dp))
     }
 }
 
@@ -4237,6 +4763,7 @@ private fun EmptyEditorFullScreen(
                 onClick = onBack,
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 shape = RoundedCornerShape(12.dp),
+            colors = readableOutlinedButtonColors(),
         ) { Text("Back") }
     }
 }
@@ -4288,7 +4815,7 @@ private fun WebEditorFullScreen(
                 nextThemeName = nextThemeName,
                 onToggleTheme = onToggleTheme,
         )
-        if (!keyboardVisible) {
+        if (!keyboardVisible && !isDatabaseFileName(activeFile.name)) {
             Spacer(Modifier.height(12.dp))
             RunPreviewButton(
                     palette = palette,
@@ -4404,6 +4931,7 @@ private fun WebTerminalPanel(
     Panel(
             palette = palette,
             modifier = panelModifier.bringIntoViewRequester(bringIntoViewRequester),
+            backgroundColor = palette.terminalBackground,
     ) {
         if (showHeader) {
             Row(
@@ -4416,6 +4944,7 @@ private fun WebTerminalPanel(
                         fontSize = 17.sp,
                         modifier = Modifier.weight(1f),
                 )
+                WebTerminalMenu(output = text, palette = palette)
                 if (sessionRunning) {
                     TextButton(
                             onClick = {
@@ -4439,7 +4968,7 @@ private fun WebTerminalPanel(
                             },
                             colors =
                                     ButtonDefaults.textButtonColors(
-                                            contentColor = Color(0xFFFF5252)
+                                            contentColor = palette.error
                                     )
                     ) {
                         Text(
@@ -4498,7 +5027,7 @@ private fun WebTerminalPanel(
 }
 
 @Composable
-private fun TerminalBody(
+internal fun TerminalBody(
         terminalText: String,
         terminalInput: String,
         palette: WebPalette,
@@ -4519,9 +5048,17 @@ private fun TerminalBody(
     var inputValue by remember {
         mutableStateOf(TextFieldValue(terminalInput, TextRange(terminalInput.length)))
     }
-    var inputCursorRect by remember { mutableStateOf<Rect?>(null) }
-    var inputLayoutVersion by remember { mutableIntStateOf(0) }
-    var revealInputAfterLayoutVersion by remember { mutableIntStateOf(-1) }
+    var inputFocused by remember { mutableStateOf(false) }
+    var inputLayout by remember { mutableStateOf<TextLayoutResult?>(null) }
+    var inputRowOrigin by remember { mutableStateOf<Offset?>(null) }
+    var inputFieldOrigin by remember { mutableStateOf<Offset?>(null) }
+    var inputRevealVersion by remember { mutableIntStateOf(0) }
+    val inputCursorRect = remember(inputLayout, inputValue.text, inputValue.selection) {
+        inputLayout?.takeIf { it.layoutInput.text.text == inputValue.text }?.let { layout ->
+            layout.getCursorRect(inputValue.selection.end.coerceIn(0, inputValue.text.length))
+        }
+    }
+    val imeBottom = WindowInsets.ime.getBottom(density)
     val showInputRow = !isRunning || isAwaitingInput || keepInputVisibleWhileRunning
     val activeInputLineStart =
             remember(terminalText, isAwaitingInput) {
@@ -4577,7 +5114,8 @@ private fun TerminalBody(
     val parsedTerminalText =
             remember(displayedTerminalText, promptText, palette) {
                 linkifyTerminalOutput(
-                        parseAnsiTerminalOutput(displayedTerminalText, promptText, palette)
+                        parseAnsiTerminalOutput(displayedTerminalText, promptText, palette),
+                        background = palette.terminalBackground,
                 )
             }
     val terminalTextStyle =
@@ -4599,14 +5137,20 @@ private fun TerminalBody(
     val longestTerminalLineLength =
             remember(longestOutputLineLength, activeInputPrefix, terminalInput, showInputRow) {
                 val inputLength =
-                        if (showInputRow) activeInputPrefix.length + terminalInput.length + 1 else 0
+                        if (showInputRow) activeInputPrefix.length +
+                                estimatedLongestLineLength(terminalInput, cap = 4_000) + 1 else 0
                 maxOf(longestOutputLineLength, inputLength, 1).coerceAtMost(4_000)
             }
+    val terminalTextMeasurer = rememberTextMeasurer()
+    val terminalCharacterWidth = remember(terminalTextMeasurer, terminalTextStyle) {
+        terminalTextMeasurer.measure("M", terminalTextStyle).size.width
+    }
 
     fun focusTerminalInput() {
         if (!showInputRow) return
         inputFocusRequester.requestFocus()
         keyboardController?.show()
+        inputRevealVersion++
         onTerminalFocusChange(true)
     }
 
@@ -4623,38 +5167,52 @@ private fun TerminalBody(
         }
     }
 
-    LaunchedEffect(inputLayoutVersion, revealInputAfterLayoutVersion) {
-        val revealAfter = revealInputAfterLayoutVersion
-        if (revealAfter < 0 || inputLayoutVersion < revealAfter) return@LaunchedEffect
+    LaunchedEffect(
+            inputCursorRect, inputRowOrigin, inputFieldOrigin, inputRevealVersion,
+            inputFocused, isAwaitingInput, showInputRow, imeBottom,
+            outputVerticalScroll.viewportSize, outputHorizontalScroll.viewportSize,
+            outputVerticalScroll.maxValue, outputHorizontalScroll.maxValue,
+            outputVerticalScroll.isScrollInProgress, outputHorizontalScroll.isScrollInProgress,
+    ) {
+        if (!showInputRow || (!inputFocused && !isAwaitingInput) ||
+                outputVerticalScroll.isScrollInProgress || outputHorizontalScroll.isScrollInProgress)
+                return@LaunchedEffect
         val cursor = inputCursorRect ?: return@LaunchedEffect
-        revealInputAfterLayoutVersion = -1
-        outputVerticalScroll.scrollTo(outputVerticalScroll.maxValue)
-        val prefixWidth = with(density) { (activeInputPrefix.length * 8.2f).dp.toPx() }
-        val margin = with(density) { 24.dp.toPx() }
-        val horizontalTarget =
-                minimalScrollTarget(
-                        current = outputHorizontalScroll.value,
-                        viewportSize = outputHorizontalScroll.viewportSize,
-                        contentMax = outputHorizontalScroll.maxValue,
-                        cursorStart = prefixWidth + cursor.left,
-                        cursorEnd = prefixWidth + cursor.right.coerceAtLeast(cursor.left + 2f),
-                        leadingInset = margin,
-                        trailingInset = margin,
-                )
-        if (horizontalTarget != outputHorizontalScroll.value) {
-            outputHorizontalScroll.scrollTo(horizontalTarget)
+        val rowOrigin = inputRowOrigin ?: return@LaunchedEffect
+        val fieldOrigin = inputFieldOrigin ?: return@LaunchedEffect
+        val target = terminalCursorScrollTargets(
+                horizontal = outputHorizontalScroll.value,
+                vertical = outputVerticalScroll.value,
+                viewportWidth = outputHorizontalScroll.viewportSize,
+                viewportHeight = outputVerticalScroll.viewportSize,
+                horizontalMax = outputHorizontalScroll.maxValue,
+                verticalMax = outputVerticalScroll.maxValue,
+                inputRowOrigin = rowOrigin,
+                inputFieldOrigin = fieldOrigin,
+                caret = cursor,
+                margin = with(density) { 12.dp.toPx() },
+        )
+        // Measure the prompt and input row instead of assuming the caret is at the end
+        // of the output. Earlier lines in multiline input must remain reachable too.
+        if (target.vertical != outputVerticalScroll.value) outputVerticalScroll.scrollTo(target.vertical)
+        if (target.horizontal != outputHorizontalScroll.value) {
+            outputHorizontalScroll.scrollTo(target.horizontal)
         }
     }
 
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        val estimatedContentWidth = (longestTerminalLineLength * 8.2f).dp + 20.dp
+        val estimatedContentWidth = with(density) {
+            (longestTerminalLineLength * terminalCharacterWidth).toDp()
+        } + 20.dp
         val terminalContentWidth = maxOf(maxWidth, estimatedContentWidth)
-        Box(modifier = Modifier.fillMaxSize().horizontalScroll(outputHorizontalScroll)) {
+        Box(modifier = Modifier.fillMaxSize().horizontalScroll(outputHorizontalScroll)
+                .testTag("terminal-horizontal-scroll")) {
             Box(
                     modifier =
                             Modifier.width(terminalContentWidth)
                                     .fillMaxHeight()
-                                    .verticalScroll(outputVerticalScroll),
+                                    .verticalScroll(outputVerticalScroll)
+                                    .testTag("terminal-vertical-scroll"),
             ) {
                 if (showInputRow) {
                     Box(
@@ -4678,7 +5236,9 @@ private fun TerminalBody(
                     if (showInputRow) {
                         Row(
                                 verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier.fillMaxWidth().onGloballyPositioned {
+                                    inputRowOrigin = it.positionInParent()
+                                },
                         ) {
                             Text(
                                     text = activeInputPrefix,
@@ -4690,27 +5250,21 @@ private fun TerminalBody(
                             BasicTextField(
                                     value = inputValue,
                                     onValueChange = { requested ->
-                                        val textChanged = requested.text !== inputValue.text
+                                        val changed = requested.text != inputValue.text ||
+                                                requested.selection != inputValue.selection
                                         inputValue = requested
-                                        if (textChanged) {
-                                            revealInputAfterLayoutVersion = inputLayoutVersion + 1
-                                        }
+                                        if (changed) inputRevealVersion++
                                         onTerminalInputChange(requested.text)
                                     },
                                     textStyle = terminalTextStyle,
                                     cursorBrush = SolidColor(palette.accent),
                                     onTextLayout = { result ->
-                                        if (revealInputAfterLayoutVersion >= 0) {
-                                            val offset =
-                                                    inputValue.selection.end.coerceIn(
-                                                            0,
-                                                            result.layoutInput.text.length
-                                                    )
-                                            inputCursorRect = result.getCursorRect(offset)
-                                            inputLayoutVersion += 1
-                                        }
+                                        val previous = inputLayout
+                                        if (previous == null || previous.layoutInput.text.text != result.layoutInput.text.text ||
+                                                previous.size != result.size || previous.layoutInput.style != result.layoutInput.style)
+                                                inputLayout = result
                                     },
-                                    singleLine = true,
+                                    singleLine = false,
                                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                                     keyboardActions =
                                             KeyboardActions(
@@ -4722,8 +5276,11 @@ private fun TerminalBody(
                                             Modifier.weight(1f)
                                                     .heightIn(min = 24.dp)
                                                     .alignByBaseline()
+                                                    .testTag("terminal-input")
+                                                    .onGloballyPositioned { inputFieldOrigin = it.positionInParent() }
                                                     .focusRequester(inputFocusRequester)
                                                     .onFocusChanged { focusState ->
+                                                        inputFocused = focusState.isFocused
                                                         onTerminalFocusChange(focusState.isFocused)
                                                     },
                             )
@@ -4787,7 +5344,12 @@ private fun AiChatFullScreen(
         input: String,
         onInputChange: (String) -> Unit,
         userAiApiKey: String,
-        onUserAiApiKeyChange: (String) -> Unit,
+        endpointOverride: String?,
+        modelOverride: String?,
+        onSaveSettings: (String?, String?, String?) -> Unit,
+        onClearChat: () -> Unit,
+        canUndo: Boolean,
+        onUndo: () -> Unit,
         busy: Boolean,
         error: String?,
         pendingAction: AiSuggestedAction?,
@@ -4798,6 +5360,25 @@ private fun AiChatFullScreen(
         onBack: () -> Unit,
 ) {
     val aiEnabled = !busy
+    val chatScroll = rememberLazyListState()
+    val chatScope = rememberCoroutineScope()
+    var clearConfirmation by remember { mutableStateOf(false) }
+    var wasNearLatest by remember { mutableStateOf(true) }
+    LaunchedEffect(chatScroll) {
+        snapshotFlow { !chatScroll.canScrollForward ||
+            (chatScroll.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= chatScroll.layoutInfo.totalItemsCount - 2
+        }.collect { wasNearLatest = it }
+    }
+    LaunchedEffect(messages.size, busy) {
+        if (wasNearLatest && (messages.isNotEmpty() || busy))
+            chatScroll.animateScrollToItem((messages.size + if (busy) 1 else 0).minus(1).coerceAtLeast(0))
+    }
+    if (clearConfirmation) AlertDialog(
+        onDismissRequest = { clearConfirmation = false }, title = { Text("Clear chat?") },
+        text = { Text("Remove this conversation and pending suggestions? Project files will stay as they are.") },
+        confirmButton = { TextButton(onClick = { clearConfirmation = false; onClearChat() }, colors = readableTextButtonColors()) { Text("Clear chat") } },
+        dismissButton = { TextButton(onClick = { clearConfirmation = false }, colors = readableTextButtonColors()) { Text("Cancel") } },
+    )
 
     Column(
             modifier =
@@ -4817,7 +5398,9 @@ private fun AiChatFullScreen(
                     modelOptions = modelOptions,
                     hasApiKey = userAiApiKey.isNotBlank(),
                     onChangeApiKey = { apiKeyEditRequest += 1L },
-                    onSelectModel = onSelectedModel,
+                    onSelectModel = { if (!busy) onSelectedModel(it) },
+                    onClearChat = { clearConfirmation = true },
+                    canClear = messages.isNotEmpty() && !busy,
                     onBack = onBack,
             )
             Spacer(Modifier.height(8.dp))
@@ -4825,11 +5408,20 @@ private fun AiChatFullScreen(
                     palette = palette,
                     selectedModel = selectedModel,
                     currentKey = userAiApiKey,
-                    onKeyChange = onUserAiApiKeyChange,
+                    endpointOverride = endpointOverride, modelOverride = modelOverride,
+                    onSave = onSaveSettings,
                     editRequest = apiKeyEditRequest,
             )
+            if (userAiApiKey.isBlank() && (selectedModel.label != "Custom / Ollama" || endpointOverride.isNullOrBlank())) {
+                TextButton(onClick = { apiKeyEditRequest++ }, colors = readableTextButtonColors()) { Text("Configure AI connection", color = palette.accent) }
+            }
             Spacer(Modifier.height(8.dp))
+            if (canUndo) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Last AI file changes", color = palette.mutedText, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = onUndo, enabled = !busy, colors = readableTextButtonColors()) { Text("Undo AI changes") }
+            }
             LazyColumn(
+                    state = chatScroll,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
@@ -4855,7 +5447,11 @@ private fun AiChatFullScreen(
                     }
                 }
             }
-            pendingAction?.let { action ->
+            if (chatScroll.canScrollForward) TextButton(onClick = {
+                chatScope.launch { chatScroll.animateScrollToItem((messages.size + if (busy) 1 else 0).minus(1).coerceAtLeast(0)) }
+            }, modifier = Modifier.align(Alignment.End), colors = readableTextButtonColors()) { Text("Latest messages") }
+            verificationMessage?.let { Text(it, color = palette.success, fontSize = 12.sp) }
+            pendingAction?.takeIf { !busy }?.let { action ->
                 Spacer(Modifier.height(8.dp))
                 AiActionApproval(
                         palette = palette,
@@ -4869,10 +5465,22 @@ private fun AiChatFullScreen(
                 Text(text = it, color = palette.error, fontSize = 12.sp)
             }
             Spacer(Modifier.height(8.dp))
+            if (messages.size <= 1 && input.isBlank() && !busy) Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                listOf("Explain this project", "Find bugs", "Suggest tests").forEach { prompt ->
+                    OutlinedButton(onClick = { onInputChange(prompt) }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp), colors = readableOutlinedButtonColors()) {
+                        Text(prompt, fontSize = 11.sp)
+                    }
+                }
+            }
+            Text("Project context is included when you send a message.", color = palette.subtleText, fontSize = 10.sp,
+                modifier = Modifier.padding(bottom = 6.dp))
             AiComposer(
                     palette = palette,
                     input = input,
                     enabled = aiEnabled,
+                    canSend = userAiApiKey.isNotBlank() || (selectedModel.label == "Custom / Ollama" && !endpointOverride.isNullOrBlank()),
                     onInputChange = onInputChange,
                     onSend = onSend,
             )
@@ -4882,149 +5490,57 @@ private fun AiChatFullScreen(
 
 @Composable
 private fun AiChatHeader(
-        palette: WebPalette,
-        selectedModel: AiModelOption,
-        modelOptions: List<AiModelOption>,
-        hasApiKey: Boolean,
-        onChangeApiKey: () -> Unit,
-        onSelectModel: (AiModelOption) -> Unit,
-        onBack: () -> Unit,
+    palette: WebPalette,
+    selectedModel: AiModelOption,
+    modelOptions: List<AiModelOption>,
+    hasApiKey: Boolean,
+    onChangeApiKey: () -> Unit,
+    onSelectModel: (AiModelOption) -> Unit,
+    onClearChat: () -> Unit,
+    canClear: Boolean,
+    onBack: () -> Unit,
 ) {
-    var providerMenuOpen by remember { mutableStateOf(false) }
-    var geminiModelMenuOpen by remember { mutableStateOf(false) }
-    val geminiOptions =
-            remember(modelOptions) { modelOptions.filter { it.provider == AiProvider.Gemini } }
-    val providerOptions =
-            remember(modelOptions) {
-                listOfNotNull(geminiOptions.firstOrNull()) +
-                        modelOptions.filter { it.provider != AiProvider.Gemini }
-            }
-    val isGemini = selectedModel.provider == AiProvider.Gemini
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                    Icons.Rounded.AutoAwesome,
-                    null,
-                    tint = palette.accent,
-                    modifier = Modifier.size(22.dp)
-            )
-            Spacer(Modifier.width(9.dp))
-            Text(
-                    "AI Chat",
-                    color = palette.text,
-                    fontSize = 19.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f)
-            )
-            IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Rounded.Close, contentDescription = "Close AI chat", tint = palette.text)
-            }
+    var settingsOpen by remember { mutableStateOf(false) }
+    val menuScroll = rememberScrollState()
+    LaunchedEffect(settingsOpen) { if (settingsOpen) menuScroll.scrollTo(0) }
+    val geminiOptions = remember(modelOptions) { modelOptions.filter { it.provider == AiProvider.Gemini } }
+    val providers = remember(modelOptions) { listOfNotNull(geminiOptions.firstOrNull()) + modelOptions.filter { it.provider != AiProvider.Gemini } }
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Icon(Icons.Rounded.AutoAwesome, null, tint = palette.accent, modifier = Modifier.size(22.dp))
+        Spacer(Modifier.width(9.dp))
+        Column(Modifier.weight(1f)) {
+            Text("AI Chat", color = palette.text, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+            Text(selectedModel.label, color = palette.mutedText, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
-        Spacer(Modifier.height(8.dp))
-        Box(modifier = Modifier.fillMaxWidth()) {
-            OutlinedButton(
-                    onClick = { providerMenuOpen = true },
-                    shape = RoundedCornerShape(10.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 10.dp),
-                    modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                            if (isGemini) "Google Gemini" else selectedModel.label,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = palette.text
-                    )
-                    Text(
-                            if (isGemini) "Google AI models — add a key, then choose a version"
-                            else selectedModel.description,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = palette.mutedText,
-                            fontSize = 11.sp,
-                    )
-                }
-                if (hasApiKey) {
-                    TextButton(
-                            onClick = onChangeApiKey,
-                            contentPadding = PaddingValues(horizontal = 6.dp),
-                            modifier = Modifier.height(28.dp)
-                    ) { Text("Change API key", fontSize = 11.sp, maxLines = 1) }
-                }
-                Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.mutedText)
+        Box {
+            IconButton(onClick = { settingsOpen = true }, modifier = Modifier.size(40.dp)) {
+                Icon(Icons.Rounded.Settings, "AI settings", tint = palette.accent)
             }
-            DropdownMenu(
-                    expanded = providerMenuOpen,
-                    onDismissRequest = { providerMenuOpen = false },
-                    containerColor = palette.elevatedPanel,
-            ) {
-                providerOptions.forEach { option ->
-                    val optionIsGemini = option.provider == AiProvider.Gemini
-                    DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text(
-                                            if (optionIsGemini) "Google Gemini" else option.label,
-                                            color = palette.text
-                                    )
-                                    Text(
-                                            if (optionIsGemini) "Gemini Flash, Flash-Lite and Pro"
-                                            else option.description,
-                                            color = palette.mutedText,
-                                            fontSize = 11.sp
-                                    )
-                                }
-                            },
-                            onClick = {
-                                onSelectModel(option)
-                                providerMenuOpen = false
-                            },
-                    )
+            DropdownMenu(settingsOpen, { settingsOpen = false }, containerColor = palette.elevatedPanel, scrollState = menuScroll,
+                modifier = Modifier.heightIn(max = 440.dp)) {
+                DropdownMenuItem(colors = readableMenuItemColors(), text = { Text("API settings", color = palette.text) },
+                    leadingIcon = { Icon(Icons.Rounded.VpnKey, null, tint = palette.accent) },
+                    onClick = { settingsOpen = false; onChangeApiKey() })
+                DropdownMenuItem(colors = readableMenuItemColors(), text = { Text("Clear chat", color = palette.text) }, enabled = canClear,
+                    leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = palette.mutedText) },
+                    onClick = { settingsOpen = false; onClearChat() })
+                Text("Provider", color = palette.mutedText, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                providers.forEach { option ->
+                    DropdownMenuItem(colors = readableMenuItemColors(), text = { Text(if (option.provider == AiProvider.Gemini) "Google Gemini" else option.label,
+                        color = if (option.provider == selectedModel.provider && (option.provider == AiProvider.Gemini || option.id == selectedModel.id)) palette.accent else palette.text) },
+                        onClick = { onSelectModel(option); settingsOpen = false })
                 }
-            }
-        }
-        if (isGemini && hasApiKey) {
-            Spacer(Modifier.height(7.dp))
-            Box(modifier = Modifier.fillMaxWidth()) {
-                OutlinedButton(
-                        onClick = { geminiModelMenuOpen = true },
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                            "Gemini model: ${selectedModel.label}",
-                            color = palette.text,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 1
-                    )
-                    Icon(Icons.Rounded.KeyboardArrowDown, null, tint = palette.mutedText)
-                }
-                DropdownMenu(
-                        expanded = geminiModelMenuOpen,
-                        onDismissRequest = { geminiModelMenuOpen = false },
-                        containerColor = palette.elevatedPanel,
-                ) {
+                if (selectedModel.provider == AiProvider.Gemini) {
+                    Text("Gemini model", color = palette.mutedText, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
                     geminiOptions.forEach { option ->
-                        DropdownMenuItem(
-                                text = {
-                                    Column {
-                                        Text(option.label, color = palette.text)
-                                        Text(
-                                                option.description,
-                                                color = palette.mutedText,
-                                                fontSize = 11.sp
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    onSelectModel(option)
-                                    geminiModelMenuOpen = false
-                                },
-                        )
+                        DropdownMenuItem(colors = readableMenuItemColors(), text = { Text(option.label, color = if (option.id == selectedModel.id) palette.accent else palette.text) },
+                            onClick = { onSelectModel(option); settingsOpen = false })
                     }
                 }
             }
+        }
+        IconButton(onClick = onBack, modifier = Modifier.size(36.dp)) {
+            Icon(Icons.Rounded.Close, "Close AI chat", tint = palette.text)
         }
     }
 }
@@ -5075,6 +5591,9 @@ private fun AiMessageBubble(
         palette: WebPalette,
 ) {
     val isUser = message.role == AiChatRole.User
+    val clipboard = LocalClipboardManager.current
+    val actions = LocalWebDevelopmentActions.current
+    val visibleText = remember(message.text, isUser) { if (isUser) message.text else aiVisibleResponseText(message.text) }
     Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
@@ -5098,6 +5617,9 @@ private fun AiMessageBubble(
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Medium
             )
+            IconButton(onClick = { clipboard.setText(AnnotatedString(visibleText)) }, modifier = Modifier.size(32.dp)) {
+                Icon(Icons.Rounded.ContentCopy, if (isUser) "Copy message" else "Copy response", tint = palette.mutedText, modifier = Modifier.size(16.dp))
+            }
         }
         Box(
                 modifier =
@@ -5134,6 +5656,18 @@ private fun AiMessageBubble(
                             fontSize = 13.sp,
                             lineHeight = 18.sp,
                     )
+                }
+                if (message.modifiedFiles.isNotEmpty()) {
+                    Text("Files changed", color = palette.mutedText, fontSize = 11.sp)
+                    Row(Modifier.horizontalScroll(rememberScrollState())) {
+                        message.modifiedFiles.forEach { path ->
+                            TextButton(onClick = { actions?.source?.invoke(path, 1) }, colors = readableTextButtonColors()) {
+                                WebFileIcon(File(path).name, palette, Modifier.size(14.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text(actions?.fileStore?.projectDirectory?.let { File(path).relativeToOrSelf(it).invariantSeparatorsPath } ?: File(path).name)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -5379,116 +5913,72 @@ private fun AiActionFileRow(
 
 @Composable
 private fun AiPersonalKeySection(
-        palette: WebPalette,
-        selectedModel: AiModelOption,
-        currentKey: String,
-        onKeyChange: (String) -> Unit,
-        editRequest: Long,
+    palette: WebPalette,
+    selectedModel: AiModelOption,
+    currentKey: String?,
+    endpointOverride: String?,
+    modelOverride: String?,
+    onSave: (String?, String?, String?) -> Unit,
+    editRequest: Long,
 ) {
-    var isEditing by remember { mutableStateOf(false) }
-    var keyInput by remember(selectedModel, currentKey) { mutableStateOf(currentKey) }
+    var editing by remember(selectedModel) { mutableStateOf(false) }
+    var key by remember(selectedModel, currentKey) { mutableStateOf(currentKey.orEmpty()) }
+    var endpoint by remember(selectedModel, endpointOverride) { mutableStateOf(endpointOverride ?: selectedModel.defaultEndpoint) }
+    var model by remember(selectedModel, modelOverride) { mutableStateOf(modelOverride ?: selectedModel.id) }
+    var settingsError by remember(selectedModel) { mutableStateOf<String?>(null) }
     val uriHandler = LocalUriHandler.current
-    val keyPortal = remember(selectedModel) { aiKeyPortal(selectedModel) }
-
-    LaunchedEffect(editRequest) { if (editRequest > 0L) isEditing = true }
-
-    if (currentKey.isNotBlank() && !isEditing) return
-
-    Surface(
-            color = palette.elevatedPanel,
-            shape = RoundedCornerShape(8.dp),
-            border = BorderStroke(1.dp, palette.border),
-            modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                        imageVector = Icons.Rounded.VpnKey,
-                        contentDescription = null,
-                        tint = palette.accent,
-                        modifier = Modifier.size(16.dp),
-                )
-                Spacer(Modifier.width(8.dp))
-                Text(
-                        "${selectedModel.label} API Settings",
-                        color = palette.text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        modifier = Modifier.weight(1f),
-                )
-                if (!isEditing) {
-                    TextButton(
-                            onClick = { isEditing = true },
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                            modifier = Modifier.height(28.dp),
-                    ) { Text(if (currentKey.isBlank()) "Add Key" else "Change", fontSize = 12.sp) }
-                }
+    val portal = remember(selectedModel) { aiKeyPortal(selectedModel) }
+    val custom = selectedModel.label == "Custom / Ollama"
+    val configured = if (custom) !endpointOverride.isNullOrBlank() else !currentKey.isNullOrBlank()
+    LaunchedEffect(editRequest) { if (editRequest > 0) editing = true }
+    if (editing) AlertDialog(
+        onDismissRequest = { editing = false },
+        title = { Text("AI settings") },
+        containerColor = palette.panel, titleContentColor = palette.text, textContentColor = palette.text,
+        text = {
+            Column(Modifier.fillMaxWidth().heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(selectedModel.label, color = palette.accent, fontWeight = FontWeight.SemiBold)
+                OutlinedTextField(endpoint, { endpoint = it; settingsError = null },
+                    label = { Text("API endpoint URL") }, modifier = Modifier.fillMaxWidth(),
+                    supportingText = { Text(if (custom) "Ollama: http://your-computer-IP:11434/v1/chat/completions. Use an address reachable from this phone."
+                        else if (selectedModel.provider == AiProvider.AzureOpenAi) "Full deployment URL with /chat/completions and api-version."
+                        else "Provider API URL; Gemini uses its API base URL.") }, colors = readableFieldColors())
+                OutlinedTextField(model, { model = it; settingsError = null }, label = { Text("Model / deployment name") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(), colors = readableFieldColors())
+                OutlinedTextField(key, { key = it }, label = { Text(if (custom) "API key (optional)" else "Provider API key") },
+                    visualTransformation = PasswordVisualTransformation(), singleLine = true, modifier = Modifier.fillMaxWidth(), colors = readableFieldColors())
+                Text("Settings are saved on this device for this provider. Requests go directly to the configured server.",
+                    color = palette.mutedText, fontSize = 11.sp)
+                Text(portal.label, color = palette.accent, fontSize = 12.sp,
+                    modifier = Modifier.clickable { uriHandler.openUri(portal.url) })
+                settingsError?.let { Text(it, color = palette.error, fontSize = 12.sp) }
             }
-
-            if (isEditing) {
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                        value = keyInput,
-                        onValueChange = { keyInput = it },
-                        label = { Text("API key", fontSize = 12.sp) },
-                        placeholder = { Text("Paste your key here", fontSize = 12.sp) },
-                        singleLine = true,
-                        textStyle = TextStyle(fontSize = 13.sp),
-                        shape = RoundedCornerShape(6.dp),
-                        modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                        modifier = Modifier.fillMaxWidth()
-                ) {
-                    TextButton(
-                            onClick = {
-                                isEditing = false
-                                keyInput = currentKey
-                            }
-                    ) { Text("Cancel", color = palette.mutedText, fontSize = 12.sp) }
-                    Button(
-                            onClick = {
-                                onKeyChange(keyInput.trim())
-                                isEditing = false
-                            },
-                            shape = RoundedCornerShape(6.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                            modifier = Modifier.height(32.dp),
-                    ) { Text("Save Key", fontSize = 12.sp) }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val validation = runCatching {
+                    validatedAiEndpoint(endpoint, selectedModel.provider == AiProvider.AzureOpenAi)
+                    require(model.isNotBlank()) { "Enter a model or deployment name." }
+                    require(custom || key.isNotBlank()) { "Enter this provider's API key." }
                 }
-            } else if (currentKey.isBlank()) {
-                Text(
-                        "Add your own key. Requests go directly to ${selectedModel.label}.",
-                        color = palette.mutedText,
-                        fontSize = 11.sp,
-                        lineHeight = 15.sp,
-                        modifier = Modifier.padding(top = 4.dp),
-                )
-            }
-
-            Text(
-                    text = keyPortal.label,
-                    style =
-                            TextStyle(
-                                    color = palette.accent,
-                                    fontSize = 12.sp,
-                                    textDecoration = TextDecoration.Underline
-                            ),
-                    modifier =
-                            Modifier.padding(top = 10.dp).clickable {
-                                uriHandler.openUri(keyPortal.url)
-                            },
-            )
-        }
-    }
+                if (validation.isFailure) settingsError = validation.exceptionOrNull()?.message
+                else { onSave(key.trim().ifBlank { null }, endpoint.trim(), model.trim()); editing = false }
+            }, colors = readableTextButtonColors()) { Text("Save settings") }
+        },
+        dismissButton = { TextButton(onClick = {
+            editing = false; key = currentKey.orEmpty(); endpoint = endpointOverride ?: selectedModel.defaultEndpoint
+            model = modelOverride ?: selectedModel.id; settingsError = null
+        }, colors = readableTextButtonColors()) { Text("Cancel") } },
+    )
 }
 
 private data class AiKeyPortal(val label: String, val url: String)
 
 private fun aiKeyPortal(model: AiModelOption): AiKeyPortal =
         when {
+            model.label == "Custom / Ollama" -> AiKeyPortal("Ollama documentation", "https://ollama.com/")
+            model.provider == AiProvider.AzureOpenAi -> AiKeyPortal("Azure Portal", "https://portal.azure.com/")
             model.provider == AiProvider.Gemini ->
                     AiKeyPortal(
                             "Get a free API key at Google AI Studio",
@@ -5506,6 +5996,7 @@ private fun aiKeyPortal(model: AiModelOption): AiKeyPortal =
                     )
             model.endpoint.contains("groq.com") ->
                     AiKeyPortal("Get a free API key at GroqCloud", "https://console.groq.com/keys")
+            model.endpoint.contains("together.xyz") -> AiKeyPortal("Together API keys", "https://api.together.xyz/settings/api-keys")
             model.endpoint.contains("mistral.ai") ->
                     AiKeyPortal(
                             "Get a free API key at Mistral Console",
@@ -5567,8 +6058,8 @@ private fun AiActionApproval(
         )
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onDismiss) { Text("Dismiss") }
-            OutlinedButton(onClick = onApply) {
+            OutlinedButton(onClick = onDismiss, colors = readableOutlinedButtonColors()) { Text("Dismiss") }
+            OutlinedButton(onClick = onApply, colors = readableOutlinedButtonColors()) {
                 Text(
                         text =
                                 when (action) {
@@ -5588,6 +6079,7 @@ private fun AiComposer(
         palette: WebPalette,
         input: String,
         enabled: Boolean,
+        canSend: Boolean = true,
         onInputChange: (String) -> Unit,
         onSend: () -> Unit,
 ) {
@@ -5607,7 +6099,7 @@ private fun AiComposer(
                         ),
                 cursorBrush = SolidColor(palette.accent),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { onSend() }),
+                keyboardActions = KeyboardActions(onSend = { if (enabled && canSend && input.isNotBlank()) onSend() }),
                 decorationBox = { inner ->
                     Box(
                             modifier =
@@ -5635,19 +6127,19 @@ private fun AiComposer(
         Spacer(Modifier.width(8.dp))
         IconButton(
                 onClick = onSend,
-                enabled = enabled && input.isNotBlank(),
+                enabled = enabled && canSend && input.isNotBlank(),
                 modifier =
                         Modifier.size(44.dp)
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(
-                                        if (enabled && input.isNotBlank()) palette.accent
+                                        if (enabled && canSend && input.isNotBlank()) palette.accent
                                         else palette.tab
                                 ),
         ) {
             Icon(
                     imageVector = Icons.AutoMirrored.Rounded.Send,
                     contentDescription = "Send AI message",
-                    tint = if (enabled && input.isNotBlank()) Color.White else palette.mutedText,
+                    tint = if (enabled && canSend && input.isNotBlank()) palette.onAccent else palette.mutedText,
             )
         }
     }
@@ -6229,7 +6721,7 @@ private fun livePreviewSignature(
 }
 
 private fun syncPreviewProjectFilesToDisk(rootDirectory: File, files: List<WebFile>) {
-    files.forEach { file ->
+    files.filterNot { isDatabaseFileName(it.name) }.forEach { file ->
         val target = runCatching { File(file.filePath).canonicalFile }.getOrNull() ?: return@forEach
         if (!isSameOrInside(rootDirectory, target)) return@forEach
         if (target.isFile && target.lastModified() == file.modifiedAt) return@forEach
@@ -6876,7 +7368,11 @@ private fun isLivePreviewFile(fileName: String): Boolean {
 }
 
 private fun runButtonLabelFor(file: WebFile?): String {
-    return if (file != null && isLivePreviewFile(file.name)) "Preview" else "Run Code"
+    return when {
+        file != null && isDatabaseFileName(file.name) -> "Open database"
+        file != null && isLivePreviewFile(file.name) -> "Preview"
+        else -> "Run Code"
+    }
 }
 
 private fun terminalRunnableJavaScript(file: WebFile, rootDirectory: File): String {
@@ -7125,6 +7621,7 @@ private fun NameInputDialog(
                             keyboardActions =
                                     KeyboardActions(onDone = { error = onConfirm(value) }),
                             modifier = Modifier.fillMaxWidth(),
+                        colors = readableFieldColors(),
                     )
                     error?.let {
                         Text(
@@ -7139,12 +7636,12 @@ private fun NameInputDialog(
             confirmButton = {
                 Button(
                         onClick = { error = onConfirm(value) },
-                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent),
+                        colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent, disabledContainerColor = palette.tab, disabledContentColor = palette.mutedText),
                         shape = RoundedCornerShape(8.dp),
                 ) { Text("Save") }
             },
             dismissButton = {
-                TextButton(onClick = onDismiss) { Text("Cancel", color = palette.text) }
+                TextButton(onClick = onDismiss, colors = readableTextButtonColors()) { Text("Cancel", color = palette.text) }
             },
     )
 }
@@ -7163,10 +7660,10 @@ private fun DeleteConfirmDialog(
             title = { Text(title, color = palette.text) },
             text = { Text(body, color = palette.mutedText) },
             confirmButton = {
-                TextButton(onClick = onConfirm) { Text("Delete", color = palette.error) }
+                TextButton(onClick = onConfirm, colors = readableTextButtonColors()) { Text("Delete", color = palette.error) }
             },
             dismissButton = {
-                TextButton(onClick = onDismiss) { Text("Cancel", color = palette.text) }
+                TextButton(onClick = onDismiss, colors = readableTextButtonColors()) { Text("Cancel", color = palette.text) }
             },
     )
 }
@@ -7175,12 +7672,13 @@ private fun DeleteConfirmDialog(
 private fun Panel(
         palette: WebPalette,
         modifier: Modifier = Modifier,
+        backgroundColor: Color = palette.panel,
         content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
             modifier =
                     modifier.clip(RoundedCornerShape(14.dp))
-                            .background(palette.panel)
+                            .background(backgroundColor)
                             .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(14.dp))
                             .padding(10.dp),
             content = content,
@@ -7410,7 +7908,7 @@ private object ProjectFileCache {
                 }
         if (cached != null) return cached
 
-        val content = canonicalFile.readText()
+        val content = if (isDatabaseFileName(canonicalFile.name)) "" else canonicalFile.readText()
         val webFile =
                 WebFile(
                         id = key.hashCode().toLong(),
@@ -7683,7 +8181,7 @@ private fun AnnotatedString.Builder.addBoundedStyle(
     }
 }
 
-private fun highlightWebSource(
+internal fun highlightWebSource(
         fileName: String,
         source: String,
         palette: WebPalette
@@ -7697,7 +8195,7 @@ private fun highlightWebSource(
         "php", "phtml" -> highlightPhp(source, palette)
         "sql" -> highlightSql(source, palette)
         else -> AnnotatedString(source)
-    }
+    }.withReadableText(palette.editorBackground, selection = palette.accent.copy(alpha = 0.18f))
 }
 
 private fun addDiagnosticStyles(
@@ -7714,7 +8212,7 @@ private fun addDiagnosticStyles(
             addStyle(diagnosticSpanStyle(palette, diagnostic.severity), start, end)
         }
     }
-}
+}.withReadableText(palette.editorBackground, selection = palette.accent.copy(alpha = 0.18f))
 
 private fun diagnosticLineNumberText(
         lineCount: Int,
@@ -11557,8 +12055,23 @@ private val webCompletionSyntaxes =
                 "@media|at-rule" to "@media (max-width: 700px) {\n    ...\n}",
         )
 
-private fun webIdePalette(theme: WebTheme): WebPalette =
+internal fun webIdePalette(theme: WebTheme): WebPalette =
         when (theme) {
+            WebTheme.CyanOrbitDark, WebTheme.CyanOrbitLight,
+            WebTheme.BlueHorizonDark, WebTheme.BlueHorizonLight,
+            WebTheme.GreenCometDark, WebTheme.GreenCometLight -> {
+                val colors = requireNotNull(spaceThemeColors(theme.name))
+                if (colors.isDark) darkWebPalette(
+                    bgTop = colors.background, bgBottom = colors.gradientEnd, panel = colors.panel,
+                    accent = colors.accent, run = colors.run, secondary = colors.secondary,
+                    terminalPrompt = colors.secondary, border = colors.border,
+                ).copy(elevatedPanel = colors.elevated).withReadableContrast()
+                else lightWebPalette(
+                    bgTop = colors.background, bgBottom = colors.gradientEnd, panel = colors.panel,
+                    elevatedPanel = colors.elevated, accent = colors.accent, run = colors.run,
+                    secondary = colors.secondary, terminalPrompt = colors.secondary, border = colors.border,
+                )
+            }
             WebTheme.CyberpunkElectricDark ->
                     darkWebPalette(
                             bgTop = Color(0xFF070617),
@@ -11718,6 +12231,8 @@ internal fun darkWebPalette(
                 backgroundTop = bgTop,
                 backgroundBottom = bgBottom,
                 panel = panel,
+                editorBackground = panel,
+                terminalBackground = panel,
                 // Surface colors must remain opaque: dialogs and menus otherwise reveal editor text
                 // below.
                 elevatedPanel = panel,
@@ -11737,7 +12252,7 @@ internal fun darkWebPalette(
                 warning = warningColor,
                 success = secondary,
                 info = secondary,
-        )
+        ).withReadableContrast()
 
 private fun lightWebPalette(
         bgTop: Color,
@@ -11755,6 +12270,8 @@ private fun lightWebPalette(
                 backgroundTop = bgTop,
                 backgroundBottom = bgBottom,
                 panel = panel,
+                editorBackground = panel,
+                terminalBackground = panel,
                 elevatedPanel = elevatedPanel,
                 tab = accent.copy(alpha = 0.07f).compositeOver(panel),
                 selectedTab = accent.copy(alpha = 0.13f).compositeOver(panel),
@@ -11772,9 +12289,14 @@ private fun lightWebPalette(
                 warning = warningColor,
                 success = secondary,
                 info = secondary,
-        )
+        ).withReadableContrast()
 
-internal fun executeWebShellCommand(command: String, root: File, working: File): WebShellResult {
+internal fun executeWebShellCommand(
+        command: String,
+        root: File,
+        working: File,
+        browserPreview: Boolean = false,
+): WebShellResult {
     val args = splitShellCommandLine(command)
     val executable = args.firstOrNull()?.lowercase().orEmpty()
     return when (executable) {
@@ -11989,7 +12511,7 @@ internal fun executeWebShellCommand(command: String, root: File, working: File):
             }
             NodeSessionRuntime.start(root, working, target, args.drop(2))
         }
-        "npm" -> executeNpmCommand(args, root, working)
+        "npm" -> executeNpmCommand(args, root, working, browserPreview)
         "next" -> runKnownPackageExecutable("next", args.drop(1), root, working, "next")
                         ?: WebShellResult(error = "next: command unavailable")
         "npx" -> executeNpxCommand(args, root, working)
@@ -12629,7 +13151,12 @@ private fun lspTerminalHelp(): String {
     """.trimIndent()
 }
 
-private fun executeNpmCommand(args: List<String>, root: File, working: File): WebShellResult {
+private fun executeNpmCommand(
+        args: List<String>,
+        root: File,
+        working: File,
+        browserPreview: Boolean = false,
+): WebShellResult {
     if (args.any { it == "--version" || it == "-v" }) {
         return WebShellResult(output = "npm 10.8.0-compatible (PocketCoded Web package manager)")
     }
@@ -12642,8 +13169,8 @@ private fun executeNpmCommand(args: List<String>, root: File, working: File): We
         "update" -> installNpmPackages(root, parseNpmInstallOptions(emptyList()))
         "uninstall", "remove", "rm", "un" -> uninstallNpmPackages(root, args.drop(2))
         "list", "ls", "la", "ll" -> listNpmPackages(root)
-        "run", "run-script" -> runNpmScript(root, working, args.drop(2))
-        "start", "test", "stop", "restart" -> runNpmScript(root, working, listOf(subcommand))
+        "run", "run-script" -> runNpmScript(root, working, args.drop(2), browserPreview)
+        "start", "test", "stop", "restart" -> runNpmScript(root, working, listOf(subcommand), browserPreview)
         "exec", "x" ->
                 executePackageExecutableCommand(
                         args.drop(2),
@@ -13792,7 +14319,12 @@ private fun listNpmPackages(root: File): WebShellResult {
     return WebShellResult(output = lines.joinToString("\n"))
 }
 
-private fun runNpmScript(root: File, working: File, rawArgs: List<String>): WebShellResult {
+private fun runNpmScript(
+        root: File,
+        working: File,
+        rawArgs: List<String>,
+        browserPreview: Boolean = false,
+): WebShellResult {
     val packageRoot =
             generateSequence(working.canonicalFile) { current ->
                 current.parentFile?.takeIf { isSameOrInside(root.canonicalFile, it) }
@@ -13817,7 +14349,8 @@ private fun runNpmScript(root: File, working: File, rawArgs: List<String>): WebS
             script,
             root,
             packageRoot,
-            rawArgs.drop(1).let { if (it.firstOrNull() == "--") it.drop(1) else it }
+            rawArgs.drop(1).let { if (it.firstOrNull() == "--") it.drop(1) else it },
+            browserPreview,
     )
 }
 
@@ -13827,6 +14360,7 @@ private fun runSupportedNpmScript(
         root: File,
         working: File,
         extraArgs: List<String> = emptyList(),
+        browserPreview: Boolean = false,
 ): WebShellResult {
     val command = script.trim()
     val lower = command.lowercase()
@@ -13848,7 +14382,7 @@ private fun runSupportedNpmScript(
                     WebShellResult(output = auditWebProject(root))
                 }
                 lower.startsWith("format ") -> executeWebShellCommand(command, root, working)
-                else -> runNodePackageScript(command, extraArgs, root, working, scriptName)
+                else -> runNodePackageScript(command, extraArgs, root, working, scriptName, browserPreview)
             }
     return delegated.copy(
             output = listOf(prefix, delegated.output).filter { it.isNotBlank() }.joinToString("\n"),
@@ -13860,7 +14394,8 @@ private fun runNodePackageScript(
         extraArgs: List<String>,
         root: File,
         working: File,
-        scriptName: String
+        scriptName: String,
+        browserPreview: Boolean = false,
 ): WebShellResult {
     val tokens = splitShellCommandLine(command).toMutableList()
     val env = mutableMapOf("npm_lifecycle_event" to scriptName, "npm_lifecycle_script" to command)
@@ -13892,7 +14427,7 @@ private fun runNodePackageScript(
                         "This script uses shell operators. Put startup logic in a JavaScript entry point and run it with node."
         )
     }
-    return NodeSessionRuntime.start(root, working, file, fileArgs, env)
+    return NodeSessionRuntime.start(root, working, file, fileArgs, env, browserPreview = browserPreview)
 }
 
 private fun npmScriptsText(root: File): String {
@@ -15431,7 +15966,8 @@ private fun buildAiCopilotPrompt(
 ): String {
     val activeFileId = activeFile?.id
     val contextFiles =
-            files
+            files.filterNot { isDatabaseFileName(it.name) || it.name == ".env" || it.name.startsWith(".env.") ||
+                it.name in setOf(".npmrc", ".pypirc") || it.name.endsWith(".pem", true) || it.name.endsWith(".key", true) }
                     .sortedBy { if (activeFileId != null && it.id == activeFileId) 0 else 1 }
                     .take(AI_CONTEXT_FILE_LIMIT)
     val fileContext = StringBuilder()
@@ -15488,10 +16024,10 @@ private fun buildAiCopilotPrompt(
     """.trimIndent()
 }
 
-private fun callGeminiDirectly(modelId: String, prompt: String, apiKey: String): String {
+private fun callGeminiDirectly(modelId: String, prompt: String, apiKey: String, endpoint: String): String {
     val url =
             URL(
-                    "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent?key=$apiKey"
+                    "${validatedAiEndpoint(endpoint).trimEnd('/')}/models/${URLEncoder.encode(modelId, "UTF-8")}:generateContent"
             )
     val payload =
             JSONObject()
@@ -15528,6 +16064,8 @@ private fun callGeminiDirectly(modelId: String, prompt: String, apiKey: String):
                 readTimeout = 90_000
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
+                setRequestProperty("x-goog-api-key", apiKey)
+                instanceFollowRedirects = false
             }
     connection.outputStream.use { it.write(payload.toByteArray(Charsets.UTF_8)) }
     val status = connection.responseCode
@@ -15572,7 +16110,7 @@ private fun requestPersonalAiCompletion(
         apiKey: String
 ): String =
         when (model.provider) {
-            AiProvider.Gemini -> callGeminiDirectly(model.id, prompt, apiKey)
+            AiProvider.Gemini -> callGeminiDirectly(model.id, prompt, apiKey, model.defaultEndpoint)
             AiProvider.Anthropic ->
                     postAiJson(
                                     endpoint = model.endpoint,
@@ -15606,7 +16144,7 @@ private fun requestPersonalAiCompletion(
                             ?.optString("text")
                             .orEmpty()
                             .ifBlank { "I could not generate a response." }
-            AiProvider.OpenAiCompatible ->
+            AiProvider.OpenAiCompatible, AiProvider.AzureOpenAi ->
                     postAiJson(
                                     endpoint = model.endpoint,
                                     body =
@@ -15629,7 +16167,8 @@ private fun requestPersonalAiCompletion(
                                                                                     )
                                                                     )
                                                     ),
-                                    headers = mapOf("Authorization" to "Bearer $apiKey"),
+                                    headers = if (model.provider == AiProvider.AzureOpenAi) mapOf("api-key" to apiKey)
+                                        else if (apiKey.isBlank()) emptyMap() else mapOf("Authorization" to "Bearer $apiKey"),
                             )
                             .optJSONArray("choices")
                             ?.optJSONObject(0)
@@ -15644,10 +16183,11 @@ private fun postAiJson(
         body: JSONObject,
         headers: Map<String, String>
 ): JSONObject {
-    require(endpoint.startsWith("https://")) { "The AI endpoint must use HTTPS." }
+    validatedAiEndpoint(endpoint)
     val connection =
             (URL(endpoint).openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
+                instanceFollowRedirects = false
                 connectTimeout = 20_000
                 readTimeout = 90_000
                 doOutput = true
@@ -15678,7 +16218,7 @@ private fun postAiJson(
 private fun friendlyAiError(message: String): String {
     val lower = message.lowercase()
     return when {
-        lower.contains("api key") -> "The Gemini API key was rejected. Check the key and try again."
+        lower.contains("api key") -> "The AI provider API key was rejected. Check its settings and try again."
         lower.contains("quota") || lower.contains("rate") ->
                 "The AI provider's quota is exhausted for this key. Try again later or use another key."
         lower.contains("model") && lower.contains("not found") ->
@@ -15911,10 +16451,31 @@ private fun jsonObjectTexts(text: String): List<String> {
     return if (first >= 0 && last > first) listOf(text.substring(first, last + 1)) else emptyList()
 }
 
+internal fun resolveAiEditTargets(root: File, changes: List<AiProjectFileChange>): List<File> {
+    require(changes.isNotEmpty() && changes.size <= 100) { "AI edits must contain 1 to 100 files." }
+    val targets = changes.map { change ->
+        require(!File(change.path).isAbsolute && !change.path.contains(':')) { "AI paths must be relative to the project." }
+        val target = File(root, change.path).canonicalFile
+        require(target != root.canonicalFile && isSameOrInside(root, target)) { "AI path leaves the project: ${change.path}" }
+        require(target.relativeTo(root.canonicalFile).invariantSeparatorsPath.split('/').none {
+            it in setOf(".git", ".ssh", ".pocketcodedweb", "node_modules")
+        }) { "AI cannot edit project metadata or dependencies." }
+        require(!target.isDirectory && !isDatabaseFileName(target.name) && (!target.exists() || isEditableWebFile(target))) {
+            "AI can edit text files only: ${change.path}"
+        }
+        target
+    }
+    require(targets.distinct().size == targets.size) { "AI edits contain duplicate paths." }
+    require(changes.sumOf { it.content.toByteArray(Charsets.UTF_8).size.toLong() } <= 32L * 1024 * 1024) { "AI edit exceeds the 32 MiB limit." }
+    return targets
+}
+
 private fun applyAiProjectFileChanges(
         rootDirectory: File,
-        changes: List<AiProjectFileChange>
+        changes: List<AiProjectFileChange>,
+        store: ProjectFileStore,
 ): String {
+    resolveAiEditTargets(rootDirectory, changes)
     var writes = 0
     var deletes = 0
     changes.forEach { change ->
@@ -15925,11 +16486,14 @@ private fun applyAiProjectFileChanges(
         when (change.operation) {
             AiProjectFileOperation.Write -> {
                 target.parentFile?.mkdirs()
-                target.writeText(change.content)
+                store.save(target.path, change.content).getOrThrow()
                 writes += 1
             }
             AiProjectFileOperation.Delete -> {
-                if (target.exists() && target.delete()) deletes += 1
+                if (target.exists()) {
+                    check(target.delete()) { "Could not delete ${change.path}." }
+                    deletes += 1
+                }
             }
         }
     }
@@ -15948,8 +16512,8 @@ private fun applyAiProjectFileChanges(
     }
 }
 
-private fun runSqlScript(rootDirectory: File, source: String): String {
-    val databaseFile =
+internal fun runSqlScript(rootDirectory: File, source: String, selectedDatabase: File? = null): String {
+    val databaseFile = selectedDatabase ?:
             rootDirectory.walkTopDown().firstOrNull { file ->
                 file.isFile && isDatabaseFileName(file.name)
             }
@@ -16114,6 +16678,7 @@ private fun File.toWebFileOrNull(rootDirectory: File): WebFile? {
 }
 
 private fun saveFileContent(path: String, content: String, modifiedAt: Long? = null) {
+    if (isDatabaseFileName(File(path).name)) return
     runCatching {
         val file = File(path)
         file.writeText(content)
@@ -16355,7 +16920,7 @@ private fun WebFileIcon(name: String, palette: WebPalette, modifier: Modifier = 
 }
 
 private fun fileColor(name: String, palette: WebPalette): Color =
-        when (fileExtension(name)) {
+        readableTextColor(when (fileExtension(name)) {
             in htmlFileExtensions -> Color(0xFFE86F3A)
             in cssFileExtensions -> Color(0xFF3A8DFF)
             "ts", "tsx" -> Color(0xFF3178C6)
@@ -16364,7 +16929,7 @@ private fun fileColor(name: String, palette: WebPalette): Color =
             "json" -> palette.warning
             "svg" -> Color(0xFFFF9A35)
             else -> palette.accent
-        }
+        }, listOf(palette.panel, palette.selectedTab))
 
 private fun fileLanguageLabel(name: String): String =
         when (fileExtension(name)) {
@@ -16390,15 +16955,11 @@ private fun codeEditorTitle(name: String, compact: Boolean): String {
 }
 
 private fun normalizeWebFileName(rawName: String): String? {
-    val trimmed = rawName.trim().replace('\\', '/').substringAfterLast('/')
-    if (trimmed.isBlank() || trimmed.startsWith(".")) return null
-    if (trimmed.any { it in "\\/:*?\"<>|" }) return null
-    val withExtension =
-            if (trimmed.substringAfterLast('.', "").isBlank()) "$trimmed.html" else trimmed
-    val extension = fileExtension(withExtension)
-    if (extension !in editableWebExtensions) return null
-    val simpleName = Regex("[A-Za-z0-9][A-Za-z0-9_. -]*\\.[A-Za-z0-9]+")
-    return withExtension.takeIf { simpleName.matches(it) }
+    val trimmed = rawName.trim()
+    if (trimmed.isBlank() || trimmed in setOf(".", "..") || trimmed.any { it in "\\/:*?\"<>|" || it.isISOControl() }) return null
+    if (trimmed in workspaceMetadataNames || trimmed.endsWith('.')) return null
+    val withExtension = if (!trimmed.contains('.') && trimmed !in setOf("Dockerfile", "Makefile", "LICENSE", "README")) "$trimmed.html" else trimmed
+    return withExtension.takeIf { Regex("[A-Za-z0-9_. -]+").matches(it) }
 }
 
 private fun normalizeFolderName(rawName: String): String? {
@@ -16419,7 +16980,14 @@ private fun nextUntitledFileName(files: List<WebFile>): String {
 }
 
 private fun isEditableWebFile(file: File): Boolean {
-    return file.extension.lowercase() in editableWebExtensions
+    if (file.extension.lowercase() in editableWebExtensions) return true
+    if (file.extension.lowercase() in setOf("png", "jpg", "jpeg", "gif", "webp", "ico", "pdf", "zip", "jar", "class", "so", "wasm", "woff", "woff2", "ttf", "mp3", "mp4", "duckdb")) return false
+    if (!file.isFile || file.length() > MAX_EDITABLE_PROJECT_FILE_BYTES) return false
+    return runCatching {
+        val prefix = ByteArray(8192)
+        val size = file.inputStream().use { it.read(prefix) }.coerceAtLeast(0)
+        (0 until size).none { prefix[it] == 0.toByte() || (prefix[it] in 1..8) || (prefix[it] in 14..31) }
+    }.getOrDefault(false)
 }
 
 private fun looksLikeHtmlSource(source: String): Boolean =
@@ -16463,7 +17031,7 @@ private fun validDirectoryOrRoot(rootDirectory: File, candidatePath: String): Fi
 
 private fun terminalPrompt(rootDirectory: File, directory: File): String {
     val label = terminalDirectoryLabel(rootDirectory, directory)
-    return if (label == "~") "$" else "$label $"
+    return if (label == "~") "~$" else "$label $"
 }
 
 private fun terminalDirectoryLabel(rootDirectory: File, directory: File): String {
@@ -16794,7 +17362,7 @@ private fun FilesAndFoldersDialog(
             },
             confirmButton = {},
             dismissButton = {
-                TextButton(onClick = onDismiss) { Text("Cancel", color = palette.accent) }
+                TextButton(onClick = onDismiss, colors = readableTextButtonColors()) { Text("Cancel", color = palette.accent) }
             }
     )
 }
@@ -16871,3 +17439,6 @@ private fun exportToDocumentFile(context: Context, sourceDir: File, destFolder: 
         }
     }
 }
+
+internal fun webDevelopmentDiagnostics(file: File, name: String, source: String): List<CodeDiagnostic> =
+    WebLanguageServices.diagnostics(file, name, source)

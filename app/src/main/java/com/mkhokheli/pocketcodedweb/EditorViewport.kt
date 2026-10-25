@@ -18,6 +18,34 @@ internal const val EDITOR_HIGHLIGHT_MAX_CHARS = 16_384
 
 internal data class EditorHighlightWindow(val start: Int, val end: Int)
 
+/** Reserve a little context while still fitting the caret in a very short keyboard viewport. */
+internal fun editorCursorScrollTarget(
+        current: Int,
+        viewportSize: Int,
+        contentMax: Int,
+        cursorStart: Float,
+        cursorEnd: Float,
+        preferredMargin: Float,
+): Int {
+    if (viewportSize <= 0) return current.coerceIn(0, contentMax.coerceAtLeast(0))
+    val caretSize = (cursorEnd - cursorStart).coerceAtLeast(0f)
+    val margin = preferredMargin.coerceIn(0f, ((viewportSize - caretSize) / 2f).coerceAtLeast(0f))
+    return minimalScrollTarget(current, viewportSize, contentMax.coerceAtLeast(0),
+            cursorStart, cursorEnd, margin, margin)
+}
+
+/** Leave the numeral's existing slot empty when its breakpoint dot is drawn over the gutter. */
+internal fun maskBreakpointLineNumbers(numbers: String, breakpoints: Set<Int>): String {
+    if (breakpoints.isEmpty()) return numbers
+    val result = StringBuilder(numbers)
+    var line = 1
+    for (offset in numbers.indices) {
+        if (numbers[offset] == '\n') line++
+        else if (line in breakpoints) result.setCharAt(offset, ' ')
+    }
+    return result.toString()
+}
+
 internal fun editorHighlightWindow(
         source: String,
         visibleStart: Int,

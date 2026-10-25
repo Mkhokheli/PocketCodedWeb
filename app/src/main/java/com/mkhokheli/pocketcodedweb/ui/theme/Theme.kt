@@ -2,16 +2,20 @@ package com.mkhokheli.pocketcodedweb.ui.theme
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.compositeOver
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
@@ -65,37 +69,54 @@ fun PocketCodedWebTheme(
         darkTheme -> DarkColorScheme
         else -> LightColorScheme
     }
+    val colorScheme = webThemeColorScheme(darkTheme, themeName, baseColorScheme)
+    CompositionLocalProvider(LocalContentColor provides colorScheme.onBackground,
+        LocalTextSelectionColors provides TextSelectionColors(
+        handleColor = colorScheme.primary,
+        backgroundColor = colorScheme.primary.copy(alpha = 0.18f),
+    )) {
+        MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
+    }
+}
+
+internal fun webThemeColorScheme(
+    darkTheme: Boolean,
+    themeName: String?,
+    baseColorScheme: ColorScheme = if (darkTheme) DarkColorScheme else LightColorScheme,
+): ColorScheme {
     val themed = webThemeColors(themeName)
-    val accent = themed?.accent ?: baseColorScheme.primary
     val background = themed?.background ?: baseColorScheme.background
     val surface = themed?.surface ?: baseColorScheme.surface
     val surfaceVariant = themed?.surfaceVariant ?: baseColorScheme.surfaceVariant
-    val outline = themed?.outline ?: baseColorScheme.outline
-    val onSurface = readableOn(surface)
-    val colorScheme = baseColorScheme.copy(
-        primary = accent,
-        onPrimary = readableOn(accent),
-        primaryContainer = accent.copy(alpha = if (darkTheme) 0.24f else 0.14f).compositeOver(surface),
-        onPrimaryContainer = onSurface,
-        secondary = accent,
-        onSecondary = readableOn(accent),
-        secondaryContainer = accent.copy(alpha = if (darkTheme) 0.18f else 0.10f).compositeOver(surface),
-        onSecondaryContainer = onSurface,
-        background = background,
-        onBackground = readableOn(background),
-        surface = surface,
-        onSurface = onSurface,
-        surfaceVariant = surfaceVariant,
-        onSurfaceVariant = onSurface.copy(alpha = 0.76f),
-        surfaceTint = accent,
-        outline = outline,
-        outlineVariant = outline.copy(alpha = 0.55f),
-    )
-
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
+    val surfaces = listOf(background, surface, surfaceVariant)
+    val accent = readableTextColor(themed?.accent ?: baseColorScheme.primary, surfaces)
+    val onSurface = readableTextColor(readableContentColor(surface), surfaces)
+    val muted = readableTextColor(onSurface.copy(alpha = 0.76f), surfaces)
+    val outline = readableTextColor(themed?.outline ?: baseColorScheme.outline, surfaces, minimum = 3f)
+    val primaryContainer = accent.copy(alpha = if (darkTheme) 0.24f else 0.14f).compositeOver(surface)
+    val secondaryContainer = accent.copy(alpha = if (darkTheme) 0.18f else 0.10f).compositeOver(surface)
+    val error = readableTextColor(if (darkTheme) Color(0xFFFF7B7B) else Color(0xFFB42318), surfaces)
+    val errorContainer = error.copy(alpha = 0.14f).compositeOver(surface)
+    val inverseSurface = if (darkTheme) Color(0xFFF1F3F5) else Color(0xFF20242A)
+    return baseColorScheme.copy(
+        primary = accent, onPrimary = readableContentColor(accent),
+        primaryContainer = primaryContainer, onPrimaryContainer = readableContentColor(primaryContainer),
+        secondary = accent, onSecondary = readableContentColor(accent),
+        secondaryContainer = secondaryContainer, onSecondaryContainer = readableContentColor(secondaryContainer),
+        tertiary = accent, onTertiary = readableContentColor(accent),
+        tertiaryContainer = secondaryContainer, onTertiaryContainer = readableContentColor(secondaryContainer),
+        background = background, onBackground = readableContentColor(background),
+        surface = surface, onSurface = onSurface,
+        surfaceVariant = surfaceVariant, onSurfaceVariant = muted,
+        surfaceDim = surface, surfaceBright = surfaceVariant,
+        surfaceContainerLowest = surface, surfaceContainerLow = surface,
+        surfaceContainer = surface, surfaceContainerHigh = surfaceVariant, surfaceContainerHighest = surfaceVariant,
+        surfaceTint = Color.Transparent,
+        inverseSurface = inverseSurface, inverseOnSurface = readableContentColor(inverseSurface),
+        inversePrimary = readableTextColor(accent, inverseSurface),
+        outline = outline, outlineVariant = outline,
+        error = error, onError = readableContentColor(error),
+        errorContainer = errorContainer, onErrorContainer = readableContentColor(errorContainer),
     )
 }
 
@@ -107,7 +128,9 @@ private data class WebThemeColors(
     val outline: Color,
 )
 
-private fun webThemeColors(name: String?): WebThemeColors? = when (name) {
+private fun webThemeColors(name: String?): WebThemeColors? = spaceThemeColors(name)?.let {
+    WebThemeColors(it.accent, it.background, it.elevated, it.gradientEnd, it.border)
+} ?: when (name) {
     "CyberpunkElectricDark" -> WebThemeColors(Color(0xFFFF2D75), Color(0xFF070617), Color(0xFF0A0C24), Color(0xFF1A1033), Color(0xFF8F355E))
     "CyberpunkElectricLight" -> WebThemeColors(Color(0xFFFF2D75), Color(0xFFFFFBF8), Color.White, Color(0xFFFFE7F0), Color(0xFFFFC4DC))
     "ForestNightDark" -> WebThemeColors(Color(0xFF22C55E), Color(0xFF031611), Color(0xFF042018), Color(0xFF0E3B2B), Color(0xFF247448))
@@ -124,6 +147,3 @@ private fun webThemeColors(name: String?): WebThemeColors? = when (name) {
     "VSCodeDefaultLight" -> WebThemeColors(Color(0xFF007ACC), Color.White, Color.White, Color(0xFFF3F3F3), Color(0xFFE5E5E5))
     else -> null
 }
-
-private fun readableOn(background: Color): Color =
-    if (background.luminance() > 0.179f) Color(0xFF111318) else Color.White

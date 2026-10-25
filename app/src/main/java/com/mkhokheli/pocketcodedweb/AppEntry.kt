@@ -1,11 +1,14 @@
 package com.mkhokheli.pocketcodedweb
 
+import com.mkhokheli.pocketcodedweb.ui.theme.spaceThemeColors
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Log
+import com.mkhokheli.pocketcodedweb.ui.theme.readableTextColor
+import com.mkhokheli.pocketcodedweb.ui.theme.readableContentColor
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -112,7 +115,7 @@ internal data class LocalProject(
     val canDelete: Boolean,
 )
 
-private data class EntryPalette(
+internal data class EntryPalette(
     val background: Color,
     val panel: Color,
     val elevatedPanel: Color,
@@ -671,6 +674,7 @@ private fun FirebaseAuthScreen(
                             enabled = !isBusy,
                             modifier = Modifier.align(Alignment.End),
                             contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
+                            colors = readableTextButtonColors(),
                         ) {
                             Text("Forgot password?", color = palette.accent, fontSize = 13.sp)
                         }
@@ -724,6 +728,7 @@ private fun FirebaseAuthScreen(
                             },
                             enabled = !isBusy,
                             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            colors = readableTextButtonColors(),
                         ) {
                             Text(
                                 text = if (isSignUp) "Sign In" else "Sign Up",
@@ -915,7 +920,7 @@ private fun FirebaseVerificationScreen(
                         enabled = !isBusy,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = palette.accent,
-                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            contentColor = palette.onAccent,
                         ),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier.fillMaxWidth().height(52.dp),
@@ -924,7 +929,7 @@ private fun FirebaseVerificationScreen(
                             CircularProgressIndicator(
                                 modifier = Modifier.size(18.dp),
                                 strokeWidth = 2.dp,
-                                color = MaterialTheme.colorScheme.onPrimary,
+                                color = palette.onAccent,
                             )
                         } else {
                             Icon(Icons.Rounded.Refresh, contentDescription = null)
@@ -932,12 +937,12 @@ private fun FirebaseVerificationScreen(
                         Spacer(Modifier.width(8.dp))
                         Text("I verified my email", fontWeight = FontWeight.Bold)
                     }
-                    TextButton(onClick = { resendVerification() }, enabled = !isBusy) {
+                    TextButton(onClick = { resendVerification() }, enabled = !isBusy, colors = readableTextButtonColors()) {
                         Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, tint = palette.accent)
                         Spacer(Modifier.width(6.dp))
                         Text("Resend email", color = palette.accent)
                     }
-                    TextButton(onClick = onSignOut, enabled = !isBusy) {
+                    TextButton(onClick = onSignOut, enabled = !isBusy, colors = readableTextButtonColors()) {
                         Text("Use another account", color = palette.text)
                     }
                 }
@@ -968,7 +973,7 @@ private fun authColors(palette: EntryPalette) = AuthColors(
     border = palette.border,
     fieldBorder = palette.accent.copy(alpha = 0.72f),
     primary = palette.accent,
-    primaryText = Color.White,
+    primaryText = readableContentColor(palette.accent),
     error = palette.error,
     success = palette.accentAlt,
 )
@@ -1055,17 +1060,17 @@ private fun AuthPasswordField(
 private fun authTextFieldColors(colors: AuthColors) = OutlinedTextFieldDefaults.colors(
     focusedTextColor = colors.text,
     unfocusedTextColor = colors.text,
-    disabledTextColor = colors.muted.copy(alpha = 0.55f),
+    disabledTextColor = colors.muted,
     cursorColor = colors.text,
     focusedBorderColor = colors.fieldBorder,
     unfocusedBorderColor = colors.fieldBorder,
     disabledBorderColor = colors.fieldBorder.copy(alpha = 0.45f),
     focusedLeadingIconColor = colors.muted,
     unfocusedLeadingIconColor = colors.muted,
-    disabledLeadingIconColor = colors.muted.copy(alpha = 0.45f),
+    disabledLeadingIconColor = colors.muted,
     focusedTrailingIconColor = colors.muted,
     unfocusedTrailingIconColor = colors.muted,
-    disabledTrailingIconColor = colors.muted.copy(alpha = 0.45f),
+    disabledTrailingIconColor = colors.muted,
     focusedContainerColor = Color.Transparent,
     unfocusedContainerColor = Color.Transparent,
     disabledContainerColor = Color.Transparent,
@@ -1085,8 +1090,8 @@ private fun AuthPrimaryButton(
         colors = ButtonDefaults.buttonColors(
             containerColor = colors.primary,
             contentColor = colors.primaryText,
-            disabledContainerColor = colors.primary.copy(alpha = 0.65f),
-            disabledContentColor = colors.primaryText.copy(alpha = 0.85f),
+            disabledContainerColor = colors.panel,
+            disabledContentColor = colors.muted,
         ),
         shape = RoundedCornerShape(8.dp),
         modifier = Modifier
@@ -1094,7 +1099,7 @@ private fun AuthPrimaryButton(
             .height(height),
     ) {
         if (isBusy) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = colors.primaryText)
+            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = colors.muted)
             Spacer(Modifier.width(8.dp))
         }
         Text(text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
@@ -1138,7 +1143,7 @@ private fun GoogleAuthButton(
         colors = ButtonDefaults.outlinedButtonColors(
             containerColor = Color.Transparent,
             contentColor = colors.text,
-            disabledContentColor = colors.muted.copy(alpha = 0.6f),
+            disabledContentColor = colors.muted,
         ),
         modifier = Modifier
             .fillMaxWidth()
@@ -1390,7 +1395,7 @@ private fun PremiumPaywall(
                         .background(palette.accentAlt),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(Icons.Rounded.Lock, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
+                    Icon(Icons.Rounded.Lock, contentDescription = null, tint = palette.onAccent, modifier = Modifier.size(14.dp))
                 }
             }
             Spacer(Modifier.height(18.dp))
@@ -1478,7 +1483,7 @@ private fun PremiumPaywall(
                         enabled = purchaseButtonEnabled,
                         colors = ButtonDefaults.buttonColors(
                             containerColor = palette.accent,
-                            contentColor = MaterialTheme.colorScheme.onPrimary,
+                            contentColor = palette.onAccent,
                         ),
                         shape = RoundedCornerShape(8.dp),
                         modifier = Modifier
@@ -1505,13 +1510,13 @@ private fun PremiumPaywall(
             }
 
             Spacer(Modifier.height(12.dp))
-            TextButton(onClick = onRestore) {
+            TextButton(onClick = onRestore, colors = readableTextButtonColors()) {
                 Icon(Icons.Rounded.Restore, contentDescription = null, tint = palette.accent)
                 Spacer(Modifier.width(6.dp))
                 Text("Restore Purchase", color = palette.accent)
             }
             if (!trialExpired) {
-                TextButton(onClick = onContinueTrial) {
+                TextButton(onClick = onContinueTrial, colors = readableTextButtonColors()) {
                     Text("Continue Free Trial", color = palette.text)
                 }
                 Text(
@@ -1522,7 +1527,7 @@ private fun PremiumPaywall(
                     modifier = Modifier.padding(horizontal = 18.dp),
                 )
             }
-            TextButton(onClick = onSignOut) {
+            TextButton(onClick = onSignOut, colors = readableTextButtonColors()) {
                 Text("Sign out", color = palette.mutedText)
             }
             Spacer(Modifier.height(12.dp))
@@ -1662,7 +1667,7 @@ private fun ProjectHomeScreen(
                     onDismissRequest = { profileMenuOpen = false },
                     containerColor = palette.elevatedPanel,
                 ) {
-                    DropdownMenuItem(
+                    DropdownMenuItem(colors = readableMenuItemColors(),
                         text = {
                             Column {
                                 Text(user.displayName, color = palette.text)
@@ -1676,7 +1681,7 @@ private fun ProjectHomeScreen(
                         leadingIcon = { Icon(Icons.Rounded.Person, null, tint = palette.accent) },
                     )
                     HorizontalDivider(color = palette.border)
-                    DropdownMenuItem(
+                    DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Sign out", color = palette.text) },
                         onClick = {
                             profileMenuOpen = false
@@ -1708,7 +1713,7 @@ private fun ProjectHomeScreen(
                         .background(palette.accent),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Icon(painterResource(R.drawable.jb_add), contentDescription = null, tint = Color.White, modifier = Modifier.size(30.dp))
+                    Icon(painterResource(R.drawable.jb_add), contentDescription = null, tint = palette.onAccent, modifier = Modifier.size(30.dp))
                 }
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -1746,6 +1751,7 @@ private fun ProjectHomeScreen(
             singleLine = true,
             shape = RoundedCornerShape(8.dp),
             modifier = Modifier.fillMaxWidth(),
+            colors = readableFieldColors(),
         )
         message?.let {
             Text(it, color = palette.error, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
@@ -1818,7 +1824,7 @@ private fun ProjectHomeScreen(
                 }
             },
             confirmButton = {},
-            dismissButton = { TextButton(onClick = { newProjectMenuOpen = false }) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { newProjectMenuOpen = false }, colors = readableTextButtonColors()) { Text("Cancel") } },
         )
     }
 
@@ -1876,12 +1882,12 @@ private fun ProjectHomeScreen(
                             refreshVersion += 1L
                         }
                     }
-                ) {
+                , colors = readableTextButtonColors()) {
                     Text("Delete", color = palette.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { deleteProject = null }) { Text("Cancel", color = palette.text) }
+                TextButton(onClick = { deleteProject = null }, colors = readableTextButtonColors()) { Text("Cancel", color = palette.text) }
             },
         )
     }
@@ -1963,17 +1969,17 @@ private fun ProjectRow(
                         onDismissRequest = { menuOpen = false },
                         containerColor = palette.elevatedPanel,
                     ) {
-                        DropdownMenuItem(
+                        DropdownMenuItem(colors = readableMenuItemColors(),
                             text = { Text("Open", color = palette.text) },
                             onClick = { menuOpen = false; onOpen() },
                             leadingIcon = { Icon(painterResource(R.drawable.jb_project), null, tint = palette.accent) },
                         )
-                        DropdownMenuItem(
+                        DropdownMenuItem(colors = readableMenuItemColors(),
                             text = { Text("Rename", color = palette.text) },
                             onClick = { menuOpen = false; onRename() },
                             leadingIcon = { Icon(Icons.Rounded.Edit, null, tint = palette.accent) },
                         )
-                        DropdownMenuItem(
+                        DropdownMenuItem(colors = readableMenuItemColors(),
                             text = { Text("Delete", color = palette.error) },
                             onClick = { menuOpen = false; onDelete() },
                             leadingIcon = { Icon(Icons.Rounded.Delete, null, tint = palette.error) },
@@ -2019,6 +2025,7 @@ private fun RenameProjectDialog(
                     ),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth(),
+                    colors = readableFieldColors(),
                 )
                 error?.let {
                     Text(it, color = palette.error, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp))
@@ -2031,14 +2038,14 @@ private fun RenameProjectDialog(
                     val validation = validateProjectName(name)
                     error = validation ?: onRename(name)
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = palette.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent, disabledContainerColor = palette.panel, disabledContentColor = palette.mutedText),
                 shape = RoundedCornerShape(8.dp),
             ) {
                 Text("Rename")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel", color = palette.text) }
+            TextButton(onClick = onDismiss, colors = readableTextButtonColors()) { Text("Cancel", color = palette.text) }
         },
     )
 }
@@ -2075,6 +2082,7 @@ private fun CreateProjectDialog(
                     ),
                     shape = RoundedCornerShape(8.dp),
                     modifier = Modifier.fillMaxWidth(),
+                    colors = readableFieldColors(),
                 )
                 error?.let { Text(it, color = palette.error, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp)) }
             }
@@ -2085,14 +2093,14 @@ private fun CreateProjectDialog(
                     val validation = validateProjectName(name)
                     if (validation == null) onCreate(name) else error = validation
                 },
-                colors = ButtonDefaults.buttonColors(containerColor = palette.accent),
+                colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent, disabledContainerColor = palette.panel, disabledContentColor = palette.mutedText),
                 shape = RoundedCornerShape(8.dp),
             ) {
                 Text("Create")
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel", color = palette.text) }
+            TextButton(onClick = onDismiss, colors = readableTextButtonColors()) { Text("Cancel", color = palette.text) }
         },
     )
 }
@@ -2105,7 +2113,17 @@ private fun BrandTitle(palette: EntryPalette, fontSize: Int = 31) {
     }
 }
 
-private fun entryPalette(themeName: String, darkMode: Boolean): EntryPalette = when (themeName) {
+internal fun entryPalette(themeName: String, darkMode: Boolean): EntryPalette {
+    spaceThemeColors(themeName)?.let { colors ->
+        return if (colors.isDark) darkEntryPalette(
+            background = colors.background, panel = colors.panel, elevatedPanel = colors.elevated,
+            border = colors.border, accent = colors.accent,
+        ) else lightEntryPalette(
+            background = colors.background, elevatedPanel = colors.elevated,
+            border = colors.border, accent = colors.accent,
+        )
+    }
+    return when (themeName) {
     "CyberpunkElectricDark", "Cyberpunk", "MidnightNeon" -> darkEntryPalette(
         background = Color(0xFF070617),
         panel = Color(0xFF0A0C24),
@@ -2214,6 +2232,7 @@ private fun entryPalette(themeName: String, darkMode: Boolean): EntryPalette = w
         )
     }
 }
+}
 
 private fun darkEntryPalette(
     background: Color,
@@ -2231,7 +2250,7 @@ private fun darkEntryPalette(
     accent = accent,
     accentAlt = accent,
     error = Color(0xFFFF7B7B),
-)
+).withReadableContrast()
 
 private fun lightEntryPalette(
     background: Color,
@@ -2248,7 +2267,18 @@ private fun lightEntryPalette(
     accent = accent,
     accentAlt = accent,
     error = Color(0xFFB42318),
-)
+).withReadableContrast()
+
+private val EntryPalette.onAccent: Color get() = readableContentColor(accent)
+
+private fun EntryPalette.withReadableContrast(): EntryPalette {
+    val surfaces = listOf(background, panel, elevatedPanel,
+        androidx.compose.ui.graphics.lerp(panel, accent, 0.18f),
+        androidx.compose.ui.graphics.lerp(panel, error, 0.14f))
+    return copy(text = readableTextColor(text, surfaces), mutedText = readableTextColor(mutedText, surfaces),
+        accent = readableTextColor(accent, surfaces), accentAlt = readableTextColor(accentAlt, surfaces),
+        error = readableTextColor(error, surfaces))
+}
 
 @Composable
 private fun ThemeCycleButton(

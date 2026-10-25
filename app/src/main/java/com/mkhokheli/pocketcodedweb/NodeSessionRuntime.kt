@@ -46,20 +46,34 @@ internal object NodeSessionRuntime {
     }.getOrElse { JSONObject().put("state", "starting") }
 
     @Synchronized
-    fun start(root: File, working: File, file: File, args: List<String>, env: Map<String, String> = emptyMap()): WebShellResult = runCatching {
+    fun start(root: File, working: File, file: File, args: List<String>, env: Map<String, String> = emptyMap(), mode: String = "run", breakpoints: List<Pair<String, Int>> = emptyList(), testFiles: List<File> = emptyList(), browserPreview: Boolean = false): WebShellResult = runCatching {
         check(!running()) { "A Node session is already running. Use node stop before starting another; node logs shows its output." }
         fun inside(parent: File, child: File): Boolean = child.canonicalPath == parent.canonicalPath || child.canonicalPath.startsWith(parent.canonicalPath + File.separator)
         require(inside(context.filesDir, root) && inside(root, working) && inside(root, file)) { "Node entry point is outside the project." }
+        require(mode in setOf("run", "debug", "tests", "profile")) { "Unknown development mode" }
+        require(testFiles.all { inside(root, it) && it.isFile }) { "Test file is outside the project or missing" }
+        require(breakpoints.all { inside(root, File(it.first)) && it.second > 0 }) { "Invalid breakpoint" }
+        require(mode != "tests" || testFiles.isNotEmpty()) { "Select at least one test file" }
         require(file.isFile) { "Node entry point does not exist: ${file.name}" }
         directory.mkdirs()
+        listOf("debug-state.json", "debug-command.json", "test-results.json", "profile-state.json").forEach { File(directory, it).delete() }
         File(directory, "status.json").delete()
         cachedStatus = null
         File(directory, "session.log").writeText("")
-        context.assets.open("node-runtime/session.cjs").use { input -> File(directory, "session.cjs").outputStream().use { input.copyTo(it) } }
+        listOf("session.cjs", "debug-worker.cjs", "test-results.cjs", "profile-session.cjs").forEach { name ->
+            context.assets.open("node-runtime/$name").use { input -> File(directory, name).outputStream().use { input.copyTo(it) } }
+        }
         File(directory, "config.json").writeText(JSONObject()
-            .put("root", root.canonicalPath)
+            .put("root", root.canonicalPath).put("mode", mode)
+            .put("debugStatePath", File(directory, "debug-state.json").absolutePath)
+            .put("debugCommandPath", File(directory, "debug-command.json").absolutePath)
+            .put("testResultsPath", File(directory, "test-results.json").absolutePath)
+            .put("profileStatePath", File(directory, "profile-state.json").absolutePath)
+            .put("testFiles", JSONArray(testFiles.map { it.canonicalPath }))
+            .put("breakpoints", JSONArray().apply { breakpoints.forEach { (path, line) -> put(JSONObject().put("file", File(path).canonicalPath).put("line", line)) } })
             .put("maxLogChars", DeviceEfficiency.budget.nodeLogChars)
             .put("logFlushMs", DeviceEfficiency.budget.logFlushMs)
+            .put("browserPreview", browserPreview)
             .put("cwd", working.canonicalPath).put("file", file.canonicalPath)
             .put("args", JSONArray(args)).put("env", JSONObject(env))
             .put("statusPath", File(directory, "status.json").absolutePath)
@@ -69,6 +83,7 @@ internal object NodeSessionRuntime {
         val deadline = SystemClock.elapsedRealtime() + 5_000
         while (SystemClock.elapsedRealtime() < deadline) {
             val status = readStatus()
+            if (mode == "debug" && File(directory, "debug-state.json").isFile) break
             if ((status.optJSONArray("urls")?.length() ?: 0) > 0 || status.optString("state") in setOf("exited", "failed")) break
             Thread.sleep(100)
         }
@@ -76,6 +91,40 @@ internal object NodeSessionRuntime {
             WebShellResult(error = "The Node session did not start. Retry while the app is visible.")
         } else status()
     }.getOrElse { WebShellResult(error = it.message ?: "Could not start Node session") }
+
+    fun developmentState(root: File, mode: String): JSONObject {
+        if (!::context.isInitialized) return JSONObject().put("state", "idle")
+        val configuration = runCatching { JSONObject(File(directory, "config.json").readText()) }.getOrNull()
+        if (configuration?.optString("root") != root.canonicalPath || configuration.optString("mode") != mode) return JSONObject().put("state", "idle")
+        val filename = when (mode) { "debug" -> "debug-state.json"; "profile" -> "profile-state.json"; else -> "test-results.json" }
+        val result = runCatching { JSONObject(File(directory, filename).readText()) }.getOrElse { JSONObject().put("state", "starting") }
+        val status = readStatus()
+        if (!running() || status.optString("state") in setOf("failed", "exited")) {
+            if (mode == "debug" || result.optString("state") in setOf("starting", "running")) {
+                result.put("state", status.optString("state").takeIf { it in setOf("failed", "exited") } ?: "stopped")
+            }
+        }
+        return result
+    }
+
+    @Synchronized
+    fun debugCommand(root: File, command: String, frame: Int = 0, breakpoints: List<Pair<String, Int>> = emptyList()): Result<Unit> = runCatching {
+        require(command in setOf("continue", "into", "over", "out", "pause", "inspect", "breakpoints"))
+        val configuration = JSONObject(File(directory, "config.json").readText())
+        check(running() && configuration.optString("root") == root.canonicalPath && configuration.optString("mode") == "debug") { "No debugger is running for this project" }
+        val previous = runCatching { JSONObject(File(directory, "debug-command.json").readText()).optLong("sequence") }.getOrDefault(0L)
+        val deadline = SystemClock.elapsedRealtime() + 2_000
+        while (previous > 0 && runCatching { JSONObject(File(directory, "debug-state.json").readText()).optLong("commandSequence") }.getOrDefault(0L) < previous) {
+            check(running() && SystemClock.elapsedRealtime() < deadline) { "The debugger has not acknowledged the last command. Try again or stop the session." }
+            Thread.sleep(25)
+        }
+        val data = JSONObject().put("sequence", System.nanoTime()).put("command", command).put("frame", frame)
+            .put("breakpoints", JSONArray().apply { breakpoints.forEach { (path, line) ->
+                require(File(path).canonicalPath.startsWith(root.canonicalPath + File.separator) && line > 0)
+                put(JSONObject().put("file", File(path).canonicalPath).put("line", line))
+            } })
+        durableAtomicWrite(File(directory, "debug-command.json"), data.toString().toByteArray(Charsets.UTF_8))
+    }
 
     fun status(): WebShellResult {
         val status = readStatus()

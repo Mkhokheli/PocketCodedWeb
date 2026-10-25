@@ -4,6 +4,7 @@
 // socket, timer and module, and allows the next session to start a fresh Node VM.
 const fs = require('fs');
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const testResults = config.mode === 'tests' ? require('./test-results.cjs')(config) : null;
 const MAX_LOG_CHARS = Math.max(16 * 1024, Math.min(Number(config.maxLogChars) || 128 * 1024, 128 * 1024));
 const LOG_FLUSH_MS = Math.max(100, Math.min(Number(config.logFlushMs) || 200, 1000));
 let chunks = [];
@@ -64,6 +65,7 @@ function publish(extra = {}) {
   }
 }
 function write(chunk, encoding, callback) {
+  if (testResults) testResults.write(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
   const value = (Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk)).slice(-MAX_LOG_CHARS);
   if (value.length) {
     // Coalesce tiny writes into small blocks instead of retaining thousands of strings.
@@ -97,6 +99,7 @@ process.on('uncaughtExceptionMonitor', error => {
   publish();
 });
 process.on('exit', code => {
+  if (testResults) testResults.finish(code);
   flushLogOnExit();
   state = code === 0 ? 'exited' : 'failed';
   publish({exitCode: code});
@@ -127,4 +130,29 @@ Object.assign(process.env, config.env || {});
 process.argv = ['node', config.file, ...(config.args || [])];
 publish();
 // runMain preserves CommonJS require.main and ESM entry-point semantics.
-require('module').runMain(config.file);
+if (config.mode === 'debug') {
+  const {Worker} = require('worker_threads');
+  const worker = new Worker(require('path').join(__dirname, 'debug-worker.cjs'), {workerData: {config}});
+  const timeout = setTimeout(() => {
+    write('Debugger initialization timed out.\n'); worker.terminate(); process.exitCode = 1;
+  }, 10000);
+  worker.on('error', error => {
+    clearTimeout(timeout); write(`Debugger failed: ${error.message}\n`); process.exitCode = 1;
+  });
+  worker.once('message', message => {
+    clearTimeout(timeout);
+    if (message.ready) require('module').runMain(config.file);
+    else { write(`Debugger could not initialize: ${message.error}\n`); process.exitCode = 1; }
+  });
+  worker.unref();
+} else if (config.mode === 'profile') {
+  require('./profile-session.cjs')(config).catch(error => {
+    write((error.stack || String(error)) + '\n'); process.exitCode = 1;
+  });
+} else if (config.mode === 'tests') {
+  // Import in the current VM. Node Mobile cannot spawn another Node executable.
+  // node:test runs registered tests and emits TAP without --test child processes.
+  (async () => {
+    for (const file of config.testFiles) await import(require('url').pathToFileURL(file).href);
+  })().catch(error => { write((error.stack || String(error)) + '\n'); process.exitCode = 1; });
+} else require('module').runMain(config.file);

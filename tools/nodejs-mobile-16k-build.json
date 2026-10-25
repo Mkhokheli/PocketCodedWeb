@@ -1,0 +1,16 @@
+{
+  "version": "18.20.4",
+  "androidApi": 24,
+  "ndk": "r24",
+  "sourceUrl": "https://codeload.github.com/nodejs-mobile/nodejs-mobile/tar.gz/refs/tags/v18.20.4",
+  "sourceSha256": "62a2d3cca8c5ee89b6c40b52d8189dc915c8cae6e48dda2c1ad9e5f9d5f668f3",
+  "linkerFlags": "-Wl,-z,max-page-size=16384",
+  "upstreamFix": "https://github.com/nodejs-mobile/nodejs-mobile/pull/154",
+  "archiveSha256": "83f3f6c284800fc830767b43b963e38fdecf94ac46a35da8cbe05ef7c29e59d2",
+  "libraries": {
+    "arm64-v8a": "4cce654be26f03bd37fef549621ddca09970512b1dd7ea09307a8198273d4a9a",
+    "x86_64": "bd98bb1d0ac67162aaf18c268f2068d11e0b8c7ff0fbaeabeadbc818febade10",
+    "armeabi-v7a": "d60451f64718354b1a3d4857d20fbe56cc3a3dbe2c319c2911342aea2bbef92d"
+  },
+  "notes": "64-bit libraries rebuilt from source and stripped with NDK r24. The 32-bit library is unchanged from the pinned upstream Android archive."
+}

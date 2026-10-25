@@ -1,14 +1,12 @@
 "use strict";
 
 const { onRequest } = require("firebase-functions/v2/https");
-const { defineSecret } = require("firebase-functions/params");
 const { onMessagePublished } = require("firebase-functions/v2/pubsub");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const admin = require("firebase-admin");
 const crypto = require("crypto");
 
 admin.initializeApp();
-const geminiApiKey = defineSecret("GEMINI_API_KEY");
 
 const REGION = "us-central1";
 const APP_NAME = "PocketCodedWeb";
@@ -17,53 +15,8 @@ const RESET_DAILY_LIMIT = 150;
 const ANDROID_PACKAGE_NAME = "com.mkhokheli.pocketcodedweb";
 const LIFETIME_PRODUCT_ID = "pocketcodedweb_lifetime";
 const PLAY_BILLING_TOPIC = "play-billing-events";
-const DEFAULT_DAILY_LIMIT = 5;
-const PREMIUM_DAILY_LIMIT = 50;
-const GLOBAL_DAILY_LIMIT = 1000;
-const MAX_PROMPT_CHARS = 90000;
-const ALLOWED_MODELS = new Set([
-  "gemini-3.5-flash",
-  "gemini-3.1-flash-lite",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-]);
-
-exports.aiChat = onRequest(
-  {
-    region: REGION,
-    timeoutSeconds: 90,
-    memory: "512MiB",
-    secrets: [geminiApiKey],
-  },
-  async (request, response) => {
-    try {
-      if (request.method !== "POST") {
-        response.status(405).json({ error: "Use POST." });
-        return;
-      }
-      const auth = await verifyFirebaseAuth(request);
-      await verifyFirebaseAppCheck(request);
-      if (!auth.email_verified) throw httpError(403, "Verify your email before using AI Chat.");
-      const body = typeof request.body === "object" && request.body !== null ? request.body : {};
-      const requestedModel = String(body.model || "").trim();
-      const model = ALLOWED_MODELS.has(requestedModel) ? requestedModel : "gemini-3.5-flash";
-      const prompt = String(body.prompt || "");
-      if (!prompt.trim()) throw httpError(400, "Prompt is required.");
-      if (prompt.length > MAX_PROMPT_CHARS) throw httpError(413, "AI context is too large.");
-      const quota = await consumeDailyQuota(auth);
-      const result = await callGemini(model, prompt);
-      response.status(200).json({
-        text: result.text,
-        model,
-        usage: result.usage,
-        quota: { ...quota, remaining: Math.max(0, quota.limit - quota.used) },
-      });
-    } catch (error) {
-      sendError(response, error, "AI request failed.");
-    }
-  }
-);
-
+const PLAY_BILLING_SERVICE_ACCOUNT =
+  "play-billing-backend@pocketcodedweb-6887b.iam.gserviceaccount.com";
 exports.checkEmailQuota = onRequest(
   {
     region: REGION,
@@ -157,6 +110,7 @@ exports.verifyPlayPurchase = onRequest(
     region: REGION,
     timeoutSeconds: 30,
     memory: "256MiB",
+    serviceAccount: PLAY_BILLING_SERVICE_ACCOUNT,
   },
   async (request, response) => {
     try {
@@ -181,20 +135,38 @@ exports.verifyPlayPurchase = onRequest(
 );
 
 exports.playBillingNotification = onMessagePublished(
-  { topic: PLAY_BILLING_TOPIC, region: REGION, retry: true },
+  {
+    topic: PLAY_BILLING_TOPIC,
+    region: REGION,
+    retry: true,
+    serviceAccount: PLAY_BILLING_SERVICE_ACCOUNT,
+  },
   async (event) => {
     const encoded = event.data?.message?.data;
     if (!encoded) return;
     const notification = JSON.parse(Buffer.from(encoded, "base64").toString("utf8"));
-    if (notification.packageName !== ANDROID_PACKAGE_NAME || notification.testNotification) return;
+    console.info("Play billing notification received", {
+      messageId: event.data.message.messageId,
+      packageName: notification.packageName || null,
+      eventTimeMillis: notification.eventTimeMillis || null,
+      isTest: Boolean(notification.testNotification),
+      oneTimeNotificationType: notification.oneTimeProductNotification?.notificationType || null,
+      hasVoidedPurchase: Boolean(notification.voidedPurchaseNotification),
+    });
+    if (notification.packageName !== ANDROID_PACKAGE_NAME) return;
+    if (notification.testNotification) return;
     const oneTime = notification.oneTimeProductNotification;
     if (oneTime?.sku === LIFETIME_PRODUCT_ID && oneTime.purchaseToken) {
       await reconcilePlayPurchase(oneTime.purchaseToken);
       return;
     }
     const voided = notification.voidedPurchaseNotification;
-    if (voided?.purchaseToken) {
-      await markPlayPurchaseVoided(voided.purchaseToken, "rtdn");
+    if (voided && Number(voided.productType) === 2 && voided.purchaseToken) {
+      await markPlayPurchaseVoided(voided.purchaseToken, {
+        orderId: voided.orderId || null,
+        refundType: Number(voided.refundType || 0),
+        source: "rtdn",
+      });
     }
   }
 );
@@ -206,6 +178,7 @@ exports.reconcileVoidedPlayPurchases = onSchedule(
     timeZone: "Etc/UTC",
     timeoutSeconds: 300,
     memory: "256MiB",
+    serviceAccount: PLAY_BILLING_SERVICE_ACCOUNT,
     retryCount: 3,
   },
   async () => {
@@ -215,6 +188,7 @@ exports.reconcileVoidedPlayPurchases = onSchedule(
     });
     const publisher = google.androidpublisher({ version: "v3", auth });
     let token;
+    let processed = 0;
     do {
       const result = await publisher.purchases.voidedpurchases.list({
         packageName: ANDROID_PACKAGE_NAME,
@@ -223,39 +197,82 @@ exports.reconcileVoidedPlayPurchases = onSchedule(
         token,
       });
       for (const purchase of result.data.voidedPurchases || []) {
-        if (purchase.purchaseToken) await markPlayPurchaseVoided(purchase.purchaseToken, "voided-api");
+        if (!purchase.purchaseToken) continue;
+        await markPlayPurchaseVoided(purchase.purchaseToken, {
+          orderId: purchase.orderId || null,
+          voidedReason: Number(purchase.voidedReason || 0),
+          voidedSource: Number(purchase.voidedSource || 0),
+          voidedTimeMillis: purchase.voidedTimeMillis || null,
+          source: "voided-purchases-api",
+        });
+        processed += 1;
       }
       token = result.data.tokenPagination?.nextPageToken || undefined;
     } while (token);
+    console.info("Voided Play purchase reconciliation complete", { processed });
   }
 );
 
 async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
-  const purchase = await getPlayPurchase(productId, purchaseToken);
   const tokenHash = sha256(purchaseToken);
-  const expectedAccountId = sha256(uid);
-  const suppliedAccountId = purchase.obfuscatedExternalAccountId || null;
-  if (suppliedAccountId && suppliedAccountId !== expectedAccountId) {
-    throw httpError(409, "This purchase was made for another PocketCodedWeb account.");
-  }
-
-  const active = Number(purchase.purchaseState) === 0;
-  if (active && Number(purchase.acknowledgementState) === 0) {
-    await acknowledgePlayPurchase(productId, purchaseToken);
-    purchase.acknowledgementState = 1;
-  }
-
   const firestore = admin.firestore();
   const purchaseRef = firestore.collection("playPurchases").doc(tokenHash);
+  const previous = await purchaseRef.get();
+  if (previous.exists && previous.get("voidedAt")) {
+    const assignedUid = previous.get("uid") || null;
+    if (assignedUid && assignedUid !== uid) {
+      return { active: false, productId, verified: true };
+    }
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    const batch = firestore.batch();
+    batch.set(purchaseRef, {
+      uid,
+      active: false,
+      purchaseState: 1,
+      updatedAt: now,
+    }, { merge: true });
+    batch.set(firestore.collection("users").doc(uid), {
+      isPremium: false,
+      premiumProductId: productId,
+      premiumPurchaseTokenHash: tokenHash,
+      premiumVerifiedAt: now,
+      premiumRevokedAt: now,
+    }, { merge: true });
+    await batch.commit();
+    return { active: false, productId, verified: true };
+  }
+
+  const purchase = await getPlayPurchase(productId, purchaseToken);
+  const expectedAccountId = sha256(uid);
+  const suppliedAccountId = purchase.obfuscatedExternalAccountId || null;
+  let active = Number(purchase.purchaseState) === 0;
+  let acknowledgementError = null;
+  if (active && Number(purchase.acknowledgementState) === 0) {
+    try {
+      await acknowledgePlayPurchase(productId, purchaseToken);
+      purchase.acknowledgementState = 1;
+    } catch (error) {
+      acknowledgementError = {
+        status: Number(error.code || error.status || error.statusCode || 0) || null,
+        message: error.message || "Google Play acknowledgement failed.",
+      };
+      console.error("Verified purchase acknowledgement will be retried", {
+        purchaseTokenHash: tokenHash,
+        status: acknowledgementError.status,
+      });
+    }
+  }
+
   const userRef = firestore.collection("users").doc(uid);
   await firestore.runTransaction(async (transaction) => {
     const existing = await transaction.get(purchaseRef);
     const assignedUid = existing.exists ? existing.get("uid") : null;
+    if (existing.exists && existing.get("voidedAt")) active = false;
     if (assignedUid && assignedUid !== uid) {
       throw httpError(409, "This Google Play purchase is already assigned to another PocketCodedWeb account.");
     }
-    if (existing.exists && existing.get("voidedAt")) {
-      throw httpError(410, "This Google Play purchase has been refunded or revoked.");
+    if (!assignedUid && suppliedAccountId && suppliedAccountId !== expectedAccountId) {
+      throw httpError(409, "This purchase was made for another PocketCodedWeb account.");
     }
     const now = admin.firestore.FieldValue.serverTimestamp();
     transaction.set(purchaseRef, {
@@ -265,7 +282,10 @@ async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
       purchaseTokenHash: tokenHash,
       orderId: purchase.orderId || null,
       purchaseState: Number(purchase.purchaseState),
+      consumptionState: Number(purchase.consumptionState),
       acknowledgementState: Number(purchase.acknowledgementState),
+      acknowledgementPending: active && Number(purchase.acknowledgementState) === 0,
+      acknowledgementLastErrorStatus: acknowledgementError?.status || null,
       purchasedAt: purchase.purchaseTimeMillis
         ? admin.firestore.Timestamp.fromMillis(Number(purchase.purchaseTimeMillis))
         : null,
@@ -281,7 +301,12 @@ async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
       premiumRevokedAt: active ? null : now,
     }, { merge: true });
   });
-  return { active, productId, verified: true };
+  return {
+    active,
+    productId,
+    verified: true,
+    acknowledgementPending: active && Number(purchase.acknowledgementState) === 0,
+  };
 }
 
 async function reconcilePlayPurchase(purchaseToken) {
@@ -292,30 +317,54 @@ async function reconcilePlayPurchase(purchaseToken) {
     await verifyAndStorePlayPurchase(existing.get("uid"), LIFETIME_PRODUCT_ID, purchaseToken);
   } catch (error) {
     const status = Number(error.code || error.status || error.statusCode || 0);
-    if (status === 404 || status === 410) await markPlayPurchaseVoided(purchaseToken, "play-api");
+    if (status === 404 || status === 410) {
+      await markPlayPurchaseVoided(purchaseToken, { source: "play-api-not-found" });
+    }
     else throw error;
   }
 }
 
-async function markPlayPurchaseVoided(purchaseToken, source) {
+async function markPlayPurchaseVoided(purchaseToken, details = {}) {
   const tokenHash = sha256(purchaseToken);
   const firestore = admin.firestore();
   const purchaseRef = firestore.collection("playPurchases").doc(tokenHash);
   await firestore.runTransaction(async (transaction) => {
     const purchase = await transaction.get(purchaseRef);
-    const uid = purchase.exists ? purchase.get("uid") : null;
-    const userRef = uid ? firestore.collection("users").doc(uid) : null;
-    const user = userRef ? await transaction.get(userRef) : null;
     const now = admin.firestore.FieldValue.serverTimestamp();
+    if (!purchase.exists || !purchase.get("uid")) {
+      transaction.set(purchaseRef, {
+        active: false,
+        purchaseState: 1,
+        purchaseTokenHash: tokenHash,
+        productId: LIFETIME_PRODUCT_ID,
+        packageName: ANDROID_PACKAGE_NAME,
+        voidedAt: now,
+        revokedAt: now,
+        voidedOrderId: details.orderId || null,
+        voidedReason: details.voidedReason ?? null,
+        voidedSource: details.voidedSource ?? null,
+        voidedTimeMillis: details.voidedTimeMillis || null,
+        voidedDetectionSource: details.source || "unknown",
+        updatedAt: now,
+      }, { merge: true });
+      return;
+    }
+    const uid = purchase.get("uid");
+    const userRef = firestore.collection("users").doc(uid);
+    const user = await transaction.get(userRef);
     transaction.set(purchaseRef, {
       active: false,
       purchaseState: 1,
       voidedAt: now,
       revokedAt: now,
-      voidedDetectionSource: source,
+      voidedOrderId: details.orderId || null,
+      voidedReason: details.voidedReason ?? null,
+      voidedSource: details.voidedSource ?? null,
+      voidedTimeMillis: details.voidedTimeMillis || null,
+      voidedDetectionSource: details.source || "unknown",
       updatedAt: now,
     }, { merge: true });
-    if (userRef && user?.get("premiumPurchaseTokenHash") === tokenHash) {
+    if (user.get("premiumPurchaseTokenHash") === tokenHash) {
       transaction.set(userRef, {
         isPremium: false,
         premiumVerifiedAt: now,
@@ -355,88 +404,6 @@ async function acknowledgePlayPurchase(productId, purchaseToken) {
 
 function sha256(value) {
   return crypto.createHash("sha256").update(String(value), "utf8").digest("hex");
-}
-
-async function consumeDailyQuota(auth) {
-  const firestore = admin.firestore();
-  const day = new Date().toISOString().slice(0, 10);
-  const resetAt = `${day}T23:59:59.999Z`;
-  const limit = await dailyLimitForUser(auth);
-  const userRef = firestore.collection("aiDailyUsage").doc(`${auth.uid}_${day}`);
-  const globalRef = firestore.collection("aiDailyUsage").doc(`GLOBAL_${day}`);
-  return firestore.runTransaction(async (transaction) => {
-    const globalSnapshot = await transaction.get(globalRef);
-    const userSnapshot = await transaction.get(userRef);
-    const globalCurrent = globalSnapshot.exists ? Number(globalSnapshot.get("count") || 0) : 0;
-    const userCurrent = userSnapshot.exists ? Number(userSnapshot.get("count") || 0) : 0;
-    if (globalCurrent >= GLOBAL_DAILY_LIMIT) {
-      throw httpError(503, "The shared AI service is temporarily busy. Try again tomorrow or use your own API key.");
-    }
-    if (userCurrent >= limit) {
-      throw httpError(429, `Daily AI limit reached (${limit} prompts).`);
-    }
-    const now = admin.firestore.FieldValue.serverTimestamp();
-    transaction.set(userRef, {
-      uid: auth.uid,
-      day,
-      count: userCurrent + 1,
-      limit,
-      resetAt,
-      updatedAt: now,
-    }, { merge: true });
-    transaction.set(globalRef, {
-      uid: "GLOBAL",
-      day,
-      count: globalCurrent + 1,
-      limit: GLOBAL_DAILY_LIMIT,
-      resetAt,
-      updatedAt: now,
-    }, { merge: true });
-    return { limit, used: userCurrent + 1, resetAt };
-  });
-}
-
-async function dailyLimitForUser(auth) {
-  const firestore = admin.firestore();
-  const [user, entitlement] = await Promise.all([
-    firestore.collection("users").doc(auth.uid).get(),
-    firestore.collection("aiEntitlements").doc(auth.uid).get(),
-  ]);
-  if (user.get("isPremium") === true || auth.premium === true || auth.aiPremium === true) {
-    return PREMIUM_DAILY_LIMIT;
-  }
-  if (entitlement.exists) {
-    const explicit = Number(entitlement.get("dailyLimit"));
-    if (Number.isFinite(explicit) && explicit > 0) return Math.min(500, Math.floor(explicit));
-    if (entitlement.get("premium") === true) return PREMIUM_DAILY_LIMIT;
-  }
-  return DEFAULT_DAILY_LIMIT;
-}
-
-async function callGemini(model, prompt) {
-  const key = geminiApiKey.value();
-  if (!key) throw httpError(500, "Gemini API key is not configured on the backend.");
-  const url = new URL(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`);
-  url.searchParams.set("key", key);
-  const upstream = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { temperature: 0.25, maxOutputTokens: 4096 },
-    }),
-  });
-  const raw = await upstream.text();
-  const data = raw ? JSON.parse(raw) : {};
-  if (!upstream.ok) {
-    throw httpError(upstream.status, data.error?.message || "Gemini request failed.");
-  }
-  const text = (data.candidates || [])
-    .flatMap((candidate) => candidate.content?.parts || [])
-    .map((part) => part.text || "")
-    .join("")
-    .trim();
-  return { text: text || "I could not generate a response.", usage: data.usageMetadata || null };
 }
 
 async function verifyFirebaseAuth(request) {

@@ -28,20 +28,86 @@ import kotlin.math.abs
 @Composable
 internal fun LargeFileCodeEditor(
     value: TextFieldValue,
+    session: EditorSession? = null,
     palette: WebPalette,
     modifier: Modifier,
     highlight: (String) -> AnnotatedString,
     onValueChange: (TextFieldValue) -> Unit,
+    breakpoints: Set<Int> = emptySet(),
+    onBreakpoint: (Int) -> Unit = {},
+    sourceJump: WebSourceJump? = null,
 ) {
     AndroidView(
         modifier = modifier,
         factory = { LargeDocumentEditText(it) },
-        update = { it.bind(value, palette, highlight, onValueChange) },
+        update = {
+            it.bindSession(session)
+            it.bind(value, palette, highlight, onValueChange)
+            it.bindDevelopment(breakpoints, onBreakpoint, sourceJump)
+        },
         onRelease = { it.dispose() },
     )
 }
 
 internal class LargeDocumentEditText(context: Context) : EditText(context) {
+    private var session: EditorSession? = null
+    private var hasBoundValue = false
+    private var followCursor = true
+    private val revealCaretTask = Runnable {
+        if (hasFocus() && followCursor && !dragged) revealCaret(selectionEnd)
+    }
+    fun bindSession(updated: EditorSession?) {
+        if (session === updated) return
+        session = updated
+        hasBoundValue = false
+        followCursor = updated?.followCursor ?: true
+        updated?.let { saved ->
+            val savedX = saved.horizontalScroll
+            val savedY = saved.verticalScroll
+            post { if (session === saved) scrollTo(savedX, savedY) }
+        }
+    }
+    private fun followEditedCursor() {
+        followCursor = true
+        session?.followCursor = true
+        removeCallbacks(revealCaretTask)
+        post(revealCaretTask)
+    }
+    private fun revealCaret(offset: Int): Boolean {
+        val currentLayout = layout ?: return false
+        if (offset !in 0..length()) return false
+        val line = currentLayout.getLineForOffset(offset)
+        val margin = 12f * resources.displayMetrics.density
+        val x = currentLayout.getPrimaryHorizontal(offset)
+        val targetX = editorCursorScrollTarget(scrollX,
+            width - totalPaddingLeft - totalPaddingRight,
+            (currentLayout.width - width + totalPaddingLeft + totalPaddingRight).coerceAtLeast(0),
+            x, x + 2f, margin)
+        val targetY = editorCursorScrollTarget(scrollY,
+            height - totalPaddingTop - totalPaddingBottom,
+            (currentLayout.height - height + totalPaddingTop + totalPaddingBottom).coerceAtLeast(0),
+            currentLayout.getLineTop(line).toFloat(), currentLayout.getLineBottom(line).toFloat(), margin)
+        if (targetX == scrollX && targetY == scrollY) return false
+        scrollTo(targetX, targetY)
+        return true
+    }
+    private var breakpoints: Set<Int> = emptySet()
+    private var onBreakpoint: ((Int) -> Unit)? = null
+    private var gutterGesture = false
+    private var lastJump: Long? = null
+    fun bindDevelopment(points: Set<Int>, toggle: (Int) -> Unit, jump: WebSourceJump?) {
+        if (breakpoints != points) { breakpoints = points; invalidate() }
+        onBreakpoint = toggle
+        if (jump != null && lastJump != jump.version) {
+            lastJump = jump.version
+            post {
+                val currentLayout = layout ?: return@post
+                val line = (jump.line - 1).coerceIn(0, currentLayout.lineCount - 1)
+                scrollTo(0, currentLayout.getLineTop(line))
+                invalidate()
+            }
+        }
+    }
     private var applying = false
     private var source = ""
     private var notifyChange: ((TextFieldValue) -> Unit)? = null
@@ -79,20 +145,23 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
                 if (applying || text == null) return
                 source = text.toString()
                 publishValue()
+                followEditedCursor()
                 scheduleHighlight()
             }
         })
     }
 
     fun bind(value: TextFieldValue, palette: WebPalette, highlight: (String) -> AnnotatedString, changed: (TextFieldValue) -> Unit) {
+        val restoringSession = !hasBoundValue
         notifyChange = changed
         highlightSource = highlight
         val newPalette = currentPalette != palette
         if (newPalette) {
             currentPalette = palette
-            setBackgroundColor(palette.panel.toArgb())
+            setBackgroundColor(palette.editorBackground.toArgb())
             setTextColor(palette.text.toArgb())
             setHintTextColor(palette.subtleText.toArgb())
+            highlightColor = palette.accent.copy(alpha = 0.18f).toArgb()
         }
         applying = true
         try {
@@ -104,11 +173,15 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
                 syntaxSpans.clear()
                 scrollTo(x, y)
                 scheduleHighlight()
+                if (!restoringSession) followEditedCursor()
             }
             val start = value.selection.start.coerceIn(0, length())
             val end = value.selection.end.coerceIn(0, length())
-            if (selectionStart != start || selectionEnd != end) setSelection(start, end)
-        } finally { applying = false }
+            if (selectionStart != start || selectionEnd != end) {
+                setSelection(start, end)
+                if (!restoringSession) followEditedCursor()
+            }
+        } finally { applying = false; hasBoundValue = true }
         if (newPalette) scheduleHighlight()
     }
 
@@ -124,18 +197,46 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
     override fun onSelectionChanged(start: Int, end: Int) {
         super.onSelectionChanged(start, end)
         publishValue()
+        if (!applying && hasBoundValue && hasFocus()) followEditedCursor()
     }
 
-    // Keep the user's viewport when the cursor, IME or a completion changes selection.
-    override fun bringPointIntoView(offset: Int): Boolean = false
+    // Deliberately reveal the caret inside this editor; never scroll an outer panel/page.
+    override fun bringPointIntoView(offset: Int): Boolean =
+        if (hasFocus() && followCursor && !dragged) revealCaret(offset) else false
     override fun requestRectangleOnScreen(rectangle: Rect?, immediate: Boolean): Boolean = false
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        removeCallbacks(revealCaretTask)
+        post(revealCaretTask)
+    }
 
     override fun onScrollChanged(x: Int, y: Int, oldX: Int, oldY: Int) {
         super.onScrollChanged(x, y, oldX, oldY)
+        session?.let { it.horizontalScroll = x; it.verticalScroll = y }
         scheduleHighlight()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) gutterGesture = event.x < paddingLeft
+        if (gutterGesture) {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) { downX = event.x; downY = event.y }
+            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                val slop = ViewConfiguration.get(context).scaledTouchSlop
+                if (abs(event.x - downX) < slop && abs(event.y - downY) < slop) {
+                    layout?.let { measured ->
+                        val sourceY = event.y + scrollY - totalPaddingTop
+                        if (measured.lineCount > 0 && sourceY >= measured.getLineTop(0) &&
+                                sourceY < measured.getLineBottom(measured.lineCount - 1)) {
+                            onBreakpoint?.invoke(measured.getLineForVertical(sourceY.toInt()) + 1)
+                        }
+                    }
+                }
+                gutterGesture = false
+            }
+            if (event.actionMasked == MotionEvent.ACTION_CANCEL) gutterGesture = false
+            return true
+        }
         if (event.actionMasked == MotionEvent.ACTION_UP) {
             val slop = ViewConfiguration.get(context).scaledTouchSlop
             dragged = dragged || abs(event.x - downX) > slop || abs(event.y - downY) > slop
@@ -147,7 +248,11 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
             }
             MotionEvent.ACTION_MOVE -> {
                 val slop = ViewConfiguration.get(context).scaledTouchSlop
-                if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) dragged = true
+                if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) {
+                    dragged = true
+                    followCursor = false
+                    session?.followCursor = false
+                }
             }
             MotionEvent.ACTION_UP -> if (dragged) scheduleHighlight() else post(highlightTask)
             MotionEvent.ACTION_CANCEL -> scheduleHighlight()
@@ -155,9 +260,11 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         val handled = super.onTouchEvent(event)
         if (event.actionMasked == MotionEvent.ACTION_UP && !dragged) {
             requestFocus()
+            followEditedCursor()
             (context.getSystemService(Context.INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
                 .showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
         }
+        if (event.actionMasked == MotionEvent.ACTION_UP || event.actionMasked == MotionEvent.ACTION_CANCEL) dragged = false
         return handled
     }
 
@@ -214,19 +321,25 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         val last = layout.getLineForVertical(scrollY + height)
         canvas.save()
         canvas.translate(scrollX.toFloat(), scrollY.toFloat())
-        gutterPaint.color = palette.panel.toArgb()
+        gutterPaint.color = palette.editorBackground.toArgb()
         canvas.drawRect(0f, 0f, paddingLeft.toFloat() - 4f, height.toFloat(), gutterPaint)
         gutterPaint.color = palette.subtleText.toArgb()
         gutterPaint.textSize = textSize
         gutterPaint.typeface = Typeface.MONOSPACE
-        gutterPaint.textAlign = Paint.Align.RIGHT
+        gutterPaint.textAlign = Paint.Align.CENTER
+        val numberCenter = (paddingLeft.toFloat() - 4f) / 2f
         for (line in first..last) {
-            canvas.drawText((line + 1).toString(), paddingLeft.toFloat() - 12f,
+            gutterPaint.color = if (line + 1 in breakpoints) palette.error.toArgb() else palette.subtleText.toArgb()
+            if (line + 1 in breakpoints) {
+                canvas.drawCircle(numberCenter,
+                    (layout.getLineTop(line) + layout.getLineBottom(line)) / 2f + totalPaddingTop - scrollY,
+                    3f * resources.displayMetrics.density, gutterPaint)
+            } else canvas.drawText((line + 1).toString(), numberCenter,
                 (layout.getLineBaseline(line) + totalPaddingTop - scrollY).toFloat(), gutterPaint)
         }
         canvas.restore()
     }
 
-    fun dispose() { removeCallbacks(highlightTask); notifyChange = null; highlightSource = null }
-    override fun onDetachedFromWindow() { removeCallbacks(highlightTask); super.onDetachedFromWindow() }
+    fun dispose() { removeCallbacks(highlightTask); removeCallbacks(revealCaretTask); session = null; notifyChange = null; highlightSource = null; onBreakpoint = null }
+    override fun onDetachedFromWindow() { removeCallbacks(highlightTask); removeCallbacks(revealCaretTask); super.onDetachedFromWindow() }
 }

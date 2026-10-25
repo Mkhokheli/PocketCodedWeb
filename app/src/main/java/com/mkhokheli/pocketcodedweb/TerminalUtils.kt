@@ -1,5 +1,7 @@
 package com.mkhokheli.pocketcodedweb
 
+import com.mkhokheli.pocketcodedweb.ui.theme.readableTextColor
+
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.AnnotatedString
@@ -25,7 +27,7 @@ private val terminalWarningRegex = Regex("\\b(warning|warn|deprecated|skipped)\\
 private val terminalRanTestsRegex = Regex("^ran \\d+ tests?")
 private val terminalUrlRegex = Regex("https?://[^\\s<>\\\"'\\u001B]+", RegexOption.IGNORE_CASE)
 
-internal fun linkifyTerminalOutput(text: AnnotatedString): AnnotatedString = buildAnnotatedString {
+internal fun linkifyTerminalOutput(text: AnnotatedString, background: Color = Color(0xFF1E1E1E)): AnnotatedString = buildAnnotatedString {
     append(text)
     terminalUrlRegex.findAll(text.text).forEach { match ->
         var url = match.value.trimEnd('.', ',', ';', ':')
@@ -34,7 +36,7 @@ internal fun linkifyTerminalOutput(text: AnnotatedString): AnnotatedString = bui
         }
         if (normalizePreviewLink(url) != null) {
             addLink(LinkAnnotation.Url(url, TextLinkStyles(style = SpanStyle(
-                color = Color(0xFF448AFF), textDecoration = TextDecoration.Underline,
+                color = readableTextColor(Color(0xFF448AFF), background), textDecoration = TextDecoration.Underline,
             ))), match.range.first, match.range.first + url.length)
         }
     }
@@ -117,7 +119,7 @@ internal fun parseAnsiTerminalOutput(
                             val red = (codes.getOrNull(index + 2) ?: 255).coerceIn(0, 255)
                             val green = (codes.getOrNull(index + 3) ?: 255).coerceIn(0, 255)
                             val blue = (codes.getOrNull(index + 4) ?: 255).coerceIn(0, 255)
-                            ansiForeground = ensureReadableColor(Color(red, green, blue), palette.panel)
+                            ansiForeground = ensureReadableColor(Color(red, green, blue), palette.terminalBackground)
                             index += 4
                         }
                     }
@@ -210,7 +212,7 @@ private fun terminalSemanticColor(line: String, palette: WebPalette): Color? {
 }
 
 private fun terminalAnsiColor(code: Int, palette: WebPalette): Color {
-    val darkBackground = palette.panel.luminance() < 0.5f
+    val darkBackground = palette.terminalBackground.luminance() < 0.5f
     val colors = if (darkBackground) {
         listOf(
             Color(0xFF9AA4B2), palette.error, palette.success, palette.warning,
@@ -227,7 +229,7 @@ private fun terminalAnsiColor(code: Int, palette: WebPalette): Color {
         )
     }
     val index = if (code >= 90) code - 90 + 8 else code - 30
-    return ensureReadableColor(colors[index.coerceIn(0, colors.lastIndex)], palette.panel)
+    return ensureReadableColor(colors[index.coerceIn(0, colors.lastIndex)], palette.terminalBackground)
 }
 
 private fun ansi256Color(code: Int, palette: WebPalette): Color {
@@ -238,32 +240,18 @@ private fun ansi256Color(code: Int, palette: WebPalette): Color {
     }
     if (value >= 232) {
         val gray = 8 + (value - 232) * 10
-        return ensureReadableColor(Color(gray, gray, gray), palette.panel)
+        return ensureReadableColor(Color(gray, gray, gray), palette.terminalBackground)
     }
     val cube = value - 16
     val red = cube / 36
     val green = (cube % 36) / 6
     val blue = cube % 6
     fun channel(component: Int) = if (component == 0) 0 else 55 + component * 40
-    return ensureReadableColor(Color(channel(red), channel(green), channel(blue)), palette.panel)
+    return ensureReadableColor(Color(channel(red), channel(green), channel(blue)), palette.terminalBackground)
 }
 
-private fun ensureReadableColor(foreground: Color, background: Color): Color {
-    var adjusted = foreground.copy(alpha = 1f)
-    val target = if (background.luminance() > 0.5f) Color.Black else Color.White
-    repeat(10) {
-        val lighter = maxOf(adjusted.luminance(), background.luminance()) + 0.05f
-        val darker = minOf(adjusted.luminance(), background.luminance()) + 0.05f
-        if (lighter / darker >= 4.5f) return adjusted
-        adjusted = Color(
-            red = adjusted.red * 0.82f + target.red * 0.18f,
-            green = adjusted.green * 0.82f + target.green * 0.18f,
-            blue = adjusted.blue * 0.82f + target.blue * 0.18f,
-            alpha = 1f
-        )
-    }
-    return adjusted
-}
+private fun ensureReadableColor(foreground: Color, background: Color): Color =
+    readableTextColor(foreground, background)
 
 fun splitShellCommandLine(command: String): List<String> {
     val args = mutableListOf<String>()

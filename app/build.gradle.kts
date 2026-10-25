@@ -17,8 +17,8 @@ android {
         applicationId = "com.mkhokheli.pocketcodedweb"
         minSdk = 25
         targetSdk = 36
-        versionCode = 32
-        versionName = "3.9.2"
+        versionCode = 35
+        versionName = "4.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

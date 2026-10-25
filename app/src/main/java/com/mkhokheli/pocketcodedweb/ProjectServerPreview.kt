@@ -4,7 +4,11 @@ import java.io.File
 import org.json.JSONObject
 
 /** Null selects the built-in frontend preview; errors never silently open stale static content. */
-internal fun prepareProjectServerPreview(root: File, working: File): WebShellResult? {
+internal fun prepareProjectServerPreview(
+    root: File,
+    working: File,
+    browserPreview: Boolean = false,
+): WebShellResult? {
     var started = WebShellResult()
     if (!NodeSessionRuntime.isRunningFor(root)) {
         val project = root.canonicalFile
@@ -15,7 +19,7 @@ internal fun prepareProjectServerPreview(root: File, working: File): WebShellRes
             .getOrElse { return WebShellResult(error = "Cannot read package.json: ${it.message}") }
         val scripts = json.optJSONObject("scripts") ?: return null
         val script = listOf("dev", "start").firstOrNull { scripts.optString(it).isNotBlank() } ?: return null
-        started = executeWebShellCommand("npm run $script", root, packageRoot)
+        started = executeWebShellCommand("npm run $script", root, packageRoot, browserPreview = browserPreview)
         if (started.error.isNotBlank()) return started
         if (started.openPreview) return null
     }
