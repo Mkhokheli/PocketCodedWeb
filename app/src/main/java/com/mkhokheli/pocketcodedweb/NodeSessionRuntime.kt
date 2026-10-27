@@ -12,6 +12,8 @@ import org.json.JSONObject
 internal object NodeSessionRuntime {
     private data class CachedStatus(val modified: Long, val size: Long, val value: JSONObject)
     @Volatile private var cachedStatus: CachedStatus? = null
+    private val logCursor = TerminalLogCursor()
+    private var reportedState = ""
     private lateinit var context: Context
     fun initialize(value: Context) { context = value.applicationContext }
     private val directory get() = File(context.noBackupFilesDir, "node-session")
@@ -56,6 +58,8 @@ internal object NodeSessionRuntime {
         require(mode != "tests" || testFiles.isNotEmpty()) { "Select at least one test file" }
         require(file.isFile) { "Node entry point does not exist: ${file.name}" }
         directory.mkdirs()
+        logCursor.reset()
+        reportedState = "starting"
         listOf("debug-state.json", "debug-command.json", "test-results.json", "profile-state.json").forEach { File(directory, it).delete() }
         File(directory, "status.json").delete()
         cachedStatus = null
@@ -126,10 +130,29 @@ internal object NodeSessionRuntime {
         durableAtomicWrite(File(directory, "debug-command.json"), data.toString().toByteArray(Charsets.UTF_8))
     }
 
+    /** Called by the visible project's terminal, including once after a session exits. */
+    @Synchronized
+    fun drainOutput(root: File): String {
+        if (!::context.isInitialized) return ""
+        val config = runCatching { JSONObject(File(directory, "config.json").readText()) }.getOrNull()
+        if (config?.optString("root") != root.canonicalPath) return ""
+        val log = runCatching { File(directory, "session.log").readText() }.getOrNull() ?: return ""
+        val addition = logCursor.consume(log)
+        val status = readStatus().optString("state")
+        val state = if (running()) status else status.takeIf { it in setOf("failed", "exited") } ?: "stopped"
+        val ended = state in setOf("failed", "exited", "stopped") && state != reportedState
+        reportedState = state
+        return addition + if (ended) "\nNode session: $state\n" else ""
+    }
+
+    @Synchronized
     fun status(): WebShellResult {
         val status = readStatus()
         val state = if (running()) status.optString("state") else status.optString("state").takeIf { it in setOf("failed", "exited") } ?: "stopped"
         val log = runCatching { File(directory, "session.log").readText() }.getOrDefault("")
+        // The command result displays this snapshot; live polling starts after it.
+        logCursor.consume(log)
+        reportedState = state
         val urls = status.optJSONArray("urls")
         val addresses = (0 until (urls?.length() ?: 0)).map { urls!!.optString(it) }
             .filter { it.isNotBlank() && !log.contains(it) && state == "running" }

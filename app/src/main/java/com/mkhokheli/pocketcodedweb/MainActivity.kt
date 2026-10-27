@@ -914,6 +914,30 @@ internal fun WebIdeApp(
             rememberSaveable(rootDirectory.absolutePath) {
                 mutableStateOf(savedSession.terminalText)
             }
+    val nodeLogLifecycle = (context as? androidx.lifecycle.LifecycleOwner)?.lifecycle
+    LaunchedEffect(rootDirectory.absolutePath, nodeLogLifecycle) {
+        var previousLiveText: String? = null
+        suspend fun followNodeOutput() {
+            while (true) {
+                val (output, running) = withContext(Dispatchers.IO) {
+                    NodeSessionRuntime.drainOutput(rootDirectory) to NodeSessionRuntime.isRunningFor(rootDirectory)
+                }
+                if (output.isNotEmpty()) {
+                    terminalText = trimTerminalBuffer(terminalText +
+                        (if (terminalText != previousLiveText && terminalText.isNotEmpty() && !terminalText.endsWith("\n")) "\n" else "") + output)
+                    previousLiveText = terminalText
+                }
+                delay(if (running) DeviceEfficiency.budget.logFlushMs.toLong().coerceAtLeast(250L)
+                      else DeviceEfficiency.budget.idlePollMs)
+            }
+        }
+        // Keep state updates on Android's UI dispatcher, including in UI tests.
+        withContext(Dispatchers.Main.immediate) {
+            if (nodeLogLifecycle != null) {
+                nodeLogLifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) { followNodeOutput() }
+            } else followNodeOutput()
+        }
+    }
     var fullScreenMode by
             rememberSaveable(rootDirectory.absolutePath) {
                 mutableStateOf(savedSession.fullScreenMode)
