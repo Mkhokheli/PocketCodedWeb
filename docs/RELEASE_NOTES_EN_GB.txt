@@ -1,0 +1,6 @@
+<en-GB>
+? Added monthly Premium alongside the lifetime purchase.
+? Added an API tester to the editor Tools menu for testing local and remote APIs.
+? Refined API tester button spacing and compact/fullscreen layouts.
+? Improved subscription restoration and renewal handling.
+</en-GB>

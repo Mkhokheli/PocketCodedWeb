@@ -75,6 +75,9 @@ test("clients cannot create or change premium entitlement fields", async () => {
   await seedProfile("alice");
   await assertFails(updateDoc(reference, { isPremium: true }));
   await assertFails(updateDoc(reference, { premiumPurchaseTokenHash: "forged" }));
+  await assertFails(updateDoc(reference, { lifetimePremium: true }));
+  await assertFails(updateDoc(reference, { monthlyExpiresAt: new Date("2099-01-01") }));
+  await assertFails(updateDoc(reference, { monthlyPurchaseTokenHash: "forged" }));
 });
 
 test("clients have no access to purchase records", async () => {

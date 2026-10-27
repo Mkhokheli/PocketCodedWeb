@@ -39,6 +39,8 @@ internal data class WebDevelopmentActions(
     val prepareSearch: suspend () -> Unit = {},
     val filesChanged: (List<File>) -> Unit = {},
 )
+internal val LocalApiTester = staticCompositionLocalOf<ApiTesterState?> { null }
+
 internal val LocalWebDevelopmentActions = staticCompositionLocalOf<WebDevelopmentActions?> { null }
 
 @Composable
@@ -107,6 +109,7 @@ internal fun WebDevelopmentMenu(
     onRestore: (String) -> Unit,
 ) {
     val actions = LocalWebDevelopmentActions.current
+    val apiTester = LocalApiTester.current
     val scope = rememberCoroutineScope()
     val context = androidx.compose.ui.platform.LocalContext.current
     val configurationStore = remember(actions?.fileStore?.projectDirectory) {
@@ -144,6 +147,8 @@ internal fun WebDevelopmentMenu(
         DropdownMenu(expanded, onDismissRequest = { expanded = false },
             containerColor = palette.elevatedPanel, shape = RoundedCornerShape(12.dp),
             border = BorderStroke(1.dp, palette.border)) {
+            DropdownMenuItem(text = { Text("API tester") }, colors = itemColors, enabled = apiTester != null,
+                onClick = { expanded = false; apiTester?.open = true })
             DropdownMenuItem(text = { Text("Debug current file") }, colors = itemColors, enabled = actions != null && !actions.development.starting && file.name.substringAfterLast('.').lowercase() in setOf("js", "cjs", "mjs"),
                 onClick = { expanded = false; actions?.startDevelopment?.invoke("debug", file.filePath, emptyList()) })
             DropdownMenuItem(text = { Text("Profile current file") }, colors = itemColors,

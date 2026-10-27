@@ -70,6 +70,9 @@ service cloud.firestore {
           'isPremium', 'premium', 'premiumVerified', 'entitlement',
           'purchaseToken', 'purchaseOrderId', 'premiumProductId',
           'premiumPurchaseTokenHash', 'premiumVerifiedAt', 'premiumRevokedAt',
+          'lifetimePremium',
+          'monthlyExpiresAt',
+          'monthlyPurchaseTokenHash',
           'purchaseTokenHash', 'orderId', 'active', 'verifiedAt', 'voidedAt',
           'revokedAt', 'acknowledgementState', 'acknowledgementPending',
           'trialStartedAtMillis', 'trialEndsAtMillis'

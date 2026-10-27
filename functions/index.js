@@ -14,6 +14,7 @@ const VERIFICATION_DAILY_LIMIT = 1000;
 const RESET_DAILY_LIMIT = 150;
 const ANDROID_PACKAGE_NAME = "com.mkhokheli.pocketcodedweb";
 const LIFETIME_PRODUCT_ID = "pocketcodedweb_lifetime";
+const MONTHLY_PRODUCT_ID = "pocketcodedweb_premium_monthly";
 const PLAY_BILLING_TOPIC = "play-billing-events";
 const PLAY_BILLING_SERVICE_ACCOUNT =
   "play-billing-backend@pocketcodedweb-6887b.iam.gserviceaccount.com";
@@ -123,7 +124,7 @@ exports.verifyPlayPurchase = onRequest(
       const body = typeof request.body === "object" && request.body !== null ? request.body : {};
       const productId = String(body.productId || "").trim();
       const purchaseToken = String(body.purchaseToken || "").trim();
-      if (productId !== LIFETIME_PRODUCT_ID || !purchaseToken) {
+      if (![LIFETIME_PRODUCT_ID, MONTHLY_PRODUCT_ID].includes(productId) || !purchaseToken) {
         throw httpError(400, "A valid Premium purchase token is required.");
       }
       response.status(200).json(await verifyAndStorePlayPurchase(auth.uid, productId, purchaseToken));
@@ -155,12 +156,21 @@ exports.playBillingNotification = onMessagePublished(
     });
     if (notification.packageName !== ANDROID_PACKAGE_NAME) return;
     if (notification.testNotification) return;
+    const subscription = notification.subscriptionNotification;
+    if (subscription?.purchaseToken) {
+      await reconcilePlayPurchase(subscription.purchaseToken, MONTHLY_PRODUCT_ID);
+      return;
+    }
     const oneTime = notification.oneTimeProductNotification;
     if (oneTime?.sku === LIFETIME_PRODUCT_ID && oneTime.purchaseToken) {
       await reconcilePlayPurchase(oneTime.purchaseToken);
       return;
     }
     const voided = notification.voidedPurchaseNotification;
+    if (voided && Number(voided.productType) === 1 && voided.purchaseToken) {
+      await reconcilePlayPurchase(voided.purchaseToken, MONTHLY_PRODUCT_ID);
+      return;
+    }
     if (voided && Number(voided.productType) === 2 && voided.purchaseToken) {
       await markPlayPurchaseVoided(voided.purchaseToken, {
         orderId: voided.orderId || null,
@@ -214,6 +224,7 @@ exports.reconcileVoidedPlayPurchases = onSchedule(
 );
 
 async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
+  if (productId === MONTHLY_PRODUCT_ID) return verifyAndStoreSubscription(uid, purchaseToken);
   const tokenHash = sha256(purchaseToken);
   const firestore = admin.firestore();
   const purchaseRef = firestore.collection("playPurchases").doc(tokenHash);
@@ -223,22 +234,7 @@ async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
     if (assignedUid && assignedUid !== uid) {
       return { active: false, productId, verified: true };
     }
-    const now = admin.firestore.FieldValue.serverTimestamp();
-    const batch = firestore.batch();
-    batch.set(purchaseRef, {
-      uid,
-      active: false,
-      purchaseState: 1,
-      updatedAt: now,
-    }, { merge: true });
-    batch.set(firestore.collection("users").doc(uid), {
-      isPremium: false,
-      premiumProductId: productId,
-      premiumPurchaseTokenHash: tokenHash,
-      premiumVerifiedAt: now,
-      premiumRevokedAt: now,
-    }, { merge: true });
-    await batch.commit();
+    await markPlayPurchaseVoided(purchaseToken, { source: "verification-of-voided-token" });
     return { active: false, productId, verified: true };
   }
 
@@ -274,6 +270,8 @@ async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
     if (!assignedUid && suppliedAccountId && suppliedAccountId !== expectedAccountId) {
       throw httpError(409, "This purchase was made for another PocketCodedWeb account.");
     }
+    const userSnapshot = await transaction.get(userRef);
+    const monthlyActive = timestampMillis(userSnapshot.get("monthlyExpiresAt")) > Date.now();
     const now = admin.firestore.FieldValue.serverTimestamp();
     transaction.set(purchaseRef, {
       uid,
@@ -294,7 +292,8 @@ async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
       updatedAt: now,
     }, { merge: true });
     transaction.set(userRef, {
-      isPremium: active,
+      isPremium: active || monthlyActive,
+      lifetimePremium: active,
       premiumProductId: productId,
       premiumPurchaseTokenHash: tokenHash,
       premiumVerifiedAt: now,
@@ -309,16 +308,83 @@ async function verifyAndStorePlayPurchase(uid, productId, purchaseToken) {
   };
 }
 
-async function reconcilePlayPurchase(purchaseToken) {
+async function verifyAndStoreSubscription(uid, purchaseToken) {
+  const { google } = require("googleapis");
+  const auth = new google.auth.GoogleAuth({ scopes: ["https://www.googleapis.com/auth/androidpublisher"] });
+  const publisher = google.androidpublisher({ version: "v3", auth });
+  const { data: purchase } = await publisher.purchases.subscriptionsv2.get({
+    packageName: ANDROID_PACKAGE_NAME, token: purchaseToken,
+  });
+  const line = (purchase.lineItems || []).find(item =>
+    item.productId === MONTHLY_PRODUCT_ID && item.offerDetails?.basePlanId === "monthly");
+  if (!line) throw httpError(400, "This token does not contain the monthly Premium plan.");
+  const expiryMillis = Date.parse(line.expiryTime || "") || 0;
+  const active = ["SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD",
+    "SUBSCRIPTION_STATE_CANCELED"].includes(purchase.subscriptionState) && expiryMillis > Date.now();
+  const firestore = admin.firestore();
+  const tokenHash = sha256(purchaseToken);
+  const ref = firestore.collection("playPurchases").doc(tokenHash);
+  const userRef = firestore.collection("users").doc(uid);
+  await firestore.runTransaction(async transaction => {
+    const existing = await transaction.get(ref);
+    const user = await transaction.get(userRef);
+    if (existing.get("uid") && existing.get("uid") !== uid)
+      throw httpError(409, "This subscription belongs to another PocketCodedPy account.");
+    if (!existing.get("uid") && purchase.externalAccountIdentifiers?.obfuscatedExternalAccountId !== sha256(uid))
+      throw httpError(409, "This subscription was purchased for another PocketCodedPy account.");
+    const lifetime = user.get("lifetimePremium") === true ||
+      (user.get("isPremium") === true && user.get("premiumProductId") === LIFETIME_PRODUCT_ID && user.get("lifetimePremium") !== false);
+    const now = admin.firestore.FieldValue.serverTimestamp();
+    transaction.set(ref, { uid, productId: MONTHLY_PRODUCT_ID, purchaseToken,
+      purchaseTokenHash: tokenHash, active, subscriptionState: purchase.subscriptionState,
+      expiresAt: admin.firestore.Timestamp.fromMillis(expiryMillis), updatedAt: now }, { merge: true });
+    // A late notification for an old token cannot revoke a newer subscription.
+    const currentExpiry = timestampMillis(user.get("monthlyExpiresAt"));
+    if (user.get("monthlyPurchaseTokenHash") === tokenHash || !user.get("monthlyPurchaseTokenHash") || (active && expiryMillis >= currentExpiry)) {
+      transaction.set(userRef, { isPremium: lifetime || active, lifetimePremium: lifetime,
+        monthlyPurchaseTokenHash: tokenHash,
+        monthlyExpiresAt: admin.firestore.Timestamp.fromMillis(active ? expiryMillis : 0),
+        premiumVerifiedAt: now }, { merge: true });
+    }
+  });
+  if (active && purchase.acknowledgementState === "ACKNOWLEDGEMENT_STATE_PENDING") {
+    await publisher.purchases.subscriptions.acknowledge({ packageName: ANDROID_PACKAGE_NAME,
+      subscriptionId: MONTHLY_PRODUCT_ID, token: purchaseToken, requestBody: {} });
+  }
+  return { active, verified: true, productId: MONTHLY_PRODUCT_ID, expiresAtMillis: expiryMillis };
+}
+
+// Revalidate renewals and expiry even when a Play notification is missed.
+exports.reconcileMonthlySubscriptions = onSchedule({ schedule: "every 60 minutes", region: REGION,
+  timeoutSeconds: 300, serviceAccount: PLAY_BILLING_SERVICE_ACCOUNT }, async () => {
+  const records = await admin.firestore().collection("playPurchases")
+    .where("productId", "==", MONTHLY_PRODUCT_ID).get();
+  for (const record of records.docs) {
+    if (record.get("purchaseToken") && record.get("uid"))
+      await reconcilePlayPurchase(record.get("purchaseToken"), MONTHLY_PRODUCT_ID);
+  }
+});
+
+async function reconcilePlayPurchase(purchaseToken, productId = LIFETIME_PRODUCT_ID) {
   const purchaseRef = admin.firestore().collection("playPurchases").doc(sha256(purchaseToken));
   const existing = await purchaseRef.get();
   if (!existing.exists || !existing.get("uid")) return;
   try {
-    await verifyAndStorePlayPurchase(existing.get("uid"), LIFETIME_PRODUCT_ID, purchaseToken);
+    await verifyAndStorePlayPurchase(existing.get("uid"), productId, purchaseToken);
   } catch (error) {
     const status = Number(error.code || error.status || error.statusCode || 0);
     if (status === 404 || status === 410) {
-      await markPlayPurchaseVoided(purchaseToken, { source: "play-api-not-found" });
+      if (productId === MONTHLY_PRODUCT_ID) {
+        const userRef = admin.firestore().collection("users").doc(existing.get("uid"));
+        await admin.firestore().runTransaction(async transaction => {
+          const user = await transaction.get(userRef);
+          if (user.get("monthlyPurchaseTokenHash") === sha256(purchaseToken)) transaction.set(userRef, {
+            isPremium: user.get("lifetimePremium") === true,
+            monthlyExpiresAt: admin.firestore.Timestamp.fromMillis(0),
+          }, { merge: true });
+          transaction.set(purchaseRef, { active: false }, { merge: true });
+        });
+      } else await markPlayPurchaseVoided(purchaseToken, { source: "play-api-not-found" });
     }
     else throw error;
   }
@@ -366,7 +432,8 @@ async function markPlayPurchaseVoided(purchaseToken, details = {}) {
     }, { merge: true });
     if (user.get("premiumPurchaseTokenHash") === tokenHash) {
       transaction.set(userRef, {
-        isPremium: false,
+        isPremium: timestampMillis(user.get("monthlyExpiresAt")) > Date.now(),
+        lifetimePremium: false,
         premiumVerifiedAt: now,
         premiumRevokedAt: now,
       }, { merge: true });

@@ -17,8 +17,8 @@ android {
         applicationId = "com.mkhokheli.pocketcodedweb"
         minSdk = 25
         targetSdk = 36
-        versionCode = 35
-        versionName = "4.2"
+        versionCode = 36
+        versionName = "4.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -35,7 +35,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
         release {
+            ndk { debugSymbolLevel = "FULL" }
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(

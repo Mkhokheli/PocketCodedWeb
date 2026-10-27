@@ -26,6 +26,8 @@ import java.util.concurrent.Executors
 import org.json.JSONObject
 
 internal const val LIFETIME_PRODUCT_ID = "pocketcodedweb_lifetime"
+internal const val MONTHLY_PRODUCT_ID = "pocketcodedweb_premium_monthly"
+internal const val MONTHLY_BASE_PLAN_ID = "monthly"
 private const val BILLING_PREFS_NAME = "play_billing"
 private const val PURCHASE_ACCOUNT_GRACE_MS = 24L * 60L * 60L * 1000L
 private const val BILLING_LOG_TAG = "PlayBilling"
@@ -41,6 +43,8 @@ internal data class BillingUiState(
     val productDetailsLoaded: Boolean = false,
     val productAvailable: Boolean = false,
     val formattedPrice: String = "",
+    val monthlyPrice: String = "",
+    val monthlyAvailable: Boolean = false,
     val message: String? = null,
 )
 
@@ -80,6 +84,7 @@ internal class PlayBillingManager(
     private val preferences = appContext.getSharedPreferences(BILLING_PREFS_NAME, Context.MODE_PRIVATE)
     private var state = BillingUiState(isPremium = cachedPremium())
     private var productDetails: ProductDetails? = null
+    private var monthlyDetails: ProductDetails? = null
     private var serverEntitlementKnown = cachedPremium()
     private var serverPremium = cachedPremium()
     private var isClosed = false
@@ -122,16 +127,15 @@ internal class PlayBillingManager(
         })
     }
 
-    fun launchPurchase(activity: Activity) {
-        val details = productDetails
+    fun launchPurchase(activity: Activity, monthly: Boolean = false) {
+        val details = if (monthly) monthlyDetails else productDetails
         if (!billingClient.isReady || details == null) {
             update(message = "The purchase is not ready yet. Check your connection and try again.")
             if (billingClient.isReady) queryProductDetails()
             return
         }
-        val offerToken = details.oneTimePurchaseOfferDetailsList
-            ?.firstOrNull()
-            ?.offerToken
+        val offerToken = if (monthly) monthlyOffer(details)?.offerToken
+            else details.oneTimePurchaseOfferDetailsList?.firstOrNull()?.offerToken
         if (offerToken.isNullOrBlank()) {
             update(message = "This purchase is not available for your Google Play account or region.")
             return
@@ -193,7 +197,28 @@ internal class PlayBillingManager(
         }
     }
 
+    private fun monthlyOffer(details: ProductDetails) = details.subscriptionOfferDetails?.firstOrNull {
+        it.basePlanId == MONTHLY_BASE_PLAN_ID && it.offerId == null &&
+            it.pricingPhases.pricingPhaseList.any { phase -> phase.billingPeriod == "P1M" }
+    }
+
+    private fun queryMonthlyDetails() {
+        val product = QueryProductDetailsParams.Product.newBuilder()
+            .setProductId(MONTHLY_PRODUCT_ID).setProductType(BillingClient.ProductType.SUBS).build()
+        billingClient.queryProductDetailsAsync(
+            QueryProductDetailsParams.newBuilder().setProductList(listOf(product)).build()
+        ) { result, response ->
+            if (isClosed) return@queryProductDetailsAsync
+            monthlyDetails = if (result.responseCode == BillingClient.BillingResponseCode.OK)
+                response.productDetailsList.firstOrNull { it.productId == MONTHLY_PRODUCT_ID } else null
+            val offer = monthlyDetails?.let { monthlyOffer(it) }
+            val price = offer?.pricingPhases?.pricingPhaseList?.lastOrNull()?.formattedPrice.orEmpty()
+            update(monthlyPrice = price, monthlyAvailable = offer != null && price.isNotBlank())
+        }
+    }
+
     private fun queryProductDetails() {
+        queryMonthlyDetails()
         val product = QueryProductDetailsParams.Product.newBuilder()
             .setProductId(LIFETIME_PRODUCT_ID)
             .setProductType(BillingClient.ProductType.INAPP)
@@ -237,28 +262,28 @@ internal class PlayBillingManager(
     }
 
     private fun queryPurchases(restoring: Boolean = false) {
-        val params = QueryPurchasesParams.newBuilder()
-            .setProductType(BillingClient.ProductType.INAPP)
-            .build()
-        billingClient.queryPurchasesAsync(params) { result, purchases ->
-            if (isClosed) return@queryPurchasesAsync
-            if (result.responseCode == BillingClient.BillingResponseCode.OK) {
-                processPurchases(purchases, restoring)
-            } else {
-                update(
-                    purchasesLoaded = true,
-                    isPremium = cachedPremium(),
-                    premiumVerified = false,
-                    isPurchasePending = false,
-                    message = billingMessage(result, "Could not check existing purchases."),
-                )
+        val collected = mutableListOf<Purchase>()
+        var remaining = 2
+        var failed = false
+        for (type in listOf(BillingClient.ProductType.INAPP, BillingClient.ProductType.SUBS)) {
+            val params = QueryPurchasesParams.newBuilder().setProductType(type).build()
+            billingClient.queryPurchasesAsync(params) { result, purchases ->
+                if (isClosed) return@queryPurchasesAsync
+                if (result.responseCode == BillingClient.BillingResponseCode.OK) collected.addAll(purchases)
+                else failed = true
+                remaining--
+                if (remaining == 0) {
+                    if (!failed) processPurchases(collected, restoring)
+                    else update(purchasesLoaded = true, premiumVerified = false,
+                        message = "Could not check all purchases. Please try Restore Purchase again.")
+                }
             }
         }
     }
 
     private fun processPurchases(purchases: List<Purchase>, restoring: Boolean) {
         Log.d(BILLING_LOG_TAG, "Checking ${purchases.size} purchases for $LIFETIME_PRODUCT_ID.")
-        val matchingPurchases = purchases.filter { LIFETIME_PRODUCT_ID in it.products }
+        val matchingPurchases = purchases.filter { LIFETIME_PRODUCT_ID in it.products || MONTHLY_PRODUCT_ID in it.products }.sortedBy { if (LIFETIME_PRODUCT_ID in it.products) 0 else 1 }
         val purchased = matchingPurchases.firstOrNull {
             it.purchaseState == Purchase.PurchaseState.PURCHASED && isValidPurchase(it)
         }
@@ -323,7 +348,7 @@ internal class PlayBillingManager(
                 ).token
                 if (appCheckToken.isBlank()) error("Could not verify this app installation.")
                 val payload = JSONObject()
-                    .put("productId", LIFETIME_PRODUCT_ID)
+                    .put("productId", if (LIFETIME_PRODUCT_ID in purchase.products) LIFETIME_PRODUCT_ID else MONTHLY_PRODUCT_ID)
                     .put("purchaseToken", purchase.purchaseToken)
                     .toString()
                 val connection = (URL(VERIFY_PURCHASE_URL).openConnection() as HttpURLConnection).apply {
@@ -421,6 +446,8 @@ internal class PlayBillingManager(
         productDetailsLoaded: Boolean = state.productDetailsLoaded,
         productAvailable: Boolean = state.productAvailable,
         formattedPrice: String = state.formattedPrice,
+        monthlyPrice: String = state.monthlyPrice,
+        monthlyAvailable: Boolean = state.monthlyAvailable,
         message: String? = state.message,
     ) {
         state = BillingUiState(
@@ -432,6 +459,8 @@ internal class PlayBillingManager(
             productDetailsLoaded = productDetailsLoaded,
             productAvailable = productAvailable,
             formattedPrice = formattedPrice,
+            monthlyPrice = monthlyPrice,
+            monthlyAvailable = monthlyAvailable,
             message = message,
         )
         publish()

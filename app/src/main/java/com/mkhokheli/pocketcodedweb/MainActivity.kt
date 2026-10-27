@@ -854,6 +854,8 @@ internal fun WebIdeApp(
     val rootDirectory =
             remember(projectDirectory.absolutePath) { projectDirectory.apply { mkdirs() } }
     val editorSessions = remember(rootDirectory.absolutePath) { EditorSessionRegistry() }
+    val apiTester = remember(rootDirectory.absolutePath) { ApiTesterState(coroutineScope) }
+    DisposableEffect(apiTester) { onDispose { apiTester.cancel() } }
     val fileStore = remember(rootDirectory.absolutePath) { ProjectFileStore(rootDirectory) }
     val development = remember(rootDirectory.absolutePath) { WebDevelopmentController(context, rootDirectory) }
     val commandHistory = remember(rootDirectory.absolutePath) { DailyTerminalCommandHistory() }
@@ -1995,6 +1997,13 @@ internal fun WebIdeApp(
 
     PocketCodedWebTheme(darkTheme = ideTheme.isDark, themeName = ideTheme.name, dynamicColor = false) {
     androidx.compose.runtime.CompositionLocalProvider(LocalEditorSessions provides editorSessions,
+        LocalApiTester provides apiTester,
+        LocalIdeToolColors provides IdeToolColors(
+            surface = palette.elevatedPanel, panel = palette.panel, codeBackground = palette.editorBackground,
+            selected = palette.selectedTab, text = palette.text, mutedText = palette.mutedText,
+            border = palette.border, accent = palette.accent, onAccent = palette.text,
+            error = palette.error, success = palette.success, warning = palette.warning,
+            run = palette.run, onRun = palette.runText),
         LocalWebDevelopmentActions provides WebDevelopmentActions(
             fileStore = fileStore,
             development = development,
@@ -2876,10 +2885,11 @@ private fun WebIdeHomeScreen(
                 pageScroll.animateScrollTo(pageScroll.maxValue)
             }
         }
+        val showExplorer = explorerVisible && LocalApiTester.current?.open != true
         val editorHeight =
                 when {
                     maxHeight < 740.dp -> 310.dp
-                    explorerVisible -> 390.dp
+                    showExplorer -> 390.dp
                     else -> 430.dp
                 }
         val terminalHeight = if (maxHeight < 740.dp) 190.dp else 220.dp
@@ -2914,7 +2924,7 @@ private fun WebIdeHomeScreen(
             )
             Spacer(Modifier.height(10.dp))
 
-            if (explorerVisible) {
+            if (showExplorer) {
                 Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically,
@@ -3644,6 +3654,14 @@ private fun WebCodeEditorPanel(
         nextThemeName: String = "",
         onToggleTheme: (() -> Unit)? = null,
 ) {
+    val apiTester = LocalApiTester.current
+    if (apiTester?.open == true) {
+        Panel(palette, modifier.then(if (height == Dp.Unspecified) Modifier else Modifier.height(height)),
+            backgroundColor = palette.editorBackground) {
+            ApiTesterContent(apiTester, Modifier.fillMaxSize(), expanded = height == Dp.Unspecified, onExpand = onFullScreen)
+        }
+        return
+    }
     val panelModifier =
             if (height == Dp.Unspecified) {
                 modifier
@@ -4835,6 +4853,7 @@ private fun RunPreviewButton(
         enabled: Boolean = true,
         onClick: () -> Unit,
 ) {
+    if (LocalApiTester.current?.open == true) return
     Button(
             onClick = onClick,
             enabled = enabled,

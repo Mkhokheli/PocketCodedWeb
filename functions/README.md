@@ -56,3 +56,37 @@ npm run lint
 cd ..
 FUNCTIONS_DISCOVERY_TIMEOUT=60 firebase deploy --only functions
 ```
+
+## Monthly Premium (alongside lifetime)
+
+Create subscription product **pocketcodedweb_premium_monthly**, name **PocketCoded Web Monthly Premium**.
+Add base plan **monthly**, type **Auto-renewing**, billing period **Monthly**. Set your price and
+countries/regions, save and activate. Keep `pocketcodedweb_lifetime` active.
+
+Suggested benefits (each under 40 characters):
+- Unlimited local Web projects
+- Full HTML, CSS and JavaScript editor
+- Node.js tools and API testing
+- Live browser and in-app previews
+
+Description: Monthly Premium access to PocketCoded Web, including unlimited local projects,
+the complete Web workspace, Node.js tools and live previews. Renews monthly until cancelled.
+
+RTDN topic: `projects/pocketcodedweb-6887b/topics/play-billing-events`.
+Enable **Subscriptions, voided purchases and all one-time products** and send a test notification.
+Grant `google-play-developer-notifications@system.gserviceaccount.com` Pub/Sub Publisher on that topic.
+
+Deploy only billing functions and required rules:
+```powershell
+.\functions\node_modules\.bin\firebase.cmd deploy --project pocketcodedweb-6887b --only "functions:verifyPlayPurchase,functions:playBillingNotification,functions:reconcileMonthlySubscriptions,functions:reconcileVoidedPlayPurchases,firestore:rules"
+```
+
+`reconcileMonthlySubscriptions` revalidates stored subscription tokens hourly as a fallback to RTDN.
+Canceled subscriptions keep access to their verified paid expiry. Hold, pause, pending and expired
+subscriptions grant no monthly access. Lifetime ownership survives subscription expiry.
+Run lifecycle checks with `node --test functions/subscriptions.test.js` from the project root.
+Test purchase, accelerated renewal, cancellation, expiry, payment hold, restore, and lifetime
+ownership with license testers on a Play internal testing release before publishing.
+
+Release builds request FULL native symbols. Already stripped third-party libraries may provide
+less information. Match any separately uploaded symbols to the exact released bundle.

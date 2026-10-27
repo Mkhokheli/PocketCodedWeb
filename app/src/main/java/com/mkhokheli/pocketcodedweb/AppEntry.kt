@@ -151,6 +151,8 @@ internal fun PocketCodedWebEntry(
     val accountId = localUser?.id
     var selectedProjectPath by rememberSaveable { mutableStateOf<String?>(null) }
     var billingState by remember { mutableStateOf(BillingUiState(purchasesLoaded = false)) }
+    var monthlyExpiry by remember(accountId) { mutableStateOf(0L) }
+    var lifetimeOwned by remember(accountId) { mutableStateOf(false) }
     var billingManager by remember { mutableStateOf<PlayBillingManager?>(null) }
     var trialStartedAt by remember { mutableLongStateOf(0L) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
@@ -232,7 +234,11 @@ internal fun PocketCodedWebEntry(
                         return@addSnapshotListener
                     }
                     if (snapshot?.contains("isPremium") == true) {
-                        val serverPremium = snapshot.getBoolean("isPremium") == true
+                        lifetimeOwned = snapshot.getBoolean("lifetimePremium") == true ||
+                            (snapshot.getString("premiumProductId") == LIFETIME_PRODUCT_ID && snapshot.getBoolean("lifetimePremium") != false && snapshot.getBoolean("isPremium") == true)
+                        monthlyExpiry = snapshot.getTimestamp("monthlyExpiresAt")?.toDate()?.time ?: 0L
+                        val serverPremium = snapshot.getBoolean("isPremium") == true &&
+                            (lifetimeOwned || !snapshot.contains("monthlyExpiresAt") || monthlyExpiry > System.currentTimeMillis())
                         PlayBillingManager.updateLocalPremiumFromServer(context, activeAccountId, serverPremium)
                         val activeBillingManager = billingManager
                         if (activeBillingManager != null) {
@@ -273,11 +279,15 @@ internal fun PocketCodedWebEntry(
         }
     }
 
-    LaunchedEffect(accountId, billingState.isPremium) {
-        while (accountId != null && !billingState.isPremium) {
+    LaunchedEffect(accountId) {
+        while (accountId != null) {
             now = System.currentTimeMillis()
             delay(15_000L)
         }
+    }
+
+    LaunchedEffect(now, monthlyExpiry, lifetimeOwned) {
+        if (!lifetimeOwned && monthlyExpiry > 0L && now >= monthlyExpiry) billingManager?.applyServerEntitlement(false)
     }
 
     val trialEndsAt = trialStartedAt + TRIAL_DURATION_MS
@@ -344,6 +354,7 @@ internal fun PocketCodedWebEntry(
                 onBuy = {
                     activity?.let { billingManager?.launchPurchase(it) }
                 },
+                onSubscribe = { activity?.let { billingManager?.launchPurchase(it, monthly = true) } },
                 onRestore = { billingManager?.restorePurchases() },
                 onContinueTrial = {
                     if (!trialExpired) {
@@ -1361,10 +1372,12 @@ private fun PremiumPaywall(
     trialExpired: Boolean,
     billingState: BillingUiState,
     onBuy: () -> Unit,
+    onSubscribe: () -> Unit,
     onRestore: () -> Unit,
     onContinueTrial: () -> Unit,
     onSignOut: () -> Unit,
 ) {
+    val context = LocalContext.current
     val daysRemaining = trialDaysRemaining(now, trialEndsAt)
     Surface(
         color = palette.background,
@@ -1443,10 +1456,28 @@ private fun PremiumPaywall(
                     PremiumFeature(Icons.Rounded.Folder, "Unlimited Web projects", "Create, import, export, and keep as many projects as your device can hold.", palette)
                     PremiumFeature(Icons.Rounded.Code, "Complete Web workspace", "Use the editor, inspections, completions, terminal, npm-style package support, and AI help.", palette)
                     PremiumFeature(Icons.Rounded.Terminal, "Browser and in-app live preview", "Run HTML/CSS/JS projects in the device browser or the in-app WebView with terminal activity preserved.", palette)
-                    PremiumFeature(Icons.Rounded.Security, "One-time purchase", "Pay once through Google Play and restore the purchase on supported devices.", palette, showDivider = false)
+                    PremiumFeature(Icons.Rounded.Security, "Flexible Premium access", "Choose monthly access or a lifetime purchase through Google Play.", palette, showDivider = false)
                 }
             }
 
+            Spacer(Modifier.height(14.dp))
+            Surface(color = palette.panel, shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, palette.border), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("Monthly Premium", color = palette.text, fontWeight = FontWeight.Bold)
+                    Text(if (billingState.monthlyAvailable) "${billingState.monthlyPrice} / month"
+                        else "Monthly plan currently unavailable", color = palette.accent, fontSize = 22.sp)
+                    Text("Renews automatically every month until canceled. Cancel anytime in Google Play. Access continues until the paid period ends.",
+                        color = palette.mutedText, fontSize = 13.sp)
+                    Button(onClick = onSubscribe,
+                        enabled = billingState.monthlyAvailable && !billingState.isPurchasePending,
+                        modifier = Modifier.fillMaxWidth()) { Text("Subscribe monthly") }
+                    TextButton(onClick = {
+                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                            android.net.Uri.parse("https://play.google.com/store/account/subscriptions?sku=$MONTHLY_PRODUCT_ID&package=com.mkhokheli.pocketcodedweb")))
+                    }) { Text("Manage subscription") }
+                }
+            }
             Spacer(Modifier.height(14.dp))
             Surface(
                 color = palette.panel,
