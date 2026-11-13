@@ -1,0 +1,31 @@
+{
+  "date": "2026-11-06",
+  "project": "pocketcodedweb-6887b",
+  "version": "8c8eaa26a5b0dea8",
+  "checks": [
+    {
+      "url": "https://pocketcodedweb-6887b.web.app/terms-of-service",
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "matchesSource": true
+    },
+    {
+      "url": "https://pocketcodedweb-6887b.web.app/privacy-policy",
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "matchesSource": true
+    },
+    {
+      "url": "https://pocketcodedweb-6887b.web.app/account-deletion",
+      "status": 200,
+      "contentType": "text/html; charset=utf-8",
+      "matchesSource": true
+    },
+    {
+      "url": "https://pocketcodedweb-6887b.web.app/policy.css",
+      "status": 200,
+      "contentType": "text/css; charset=utf-8",
+      "matchesSource": true
+    }
+  ]
+}

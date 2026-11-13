@@ -65,7 +65,10 @@ class DeviceCoreStressInstrumentedTest {
         val after = runtime.totalMemory() - runtime.freeMemory()
         Log.i("PocketCodedStress", "load-files=${files.size} elapsed-ms=$elapsed heap-delta=${after - before}")
         // The deliberately >1 MB TypeScript file is excluded by the editor safety limit.
-        assertEquals(2_507, files.size)
+        // The readable fixture marker is also a valid text file in the explorer.
+        assertEquals(2_508, files.size)
+        assertEquals("2", files.single { it.name == ".fixture-v2" }.content)
+        assertTrue("The oversized fixture must not be loaded", files.none { it.name == "oversized.ts" })
         assertTrue("Project load is too slow: $elapsed", elapsed < 30_000)
         assertTrue("Project load retained too much heap", after - before < 96L * 1024L * 1024L)
     }

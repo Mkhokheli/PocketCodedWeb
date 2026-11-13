@@ -61,6 +61,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import com.google.android.gms.tasks.Task
@@ -150,6 +152,8 @@ internal fun PocketCodedWebEntry(
     }
     val accountId = localUser?.id
     var selectedProjectPath by rememberSaveable { mutableStateOf<String?>(null) }
+    var upgradeScreenOpen by rememberSaveable(accountId) { mutableStateOf(false) }
+    var lockedFeature by remember { mutableStateOf<PremiumFeature?>(null) }
     var billingState by remember { mutableStateOf(BillingUiState(purchasesLoaded = false)) }
     var monthlyExpiry by remember(accountId) { mutableStateOf(0L) }
     var lifetimeOwned by remember(accountId) { mutableStateOf(false) }
@@ -301,7 +305,23 @@ internal fun PocketCodedWebEntry(
             isPremium = billingState.isPremium,
         )
 
-    BackHandler(enabled = showPaywall) {}
+    fun dismissUpgrade() {
+        upgradeScreenOpen = false
+        val continuedAt = System.currentTimeMillis()
+        accountId?.let { saveLastTrialContinuation(context, it, continuedAt) }
+        lastTrialContinuationAt = continuedAt
+        now = continuedAt
+    }
+    val fullAccess = hasFullFeatureAccess(billingState.isPremium, now, trialStartedAt, false)
+    val scratchpadAvailable = trialExpired && !billingState.isPremium
+    val access = FeatureAccess(fullAccess) { lockedFeature = it }
+    LaunchedEffect(fullAccess, scratchpadAvailable, selectedProjectPath) {
+        selectedProjectPath?.let { path ->
+            if (!canOpenProject(fullAccess, scratchpadAvailable, File(path), context.filesDir)) selectedProjectPath = null
+        }
+        if (billingState.isPremium) upgradeScreenOpen = false
+    }
+    CompositionLocalProvider(LocalFeatureAccess provides access) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         when {
@@ -325,13 +345,18 @@ internal fun PocketCodedWebEntry(
                 onSignOut = { signOut() },
             )
 
-            selectedProjectPath == null && localUser != null -> ProjectHomeScreen(
+            localUser != null && (selectedProjectPath == null || !canOpenProject(fullAccess, scratchpadAvailable, File(selectedProjectPath.orEmpty()), context.filesDir)) -> ProjectHomeScreen(
                 user = localUser,
+                scratchpadAvailable = scratchpadAvailable,
+                onUpgrade = { upgradeScreenOpen = true },
                 darkMode = darkMode,
                 currentThemeName = currentThemeName,
                 nextThemeName = nextThemeName,
                 onToggleTheme = onToggleTheme,
-                onOpenProject = { project -> selectedProjectPath = project.directory.absolutePath },
+                onOpenProject = { project ->
+                    if (canOpenProject(fullAccess, scratchpadAvailable, project.directory, context.filesDir)) selectedProjectPath = project.directory.absolutePath
+                    else access.requestUpgrade(PremiumFeature.Projects)
+                },
                 onSignOut = { signOut() },
             )
 
@@ -343,32 +368,28 @@ internal fun PocketCodedWebEntry(
             }
         }
 
-        if (showPaywall) {
-            PremiumPaywall(
-                palette = palette,
-                darkMode = darkMode,
-                now = now,
-                trialEndsAt = trialEndsAt,
-                trialExpired = trialExpired,
-                billingState = billingState,
-                onBuy = {
-                    activity?.let { billingManager?.launchPurchase(it) }
-                },
-                onSubscribe = { activity?.let { billingManager?.launchPurchase(it, monthly = true) } },
-                onRestore = { billingManager?.restorePurchases() },
-                onContinueTrial = {
-                    if (!trialExpired) {
-                        val continuedAt = System.currentTimeMillis()
-                        accountId?.let { activeAccountId ->
-                            saveLastTrialContinuation(context, activeAccountId, continuedAt)
-                        }
-                        lastTrialContinuationAt = continuedAt
-                        now = continuedAt
-                    }
-                },
-                onSignOut = { signOut() },
-            )
+        if ((showPaywall || upgradeScreenOpen) && localUser != null) {
+            androidx.compose.ui.window.Dialog(onDismissRequest = ::dismissUpgrade,
+                properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
+                PremiumPaywall(palette = palette,
+                    daysLeft = trialDaysRemaining(now, trialEndsAt).toInt(), trialExpired = trialExpired,
+                    billingState = billingState,
+                    onBuy = { activity?.let { billingManager?.launchPurchase(it) } },
+                    onSubscribe = { activity?.let { billingManager?.launchPurchase(it, PremiumPlan.Monthly) } },
+                    onYearly = { activity?.let { billingManager?.launchPurchase(it, PremiumPlan.Yearly) } },
+                    onRetry = { billingManager?.refreshPrices() },
+                    onRestore = { billingManager?.restorePurchases() },
+                    onContinueTrial = ::dismissUpgrade, onDismiss = ::dismissUpgrade)
+            }
         }
+        lockedFeature?.let { feature ->
+            AlertDialog(onDismissRequest = { lockedFeature = null }, containerColor = palette.elevatedPanel,
+                title = { Text(feature.title, color = palette.text) },
+                text = { Text(feature.benefit + " Unlock this with Premium.", color = palette.mutedText) },
+                confirmButton = { TextButton(onClick = { lockedFeature = null; upgradeScreenOpen = true }, colors = readableTextButtonColors()) { Text("View Premium") } },
+                dismissButton = { TextButton(onClick = { lockedFeature = null }, colors = readableTextButtonColors()) { Text("Not now") } })
+        }
+    }
     }
 }
 
@@ -393,6 +414,7 @@ private fun FirebaseAuthScreen(
     var email by rememberSaveable { mutableStateOf("") }
     var password by rememberSaveable { mutableStateOf("") }
     var confirmPassword by rememberSaveable { mutableStateOf("") }
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
     var isBusy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     val isSignUp = mode == AuthMode.SignUp
@@ -498,7 +520,7 @@ private fun FirebaseAuthScreen(
     }
 
     AuthScreenSurface(colors) {
-        BoxWithConstraints(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .background(palette.background)
@@ -506,54 +528,18 @@ private fun FirebaseAuthScreen(
                 .imePadding(),
             contentAlignment = Alignment.Center,
         ) {
-            val compactHeight = maxHeight < 760.dp
-            val tightHeight = maxHeight < 680.dp
-            val narrowWidth = maxWidth < 380.dp
-            val horizontalPadding = if (narrowWidth) 24.dp else 28.dp
-            val contentMaxWidth = if (maxWidth < 520.dp) {
-                maxWidth - (horizontalPadding * 2)
-            } else {
-                420.dp
-            }
-            val logoSize = when {
-                tightHeight -> 56.dp
-                compactHeight -> 62.dp
-                else -> 68.dp
-            }
-            val brandSize = when {
-                tightHeight -> 24
-                compactHeight -> 27
-                else -> 29
-            }
-            val titleSize = if (compactHeight) 21 else 22
-            val fieldHeight = if (tightHeight) 56.dp else 58.dp
-            val buttonHeight = if (tightHeight) 46.dp else 50.dp
-            val fieldTextSize = if (tightHeight) 14 else 15
-            val topSpacer = when {
-                tightHeight -> 12.dp
-                compactHeight -> 24.dp
-                else -> 34.dp
-            }
-            val titleGap = when {
-                tightHeight -> 20.dp
-                isSignUp -> 26.dp
-                else -> 32.dp
-            }
-            val formGap = if (compactHeight) 18.dp else 22.dp
-            val fieldGap = if (tightHeight) 8.dp else 10.dp
-            val sectionGap = if (tightHeight) 12.dp else 16.dp
-
             Column(
                 modifier = Modifier
-                    .fillMaxSize()
+                    .widthIn(max = 480.dp)
+                    .fillMaxHeight()
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = horizontalPadding, vertical = 18.dp),
+                    .padding(horizontal = 28.dp, vertical = 24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Spacer(Modifier.height(topSpacer))
+                Spacer(Modifier.height(34.dp))
                 Box(
                     modifier = Modifier
-                        .size(logoSize)
+                        .size(74.dp)
                         .clip(RoundedCornerShape(8.dp))
                         .background(palette.elevatedPanel)
                         .border(1.dp, palette.accent.copy(alpha = 0.55f), RoundedCornerShape(8.dp)),
@@ -563,37 +549,35 @@ private fun FirebaseAuthScreen(
                         imageVector = Icons.Rounded.Code,
                         contentDescription = null,
                         tint = palette.accent,
-                        modifier = Modifier.size(logoSize * 0.56f),
+                        modifier = Modifier.size(42.dp),
                     )
                 }
-                Spacer(Modifier.height(12.dp))
-                BrandTitle(palette, fontSize = brandSize)
+                Spacer(Modifier.height(14.dp))
+                BrandTitle(palette)
                 Text(
                     text = "Code. Learn. Build. Anywhere.",
                     color = palette.mutedText,
-                    fontSize = if (tightHeight) 12.sp else 14.sp,
+                    fontSize = 15.sp,
                     letterSpacing = 0.sp,
                     textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.height(titleGap))
+                Spacer(Modifier.height(32.dp))
                 Text(
                     text = if (isSignUp) "Create Account" else "Welcome Back",
                     color = palette.text,
-                    fontSize = titleSize.sp,
+                    fontSize = 23.sp,
                     fontWeight = FontWeight.Bold,
                     textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.height(4.dp))
                 Text(
                     text = if (isSignUp) "Create your PocketCodedWeb account" else "Sign in to continue coding",
                     color = palette.mutedText,
                     fontSize = 14.sp,
                     textAlign = TextAlign.Center,
                 )
-                Spacer(Modifier.height(formGap))
+                Spacer(Modifier.height(22.dp))
                 Column(
                     modifier = Modifier
-                        .widthIn(max = contentMaxWidth)
                         .fillMaxWidth(),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
@@ -610,10 +594,10 @@ private fun FirebaseAuthScreen(
                             keyboardType = KeyboardType.Text,
                             imeAction = ImeAction.Next,
                             colors = colors,
-                            height = fieldHeight,
-                            fontSize = fieldTextSize,
+                            height = 56.dp,
+                            fontSize = 16,
                         )
-                        Spacer(Modifier.height(fieldGap))
+                        Spacer(Modifier.height(10.dp))
                     }
                     AuthTextField(
                         value = email,
@@ -627,10 +611,10 @@ private fun FirebaseAuthScreen(
                         keyboardType = KeyboardType.Email,
                         imeAction = ImeAction.Next,
                         colors = colors,
-                        height = fieldHeight,
-                        fontSize = fieldTextSize,
+                        height = 56.dp,
+                        fontSize = 16,
                     )
-                    Spacer(Modifier.height(fieldGap))
+                    Spacer(Modifier.height(10.dp))
                     AuthPasswordField(
                         value = password,
                         onValueChange = {
@@ -642,11 +626,13 @@ private fun FirebaseAuthScreen(
                         imeAction = if (isSignUp) ImeAction.Next else ImeAction.Done,
                         onDone = { if (!isSignUp) submit() },
                         colors = colors,
-                        height = fieldHeight,
-                        fontSize = fieldTextSize,
+                        height = 56.dp,
+                        fontSize = 16,
+                        passwordVisible = passwordVisible,
+                        onToggleVisibility = { passwordVisible = !passwordVisible },
                     )
                     if (isSignUp) {
-                        Spacer(Modifier.height(fieldGap))
+                        Spacer(Modifier.height(10.dp))
                         AuthPasswordField(
                             value = confirmPassword,
                             onValueChange = {
@@ -658,8 +644,11 @@ private fun FirebaseAuthScreen(
                             imeAction = ImeAction.Done,
                             onDone = { submit() },
                             colors = colors,
-                            height = fieldHeight,
-                            fontSize = fieldTextSize,
+                            height = 56.dp,
+                            fontSize = 16,
+                            passwordVisible = passwordVisible,
+                            onToggleVisibility = { passwordVisible = !passwordVisible },
+                            showVisibilityToggle = false,
                         )
                     }
                     if (!isSignUp) {
@@ -684,7 +673,6 @@ private fun FirebaseAuthScreen(
                             },
                             enabled = !isBusy,
                             modifier = Modifier.align(Alignment.End),
-                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 4.dp),
                             colors = readableTextButtonColors(),
                         ) {
                             Text("Forgot password?", color = palette.accent, fontSize = 13.sp)
@@ -699,7 +687,6 @@ private fun FirebaseAuthScreen(
                             text = it,
                             color = if (success) colors.success else colors.error,
                             fontSize = 13.sp,
-                            textAlign = TextAlign.Center,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(bottom = 10.dp),
@@ -709,16 +696,16 @@ private fun FirebaseAuthScreen(
                         text = if (isSignUp) "Sign Up" else "Sign In",
                         isBusy = isBusy,
                         colors = colors,
-                        height = buttonHeight,
+                        height = 52.dp,
                         onClick = { submit() },
                     )
-                    Spacer(Modifier.height(sectionGap))
+                    Spacer(Modifier.height(16.dp))
                     AuthDivider(colors)
-                    Spacer(Modifier.height(sectionGap))
+                    Spacer(Modifier.height(16.dp))
                     GoogleAuthButton(
                         isBusy = isBusy,
                         colors = colors,
-                        height = buttonHeight,
+                        height = 52.dp,
                         onClick = { continueWithGoogle() },
                     )
                     Spacer(Modifier.height(18.dp))
@@ -738,13 +725,11 @@ private fun FirebaseAuthScreen(
                                 message = null
                             },
                             enabled = !isBusy,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                             colors = readableTextButtonColors(),
                         ) {
                             Text(
                                 text = if (isSignUp) "Sign In" else "Sign Up",
                                 color = palette.accent,
-                                fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                             )
                         }
@@ -1013,8 +998,8 @@ private fun AuthTextField(
         value = value,
         onValueChange = onValueChange,
         enabled = enabled,
-        placeholder = { Text(placeholder, color = colors.muted, fontSize = fontSize.sp) },
-        leadingIcon = { Icon(icon, contentDescription = null, modifier = Modifier.size((fontSize + 5).dp)) },
+        label = { Text(placeholder) },
+        leadingIcon = { Icon(icon, contentDescription = null, tint = colors.muted) },
         singleLine = true,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType, imeAction = imeAction),
         shape = RoundedCornerShape(8.dp),
@@ -1037,23 +1022,25 @@ private fun AuthPasswordField(
     colors: AuthColors,
     height: androidx.compose.ui.unit.Dp,
     fontSize: Int,
+    passwordVisible: Boolean,
+    onToggleVisibility: () -> Unit,
+    showVisibilityToggle: Boolean = true,
 ) {
-    var passwordVisible by rememberSaveable { mutableStateOf(false) }
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         enabled = enabled,
-        placeholder = { Text(label, color = colors.muted, fontSize = fontSize.sp) },
-        leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size((fontSize + 5).dp)) },
-        trailingIcon = {
-            IconButton(onClick = { passwordVisible = !passwordVisible }, enabled = enabled) {
+        label = { Text(label) },
+        leadingIcon = { Icon(Icons.Rounded.Lock, contentDescription = null, tint = colors.muted) },
+        trailingIcon = if (showVisibilityToggle) ({
+            IconButton(onClick = onToggleVisibility, enabled = enabled) {
                 Icon(
                     imageVector = if (passwordVisible) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
                     contentDescription = if (passwordVisible) "Hide password" else "Show password",
-                    modifier = Modifier.size((fontSize + 6).dp),
+                    tint = colors.muted,
                 )
             }
-        },
+        }) else null,
         singleLine = true,
         visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = imeAction),
@@ -1072,9 +1059,9 @@ private fun authTextFieldColors(colors: AuthColors) = OutlinedTextFieldDefaults.
     focusedTextColor = colors.text,
     unfocusedTextColor = colors.text,
     disabledTextColor = colors.muted,
-    cursorColor = colors.text,
+    cursorColor = colors.primary,
     focusedBorderColor = colors.fieldBorder,
-    unfocusedBorderColor = colors.fieldBorder,
+    unfocusedBorderColor = colors.border,
     disabledBorderColor = colors.fieldBorder.copy(alpha = 0.45f),
     focusedLeadingIconColor = colors.muted,
     unfocusedLeadingIconColor = colors.muted,
@@ -1082,6 +1069,8 @@ private fun authTextFieldColors(colors: AuthColors) = OutlinedTextFieldDefaults.
     focusedTrailingIconColor = colors.muted,
     unfocusedTrailingIconColor = colors.muted,
     disabledTrailingIconColor = colors.muted,
+    focusedLabelColor = colors.primary,
+    unfocusedLabelColor = colors.muted,
     focusedContainerColor = Color.Transparent,
     unfocusedContainerColor = Color.Transparent,
     disabledContainerColor = Color.Transparent,
@@ -1110,10 +1099,10 @@ private fun AuthPrimaryButton(
             .height(height),
     ) {
         if (isBusy) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = colors.muted)
-            Spacer(Modifier.width(8.dp))
+            CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = colors.primaryText)
+        } else {
+            Text(text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
-        Text(text, fontSize = 16.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -1129,7 +1118,7 @@ private fun AuthDivider(colors: AuthColors) {
                 .height(1.dp)
                 .background(colors.border)
         )
-        Text("or", color = colors.muted, fontSize = 15.sp, modifier = Modifier.padding(horizontal = 18.dp))
+        Text("or", color = colors.muted, modifier = Modifier.padding(horizontal = 14.dp))
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1160,9 +1149,9 @@ private fun GoogleAuthButton(
             .fillMaxWidth()
             .height(height),
     ) {
-        Text("G", color = colors.googleBlue, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.width(14.dp))
-        Text("Continue with Google", color = colors.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Text("G", color = colors.googleBlue, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.width(12.dp))
+        Text("Continue with Google", color = colors.text, fontSize = 15.sp)
     }
 }
 
@@ -1364,251 +1353,173 @@ private fun googleSignInConfigurationMessage(): String {
 }
 
 @Composable
-private fun PremiumPaywall(
+internal fun PremiumPaywall(
     palette: EntryPalette,
-    darkMode: Boolean,
-    now: Long,
-    trialEndsAt: Long,
+    daysLeft: Int,
     trialExpired: Boolean,
     billingState: BillingUiState,
     onBuy: () -> Unit,
     onSubscribe: () -> Unit,
+    onYearly: () -> Unit,
+    onRetry: () -> Unit,
     onRestore: () -> Unit,
     onContinueTrial: () -> Unit,
-    onSignOut: () -> Unit,
+    onDismiss: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
-    val daysRemaining = trialDaysRemaining(now, trialEndsAt)
-    Surface(
-        color = palette.background,
-        modifier = Modifier.fillMaxSize(),
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .systemBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(72.dp)
-                    .clip(RoundedCornerShape(14.dp))
-                    .background(palette.accent.copy(alpha = if (darkMode) 0.18f else 0.12f))
-                    .border(1.dp, palette.accent.copy(alpha = 0.55f), RoundedCornerShape(14.dp)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(Icons.Rounded.Code, contentDescription = null, tint = palette.accent, modifier = Modifier.size(42.dp))
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .size(24.dp)
-                        .clip(CircleShape)
-                        .background(palette.accentAlt),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(Icons.Rounded.Lock, contentDescription = null, tint = palette.onAccent, modifier = Modifier.size(14.dp))
+    var selected by rememberSaveable { mutableStateOf(PremiumPlan.Monthly) }
+    val busy = billingState.isPurchasePending || billingState.checkoutInProgress
+    val available = when (selected) {
+        PremiumPlan.Monthly -> billingState.monthlyAvailable
+        PremiumPlan.Yearly -> billingState.yearlyAvailable
+        PremiumPlan.Lifetime -> billingState.productAvailable
+    }
+    val price = when (selected) {
+        PremiumPlan.Monthly -> billingState.monthlyPrice
+        PremiumPlan.Yearly -> billingState.yearlyPrice
+        PremiumPlan.Lifetime -> billingState.formattedPrice
+    }
+    Surface(color = palette.background, modifier = Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().systemBarsPadding().widthIn(max = 600.dp)
+            .verticalScroll(rememberScrollState()).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("PocketCoded Web Premium", color = palette.text,
+                    style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f))
+                IconButton(onClick = onDismiss ?: onContinueTrial) {
+                    Icon(Icons.Rounded.Close, "Return to workspace", tint = palette.text)
                 }
             }
-            Spacer(Modifier.height(18.dp))
-            BrandTitle(palette, fontSize = 30)
-            Text(
-                text = if (trialExpired) {
-                    "14-day trial is over"
-                } else {
-                    "$daysRemaining ${if (daysRemaining == 1L) "day" else "days"} left"
-                },
-                color = palette.mutedText,
-                fontSize = 17.sp,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(12.dp))
-            Surface(
-                color = if (trialExpired) palette.error.copy(alpha = 0.14f) else palette.accentAlt.copy(alpha = 0.15f),
-                shape = RoundedCornerShape(18.dp),
-            ) {
-                Text(
-                    text = if (trialExpired) "TRIAL ENDED" else "14 DAY FREE TRIAL",
-                    color = if (trialExpired) palette.error else palette.accentAlt,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(horizontal = 15.dp, vertical = 7.dp),
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            Text(
-                text = "Trial ${if (trialExpired) "ended" else "ends"} on ${formatTrialDate(trialEndsAt)}",
-                color = palette.mutedText,
-                fontSize = 13.sp,
-            )
-
-            Spacer(Modifier.height(22.dp))
-            Surface(
-                color = palette.panel,
-                shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, palette.border),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(modifier = Modifier.padding(18.dp)) {
-                    Text("Premium includes", color = palette.text, fontWeight = FontWeight.Bold, fontSize = 17.sp)
-                    Spacer(Modifier.height(12.dp))
-                    PremiumFeature(Icons.Rounded.Folder, "Unlimited Web projects", "Create, import, export, and keep as many projects as your device can hold.", palette)
-                    PremiumFeature(Icons.Rounded.Code, "Complete Web workspace", "Use the editor, inspections, completions, terminal, npm-style package support, and AI help.", palette)
-                    PremiumFeature(Icons.Rounded.Terminal, "Browser and in-app live preview", "Run HTML/CSS/JS projects in the device browser or the in-app WebView with terminal activity preserved.", palette)
-                    PremiumFeature(Icons.Rounded.Security, "Flexible Premium access", "Choose monthly access or a lifetime purchase through Google Play.", palette, showDivider = false)
+            Text("More room to build. One plan unlocks the complete workspace.", color = palette.mutedText)
+            PremiumCodeAnimation(palette)
+            Text(if (billingState.isPremium) "Premium is active"
+                else if (trialExpired) "Your trial has ended. Keep coding with Free."
+                else "Full-access trial: $daysLeft days remaining. No automatic charge.",
+                color = palette.accentAlt, style = MaterialTheme.typography.bodyMedium)
+            if (!billingState.isPremium && !trialExpired && daysLeft == 1) {
+                Surface(color = palette.accentAlt.copy(alpha = 0.12f), shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, palette.accentAlt)) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("1 day left: keep access to your projects", color = palette.text, fontWeight = FontWeight.Bold)
+                        Text("When your trial ends, your projects will be locked behind Premium. Subscribe or buy lifetime Premium to keep using them. Your files will be preserved, and Free access will continue in Scratchpad.", color = palette.text)
+                    }
                 }
             }
-
-            Spacer(Modifier.height(14.dp))
             Surface(color = palette.panel, shape = RoundedCornerShape(8.dp),
-                    border = BorderStroke(1.dp, palette.border), modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(18.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("Monthly Premium", color = palette.text, fontWeight = FontWeight.Bold)
-                    Text(if (billingState.monthlyAvailable) "${billingState.monthlyPrice} / month"
-                        else "Monthly plan currently unavailable", color = palette.accent, fontSize = 22.sp)
-                    Text("Renews automatically every month until canceled. Cancel anytime in Google Play. Access continues until the paid period ends.",
-                        color = palette.mutedText, fontSize = 13.sp)
-                    Button(onClick = onSubscribe,
-                        enabled = billingState.monthlyAvailable && !billingState.isPurchasePending,
-                        modifier = Modifier.fillMaxWidth()) { Text("Subscribe monthly") }
-                    TextButton(onClick = {
-                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
-                            android.net.Uri.parse("https://play.google.com/store/account/subscriptions?sku=$MONTHLY_PRODUCT_ID&package=com.mkhokheli.pocketcodedweb")))
-                    }) { Text("Manage subscription") }
+                border = BorderStroke(1.dp, palette.border)) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("Free", color = palette.text, fontWeight = FontWeight.Bold)
+                    Text("HTML, CSS and JavaScript scratchpad files, unlimited Web previews, program input and output, copying errors, basic explorer, fullscreen editor and themes.", color = palette.mutedText)
+                    androidx.compose.material3.HorizontalDivider(color = palette.border)
+                    Text("Premium adds", color = palette.accent, fontWeight = FontWeight.Bold)
+                    Text("Full projects and files\nImport and export\nnpm packages and development servers\nDebugger, tests and API tester\nAI assistant\nGit, SSH and shell commands\nExpanded terminal and explorer", color = palette.text)
+                    Text("AI uses your configured provider. Provider setup and charges may apply.", color = palette.mutedText, fontSize = 12.sp)
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            Surface(
-                color = palette.panel,
+            Text("Choose your plan", color = palette.text, style = MaterialTheme.typography.titleMedium)
+            for (plan in PremiumPlan.entries) {
+                val planAvailable = when (plan) {
+                    PremiumPlan.Monthly -> billingState.monthlyAvailable
+                    PremiumPlan.Yearly -> billingState.yearlyAvailable
+                    PremiumPlan.Lifetime -> billingState.productAvailable
+                }
+                val planPrice = when (plan) {
+                    PremiumPlan.Monthly -> billingState.monthlyPrice
+                    PremiumPlan.Yearly -> billingState.yearlyPrice
+                    PremiumPlan.Lifetime -> billingState.formattedPrice
+                }
+                val period = when (plan) {
+                    PremiumPlan.Monthly -> "Billed monthly"
+                    PremiumPlan.Yearly -> "Billed yearly"
+                    PremiumPlan.Lifetime -> "One-time purchase"
+                }
+                Surface(onClick = { if (!busy) selected = plan },
+                    color = if (selected == plan) palette.accent.copy(alpha = 0.12f) else palette.panel,
+                    shape = RoundedCornerShape(8.dp),
+                    border = BorderStroke(1.dp, if (selected == plan) palette.accent else palette.border),
+                    modifier = Modifier.fillMaxWidth()) {
+                    Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.material3.RadioButton(selected == plan, onClick = { if (!busy) selected = plan },
+                            colors = androidx.compose.material3.RadioButtonDefaults.colors(selectedColor = palette.accent, unselectedColor = palette.mutedText))
+                        Column(Modifier.weight(1f)) {
+                            Text(plan.name, color = palette.text, fontWeight = FontWeight.SemiBold)
+                            Text(period, color = palette.mutedText, fontSize = 12.sp)
+                            Text(if (planAvailable) planPrice else if (!billingState.connected) "Connecting to Google Play..." else "Currently unavailable",
+                                color = if (planAvailable) palette.accent else palette.mutedText)
+                        }
+                    }
+                }
+            }
+            Button(onClick = { when (selected) {
+                PremiumPlan.Monthly -> onSubscribe()
+                PremiumPlan.Yearly -> onYearly()
+                PremiumPlan.Lifetime -> onBuy()
+            } }, enabled = available && !busy && !billingState.isPremium,
                 shape = RoundedCornerShape(8.dp),
-                border = BorderStroke(1.dp, palette.border),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Column(
-                    modifier = Modifier.padding(18.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text("One-time payment", color = palette.mutedText, fontSize = 14.sp)
-                    Text(
-                        text = billingState.formattedPrice.ifBlank { "Google Play price" },
-                        color = palette.accent,
-                        fontSize = 38.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text("No recurring subscription", color = palette.mutedText, fontSize = 13.sp)
-                    Spacer(Modifier.height(16.dp))
-                    val purchaseButtonEnabled = billingState.connected &&
-                        billingState.productDetailsLoaded &&
-                        billingState.productAvailable &&
-                        !billingState.isPurchasePending
-                    val purchaseButtonText = when {
-                        billingState.isPurchasePending -> "Payment pending"
-                        !billingState.connected -> "Connecting to Google Play"
-                        !billingState.productDetailsLoaded -> "Loading Google Play purchase"
-                        !billingState.productAvailable -> "Premium unavailable"
-                        else -> "Pay ${billingState.formattedPrice} - Unlock Premium"
-                    }
-                    Button(
-                        onClick = onBuy,
-                        enabled = purchaseButtonEnabled,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = palette.accent,
-                            contentColor = palette.onAccent,
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp),
-                    ) {
-                        Icon(Icons.Rounded.ShoppingCart, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = purchaseButtonText,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Center,
-                        )
-                    }
-                    billingState.message?.let { message ->
-                        Spacer(Modifier.height(10.dp))
-                        Text(
-                            text = message,
-                            color = if (billingState.isPurchasePending) palette.accentAlt else palette.mutedText,
-                            fontSize = 12.sp,
-                        )
-                    }
-                }
+                colors = ButtonDefaults.buttonColors(containerColor = palette.accent,
+                    contentColor = palette.onAccent),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
+                Text(if (billingState.isPremium) "Premium active" else if (billingState.isPurchasePending) "Payment pending"
+                    else if (billingState.checkoutInProgress) "Completing purchase..."
+                    else if (!available) "Plan unavailable" else "Continue - $price")
             }
-
-            Spacer(Modifier.height(12.dp))
-            TextButton(onClick = onRestore, colors = readableTextButtonColors()) {
-                Icon(Icons.Rounded.Restore, contentDescription = null, tint = palette.accent)
-                Spacer(Modifier.width(6.dp))
-                Text("Restore Purchase", color = palette.accent)
+            Text(if (selected == PremiumPlan.Lifetime) "Pay once for permanent Premium access. No recurring payment."
+                else "Renews automatically ${if (selected == PremiumPlan.Yearly) "each year" else "each month"} until cancelled. Cancel in Google Play. Access continues until the paid period ends.",
+                color = palette.mutedText, fontSize = 12.sp)
+            Text("Prices and final checkout are supplied by Google Play. Your app trial does not start a paid subscription automatically.", color = palette.mutedText, fontSize = 12.sp)
+            billingState.message?.let { Text(it, color = palette.mutedText) }
+            if (!billingState.monthlyAvailable || !billingState.yearlyAvailable || !billingState.productAvailable) {
+                TextButton(onClick = onRetry, enabled = !busy) { Text("Retry prices", color = palette.accent) }
             }
-            if (!trialExpired) {
-                TextButton(onClick = onContinueTrial, colors = readableTextButtonColors()) {
-                    Text("Continue Free Trial", color = palette.text)
-                }
-                Text(
-                    text = "Your projects and coding data will stay on this device.",
-                    color = palette.mutedText,
-                    fontSize = 11.sp,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(horizontal = 18.dp),
-                )
+            TextButton(onClick = onRestore, enabled = !busy) { Text("Restore purchases", color = palette.accent) }
+            TextButton(onClick = {
+                context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    Uri.parse("https://play.google.com/store/account/subscriptions?package=com.mkhokheli.pocketcodedweb")))
+            }) { Text("Manage subscriptions", color = palette.accent) }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                TextButton(onClick = { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    Uri.parse("https://pocketcodedweb-6887b.web.app/privacy-policy.html"))) }) { Text("Privacy", color = palette.mutedText) }
+                TextButton(onClick = { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW,
+                    Uri.parse("https://pocketcodedweb-6887b.web.app/terms-of-service.html"))) }) { Text("Terms", color = palette.mutedText) }
             }
-            TextButton(onClick = onSignOut, colors = readableTextButtonColors()) {
-                Text("Sign out", color = palette.mutedText)
+            TextButton(onClick = onDismiss ?: onContinueTrial, modifier = Modifier.fillMaxWidth()) {
+                Text(if (trialExpired) "Continue with Free" else "Return to workspace", color = palette.text)
             }
-            Spacer(Modifier.height(12.dp))
         }
     }
 }
 
 @Composable
-private fun PremiumFeature(
-    icon: ImageVector,
-    title: String,
-    description: String,
-    palette: EntryPalette,
-    showDivider: Boolean = true,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 9.dp),
-        verticalAlignment = Alignment.Top,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(palette.accent.copy(alpha = 0.13f)),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(icon, contentDescription = null, tint = palette.accent, modifier = Modifier.size(21.dp))
-        }
-        Spacer(Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-            Text(description, color = palette.mutedText, fontSize = 12.sp)
+private fun PremiumCodeAnimation(palette: EntryPalette) {
+    val context = LocalContext.current
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    val snippet = "const message = \"Build something great\";\nconsole.log(message);"
+    var count by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val animationsEnabled = android.provider.Settings.Global.getFloat(context.contentResolver,
+        android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+    LaunchedEffect(lifecycleOwner, animationsEnabled) {
+        if (!animationsEnabled) { count = snippet.length; return@LaunchedEffect }
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (count < snippet.length) { delay(35L); count++ }
         }
     }
-    if (showDivider) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = 50.dp)
-                .height(1.dp)
-                .background(palette.border)
-        )
+    Surface(color = palette.panel, shape = RoundedCornerShape(8.dp), border = BorderStroke(1.dp, palette.border)) {
+        Column(Modifier.fillMaxWidth().padding(16.dp).heightIn(min = 104.dp)
+            .clearAndSetSemantics {}, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(snippet.take(count), color = palette.accent,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 13.sp)
+            Text(if (count == snippet.length) "> Build something great" else " ", color = palette.accentAlt,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 13.sp)
+        }
     }
 }
 
 @Composable
 private fun ProjectHomeScreen(
     user: LocalUser,
+    scratchpadAvailable: Boolean,
+    onUpgrade: () -> Unit,
     darkMode: Boolean,
     currentThemeName: String,
     nextThemeName: String,
@@ -1629,8 +1540,10 @@ private fun ProjectHomeScreen(
     var profileMenuOpen by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
 
+    val access = LocalFeatureAccess.current
+
     val importProjectLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
+        if (uri != null && access.require(PremiumFeature.ImportExport)) {
             coroutineScope.launch {
                 val result = withContext(Dispatchers.IO) { importLocalProject(context, uri) }
                 result.fold(
@@ -1645,13 +1558,22 @@ private fun ProjectHomeScreen(
         }
     }
 
-    LaunchedEffect(refreshVersion) {
-        projects = withContext(Dispatchers.IO) { discoverLocalProjects(context) }
+    LaunchedEffect(refreshVersion, scratchpadAvailable) {
+        projects = withContext(Dispatchers.IO) {
+            val existing = discoverLocalProjects(context)
+            if (scratchpadAvailable) {
+                val directory = freeWorkspace(context.filesDir)
+                listOf(LocalProject("Scratchpad", directory, directory.lastModified(), false)) + existing
+            } else existing
+        }
     }
 
-    val visibleProjects = remember(projects, search) {
+    val visibleProjects = remember(projects, search, scratchpadAvailable) {
         val query = search.trim()
-        if (query.isBlank()) projects else projects.filter { it.name.contains(query, ignoreCase = true) }
+        projects.filter {
+            (scratchpadAvailable || it.directory.canonicalFile != File(context.filesDir, "free_scratchpad").canonicalFile) &&
+                (query.isBlank() || it.name.contains(query, ignoreCase = true))
+        }
     }
 
     Column(
@@ -1711,6 +1633,10 @@ private fun ProjectHomeScreen(
                         onClick = { profileMenuOpen = false },
                         leadingIcon = { Icon(Icons.Rounded.Person, null, tint = palette.accent) },
                     )
+                    if (!access.fullAccess) DropdownMenuItem(colors = readableMenuItemColors(),
+                        text = { Text("Upgrade to Premium", color = palette.accent) },
+                        onClick = { profileMenuOpen = false; onUpgrade() },
+                        leadingIcon = { Icon(Icons.Rounded.Lock, null, tint = palette.accent) })
                     HorizontalDivider(color = palette.border)
                     DropdownMenuItem(colors = readableMenuItemColors(),
                         text = { Text("Sign out", color = palette.text) },
@@ -1731,7 +1657,7 @@ private fun ProjectHomeScreen(
             border = BorderStroke(1.dp, palette.border),
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { newProjectMenuOpen = true },
+                .clickable { if (access.require(PremiumFeature.Projects)) newProjectMenuOpen = true },
         ) {
             Row(
                 modifier = Modifier.padding(18.dp),
@@ -1821,9 +1747,10 @@ private fun ProjectHomeScreen(
                     ProjectRow(
                         project = project,
                         palette = palette,
+                        locked = !canOpenProject(access.fullAccess, scratchpadAvailable, project.directory, context.filesDir),
                         onOpen = { onOpenProject(project) },
-                        onRename = { renameProject = project },
-                        onDelete = { deleteProject = project },
+                        onRename = { if (project.canDelete && access.require(PremiumFeature.Projects)) renameProject = project },
+                        onDelete = { if (project.canDelete && access.require(PremiumFeature.Projects)) deleteProject = project },
                     )
                 }
                 item { Spacer(Modifier.height(12.dp)) }
@@ -1864,7 +1791,7 @@ private fun ProjectHomeScreen(
             palette = palette,
             onDismiss = { createDialogOpen = false },
             onCreate = { name ->
-                coroutineScope.launch {
+                if (access.require(PremiumFeature.Projects)) coroutineScope.launch {
                     val result = withContext(Dispatchers.IO) { createLocalProject(context, name) }
                     result.onSuccess { project ->
                         createDialogOpen = false
@@ -1884,7 +1811,8 @@ private fun ProjectHomeScreen(
             palette = palette,
             onDismiss = { renameProject = null },
             onRename = { name ->
-                renameLocalProject(context, project, name)
+                if (!project.canDelete || !access.require(PremiumFeature.Projects)) "Premium is required to rename projects."
+                else renameLocalProject(context, project, name)
                     .fold(
                         onSuccess = {
                             renameProject = null
@@ -1907,8 +1835,11 @@ private fun ProjectHomeScreen(
             confirmButton = {
                 TextButton(
                     onClick = {
-                        coroutineScope.launch {
-                            withContext(Dispatchers.IO) { project.directory.deleteRecursively() }
+                        if (project.canDelete && access.require(PremiumFeature.Projects)) coroutineScope.launch {
+                            withContext(Dispatchers.IO) {
+                                check(project.directory.canonicalFile.parentFile == File(context.filesDir, "projects").canonicalFile)
+                                project.directory.deleteRecursively()
+                            }
                             deleteProject = null
                             refreshVersion += 1L
                         }
@@ -1957,6 +1888,7 @@ private fun ProjectRow(
     onOpen: () -> Unit,
     onRename: () -> Unit,
     onDelete: () -> Unit,
+    locked: Boolean = false,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Surface(
@@ -1990,7 +1922,9 @@ private fun ProjectRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            if (project.canDelete) {
+            if (locked) {
+                Icon(Icons.Rounded.Lock, "Requires Premium", tint = palette.mutedText, modifier = Modifier.padding(horizontal = 10.dp))
+            } else if (project.canDelete) {
                 Box {
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(painterResource(R.drawable.jb_menu), contentDescription = "Project options", tint = palette.mutedText)
@@ -2373,7 +2307,7 @@ internal fun shouldShowTrialGate(
 ): Boolean {
     if (isPremium) return false
     val trialEndsAt = trialStartedAt + TRIAL_DURATION_MS
-    return isTrialExpired(now, trialEndsAt) ||
+    return !isTrialExpired(now, trialEndsAt) &&
         now >= nextTrialReminderAt(trialStartedAt, lastContinuationAt)
 }
 

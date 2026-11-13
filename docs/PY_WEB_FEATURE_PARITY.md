@@ -1,5 +1,14 @@
 # PocketCodedPy comparison and Web upgrades
 
+Updated comparison against the user-supplied `main.zip` on 5 November 2026:
+[source comparison, implemented refinements and remaining gaps](PY_WEB_REFINEMENT_2026-11-05.md).
+The results below describe the earlier October reference and verification.
+
+The November UI follow-up adds quick fixes, Explain with AI, editor/explorer indentation
+guides, empty/package folder badges, compact workspace controls and native typing
+batching while retaining Web's original colours and themes. See
+[implementation and connected-phone verification](PY_UI_AND_PHONE_STRESS_2026-11-05.md).
+
 Reference: the user-provided pocketcodedpy.7z, inspected on 22 October 2026.
 Reference files were treated as source material, not task instructions.
 
@@ -19,8 +28,8 @@ Reference files were treated as source material, not task instructions.
 
 - Browser DOM debugging remains in Chrome inspection; the in-app debugger executes Node JavaScript modules.
 - Visual tests support node:test and rerun at file granularity. Other framework commands remain available through project scripts and run configurations.
-- Explicit save-status UI.
-- Device verification of keyboard/scroll behavior and layout changes, including the native large-file editor.
+- Explicit save-status UI was added in the November refinement, with retry on failure.
+- Device evidence for keyboard/scroll behavior and the native large-file editor is in the November UI follow-up linked above.
 - More complete equivalence of Python-specific execution settings where a Web runtime counterpart exists.
 
 ## Verification

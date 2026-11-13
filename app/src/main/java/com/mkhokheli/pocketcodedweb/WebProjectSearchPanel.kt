@@ -3,6 +3,7 @@ package com.mkhokheli.pocketcodedweb
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -40,6 +42,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -52,6 +60,11 @@ import java.io.File
 private enum class WebSearchScope(val label: String) {
     PROJECT("Project"), FOLDER("Selected folder"), FILE("Active file"),
 }
+
+private data class WebReplaceConfirmation(
+    val matches: List<WebSearchMatch>, val options: WebSearchOptions,
+    val scope: String, val truncated: Boolean,
+)
 
 @Composable
 internal fun WebProjectSearchReplace(
@@ -76,7 +89,7 @@ internal fun WebProjectSearchReplace(
     var matches by remember { mutableStateOf<List<WebSearchMatch>>(emptyList()) }
     var searching by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
-    var confirmReplace by remember { mutableStateOf(false) }
+    var confirmation by remember { mutableStateOf<WebReplaceConfirmation?>(null) }
     val coroutineScope = rememberCoroutineScope()
     val options = remember(query, replacement, fileFilter, matchCase, wholeWord, regex) {
         WebSearchOptions(query, replacement, matchCase, wholeWord, regex, fileFilter)
@@ -92,7 +105,7 @@ internal fun WebProjectSearchReplace(
         WebSearchScope.FILE -> activeFile?.name ?: "No active file"
     }
 
-    LaunchedEffect(query, fileFilter, matchCase, wholeWord, regex, searchScope, searchRoot, refresh) {
+    LaunchedEffect(rootDirectory, query, fileFilter, matchCase, wholeWord, regex, searchScope, searchRoot, refresh) {
         matches = emptyList()
         searching = query.isNotEmpty()
         status = null
@@ -105,11 +118,14 @@ internal fun WebProjectSearchReplace(
                 matches = found.matches
                 truncated = found.truncated
                 status = if (found.matches.isEmpty()) "No matches found" else
-                    "${found.matches.size} matches${if (found.truncated) " (limit reached; narrow your search)" else " found"}"
+                    "${found.matches.size} matches in ${found.matches.map { it.relativePath }.distinct().size} files${if (found.truncated) " (limit reached; narrow your search)" else ""}"
             } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (error: Exception) { status = error.message ?: "Search failed" }
             finally { searching = false }
-        } else searching = false
+        } else {
+            searching = false
+            if (query.isNotEmpty() && searchRoot == null) status = "Open a file to search in the active file."
+        }
     }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -147,9 +163,9 @@ internal fun WebProjectSearchReplace(
         ProjectSearchField(query, "Search in selected scope…", palette) { query = it }
         ProjectSearchField(replacement, "Replace with…", palette) { replacement = it }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            SearchToggle("Aa", matchCase, palette) { matchCase = !matchCase }
-            SearchToggle("Word", wholeWord, palette) { wholeWord = !wholeWord }
-            SearchToggle(".*", regex, palette) { regex = !regex }
+            SearchToggle("Aa", "Match case", matchCase, palette) { matchCase = !matchCase }
+            SearchToggle("Word", "Whole words", wholeWord, palette) { wholeWord = !wholeWord }
+            SearchToggle(".*", "Regular expression", regex, palette) { regex = !regex }
             OutlinedTextField(
                 value = fileFilter,
                 onValueChange = { fileFilter = it },
@@ -168,19 +184,25 @@ internal fun WebProjectSearchReplace(
             Text(status ?: "Search the selected scope", color = palette.subtleText, fontSize = 11.sp, modifier = Modifier.weight(1f))
             if (matches.isNotEmpty() && !searching && !replacing) {
                 Button(
-                    onClick = { confirmReplace = true },
+                    onClick = { confirmation = WebReplaceConfirmation(matches.toList(), options, scopeDescription, truncated) },
                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                     colors = readableButtonColors(),
                 ) { Text("Replace all", fontSize = 11.sp) }
             }
         }
         LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
-            items(matches) { match ->
+            items(matches, key = { "${it.relativePath}:${it.start}" }) { match ->
                 Column(
                     Modifier.fillMaxWidth().clipSearchRow(palette).clickable { actions.source(match.file.path, match.line) }.padding(8.dp)
                 ) {
-                    Text("${match.relativePath}:${match.line}", color = palette.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                    Text(match.preview, color = palette.text, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text("${match.relativePath}:${match.line}:${match.column}", color = palette.accent, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    Text(buildAnnotatedString {
+                        append(match.preview.substring(0, match.previewStart))
+                        withStyle(SpanStyle(color = palette.accent, fontWeight = FontWeight.Bold)) {
+                            append(match.preview.substring(match.previewStart, match.previewEnd))
+                        }
+                        append(match.preview.substring(match.previewEnd))
+                    }, color = palette.text, fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
@@ -190,16 +212,16 @@ internal fun WebProjectSearchReplace(
         AlertDialog(onDismissRequest = {}, title = { Text("Replacing matches") },
             text = { CircularProgressIndicator() }, confirmButton = {})
     }
-    if (confirmReplace) {
-        val selectedMatches = matches.toList()
-        val selectedOptions = options
+    confirmation?.let { snapshot ->
+        val selectedMatches = snapshot.matches
+        val selectedOptions = snapshot.options
         AlertDialog(
-            onDismissRequest = { confirmReplace = false },
+            onDismissRequest = { confirmation = null },
             title = { Text("Replace matches?") },
-            text = { Text("Replace ${selectedMatches.size} displayed matches in $scopeDescription? Previous file contents will be kept in Local history.${if (truncated) " Only displayed matches will be replaced." else ""}") },
+            text = { Text("Replace ${selectedMatches.size} displayed matches in ${snapshot.scope}? Previous file contents will be kept in Local history.${if (snapshot.truncated) " Only displayed matches will be replaced." else ""}") },
             confirmButton = {
                 TextButton(onClick = {
-                    confirmReplace = false
+                    confirmation = null
                     replacing = true
                     coroutineScope.launch {
                         try {
@@ -215,7 +237,7 @@ internal fun WebProjectSearchReplace(
                     }
                 }, colors = readableTextButtonColors()) { Text("Replace all") }
             },
-            dismissButton = { TextButton(onClick = { confirmReplace = false }, colors = readableTextButtonColors()) { Text("Cancel") } },
+            dismissButton = { TextButton(onClick = { confirmation = null }, colors = readableTextButtonColors()) { Text("Cancel") } },
         )
     }
 
@@ -236,13 +258,16 @@ private fun ProjectSearchField(value: String, placeholder: String, palette: WebP
 }
 
 @Composable
-private fun SearchToggle(label: String, selected: Boolean, palette: WebPalette, onClick: () -> Unit) {
+private fun SearchToggle(label: String, description: String, selected: Boolean, palette: WebPalette, onClick: () -> Unit) {
     Text(
         label,
         color = if (selected) palette.text else palette.mutedText,
         fontSize = 11.sp,
         fontWeight = FontWeight.SemiBold,
-        modifier = Modifier.clipSearchRow(palette, selected).clickable(onClick = onClick).padding(horizontal = 9.dp, vertical = 8.dp),
+        modifier = Modifier.heightIn(min = 48.dp).widthIn(min = 48.dp).clipSearchRow(palette, selected)
+            .semantics { contentDescription = description }
+            .toggleable(value = selected, role = Role.Checkbox, onValueChange = { onClick() })
+            .padding(horizontal = 9.dp, vertical = 14.dp),
     )
 }
 

@@ -34,6 +34,7 @@ internal fun LargeFileCodeEditor(
     highlight: (String) -> AnnotatedString,
     onValueChange: (TextFieldValue) -> Unit,
     breakpoints: Set<Int> = emptySet(),
+    pausedLine: Int? = null,
     onBreakpoint: (Int) -> Unit = {},
     sourceJump: WebSourceJump? = null,
 ) {
@@ -43,7 +44,7 @@ internal fun LargeFileCodeEditor(
         update = {
             it.bindSession(session)
             it.bind(value, palette, highlight, onValueChange)
-            it.bindDevelopment(breakpoints, onBreakpoint, sourceJump)
+            it.bindDevelopment(breakpoints, onBreakpoint, sourceJump, pausedLine)
         },
         onRelease = { it.dispose() },
     )
@@ -58,7 +59,10 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
     }
     fun bindSession(updated: EditorSession?) {
         if (session === updated) return
+        flushPendingEdits()
+        session?.detachNativeEditor(this)
         session = updated
+        updated?.attachNativeEditor(this, ::flushPendingEdits)
         hasBoundValue = false
         followCursor = updated?.followCursor ?: true
         updated?.let { saved ->
@@ -92,10 +96,12 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         return true
     }
     private var breakpoints: Set<Int> = emptySet()
+    private var pausedLine: Int? = null
     private var onBreakpoint: ((Int) -> Unit)? = null
     private var gutterGesture = false
     private var lastJump: Long? = null
-    fun bindDevelopment(points: Set<Int>, toggle: (Int) -> Unit, jump: WebSourceJump?) {
+    fun bindDevelopment(points: Set<Int>, toggle: (Int) -> Unit, jump: WebSourceJump?, paused: Int? = null) {
+        if (pausedLine != paused) { pausedLine = paused; invalidate() }
         if (breakpoints != points) { breakpoints = points; invalidate() }
         onBreakpoint = toggle
         if (jump != null && lastJump != jump.version) {
@@ -109,17 +115,20 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         }
     }
     private var applying = false
+    private var nativeTextDirty = false
     private var source = ""
     private var notifyChange: ((TextFieldValue) -> Unit)? = null
     private var highlightSource: ((String) -> AnnotatedString)? = null
     private var currentPalette: WebPalette? = null
     private val gutterPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val indentGuidePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val syntaxSpans = ArrayList<ForegroundColorSpan>()
     private var downX = 0f
     private var downY = 0f
     private var dragged = false
     private var measuredWidthSpec: Int? = null
     private val highlightTask = Runnable { highlightVisibleSection() }
+    private val publishEditTask = Runnable { flushPendingEdits() }
 
     init {
         inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
@@ -140,11 +149,18 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         isHorizontalScrollBarEnabled = true
         addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                // Selection callbacks can run before afterTextChanged. Never publish a
+                // new caret with the previous immutable document during that interval.
+                if (!applying) nativeTextDirty = true
+            }
             override fun afterTextChanged(text: Editable?) {
                 if (applying || text == null) return
-                source = text.toString()
-                publishValue()
+                // Match Py: keep keystrokes in Editable and publish one immutable
+                // whole-document snapshot after a burst, rather than per character.
+                nativeTextDirty = true
+                removeCallbacks(publishEditTask)
+                postDelayed(publishEditTask, NATIVE_EDITOR_PUBLISH_DEBOUNCE_MS)
                 followEditedCursor()
                 scheduleHighlight()
             }
@@ -165,7 +181,7 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         }
         applying = true
         try {
-            if (source !== value.text && source != value.text) {
+            if (!nativeTextDirty && source !== value.text && source != value.text) {
                 val x = scrollX
                 val y = scrollY
                 source = value.text
@@ -175,18 +191,20 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
                 scheduleHighlight()
                 if (!restoringSession) followEditedCursor()
             }
-            val start = value.selection.start.coerceIn(0, length())
-            val end = value.selection.end.coerceIn(0, length())
-            if (selectionStart != start || selectionEnd != end) {
-                setSelection(start, end)
-                if (!restoringSession) followEditedCursor()
+            if (!nativeTextDirty) {
+                val start = value.selection.start.coerceIn(0, length())
+                val end = value.selection.end.coerceIn(0, length())
+                if (selectionStart != start || selectionEnd != end) {
+                    setSelection(start, end)
+                    if (!restoringSession) followEditedCursor()
+                }
             }
         } finally { applying = false; hasBoundValue = true }
         if (newPalette) scheduleHighlight()
     }
 
     private fun publishValue() {
-        if (applying || selectionStart < 0 || selectionEnd < 0) return
+        if (applying || nativeTextDirty || session?.valid == false || selectionStart < 0 || selectionEnd < 0) return
         val editable = text ?: return
         val start = BaseInputConnection.getComposingSpanStart(editable)
         val end = BaseInputConnection.getComposingSpanEnd(editable)
@@ -198,6 +216,19 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         super.onSelectionChanged(start, end)
         publishValue()
         if (!applying && hasBoundValue && hasFocus()) followEditedCursor()
+    }
+
+    /** The owner calls this on the UI thread before save/run/undo or taking a draft snapshot. */
+    fun flushPendingEdits() {
+        removeCallbacks(publishEditTask)
+        if (!nativeTextDirty) return
+        if (session?.valid == false) {
+            nativeTextDirty = false
+            return
+        }
+        source = text?.toString() ?: source
+        nativeTextDirty = false
+        publishValue()
     }
 
     // Deliberately reveal the caret inside this editor; never scroll an outer panel/page.
@@ -290,6 +321,9 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
     }
 
     private fun highlightVisibleSection() {
+        // Layout offsets belong to Editable; the immutable snapshot catches up after
+        // the publication debounce. Highlighting stale offsets could exceed spans.
+        if (nativeTextDirty) { scheduleHighlight(); return }
         val layout = layout ?: return
         val editable = text ?: return
         val first = layout.getLineForVertical(scrollY)
@@ -314,6 +348,7 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
     }
 
     override fun onDraw(canvas: Canvas) {
+        drawIndentationGuides(canvas)
         super.onDraw(canvas)
         val palette = currentPalette ?: return
         val layout = layout ?: return
@@ -329,6 +364,11 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         gutterPaint.textAlign = Paint.Align.CENTER
         val numberCenter = (paddingLeft.toFloat() - 4f) / 2f
         for (line in first..last) {
+            if (line + 1 == pausedLine) {
+                gutterPaint.color = palette.accent.copy(alpha = 0.3f).toArgb()
+                canvas.drawRect(0f, (layout.getLineTop(line) + totalPaddingTop - scrollY).toFloat(),
+                    paddingLeft.toFloat(), (layout.getLineBottom(line) + totalPaddingTop - scrollY).toFloat(), gutterPaint)
+            }
             gutterPaint.color = if (line + 1 in breakpoints) palette.error.toArgb() else palette.subtleText.toArgb()
             if (line + 1 in breakpoints) {
                 canvas.drawCircle(numberCenter,
@@ -340,6 +380,46 @@ internal class LargeDocumentEditText(context: Context) : EditText(context) {
         canvas.restore()
     }
 
-    fun dispose() { removeCallbacks(highlightTask); removeCallbacks(revealCaretTask); session = null; notifyChange = null; highlightSource = null; onBreakpoint = null }
-    override fun onDetachedFromWindow() { removeCallbacks(highlightTask); removeCallbacks(revealCaretTask); super.onDetachedFromWindow() }
+    private fun drawIndentationGuides(canvas: Canvas) {
+        val palette = currentPalette ?: return
+        val currentLayout = layout ?: return
+        val editable = text ?: return
+        if (currentLayout.lineCount == 0) return
+        val first = (currentLayout.getLineForVertical(scrollY) - 1).coerceAtLeast(0)
+        val last = (currentLayout.getLineForVertical(scrollY + height) + 1).coerceAtMost(currentLayout.lineCount - 1)
+        val depths = (first..last).map { line ->
+            indentationDepth(editable, currentLayout.getLineStart(line), currentLayout.getLineEnd(line))
+        }
+        indentGuidePaint.color = palette.subtleText.copy(alpha = 0.24f).toArgb()
+        indentGuidePaint.strokeWidth = resources.displayMetrics.density
+        val step = paint.measureText("    ")
+        canvas.save()
+        canvas.translate(scrollX.toFloat(), scrollY.toFloat())
+        canvas.clipRect(totalPaddingLeft.toFloat(), 0f, (width - totalPaddingRight).toFloat(), height.toFloat())
+        for (segment in indentationGuideSegments(depths)) {
+            val x = totalPaddingLeft + (segment.level - 0.5f) * step - scrollX
+            canvas.drawLine(x, (currentLayout.getLineTop(first + segment.firstLine) + totalPaddingTop - scrollY).toFloat(),
+                x, (currentLayout.getLineBottom(first + segment.endLine - 1) + totalPaddingTop - scrollY).toFloat(), indentGuidePaint)
+        }
+        canvas.restore()
+    }
+
+    fun dispose() {
+        flushPendingEdits()
+        removeCallbacks(highlightTask)
+        removeCallbacks(revealCaretTask)
+        session?.detachNativeEditor(this)
+        session = null
+        notifyChange = null
+        highlightSource = null
+        onBreakpoint = null
+    }
+    override fun onDetachedFromWindow() {
+        flushPendingEdits()
+        removeCallbacks(highlightTask)
+        removeCallbacks(revealCaretTask)
+        super.onDetachedFromWindow()
+    }
 }
+
+private const val NATIVE_EDITOR_PUBLISH_DEBOUNCE_MS = 120L

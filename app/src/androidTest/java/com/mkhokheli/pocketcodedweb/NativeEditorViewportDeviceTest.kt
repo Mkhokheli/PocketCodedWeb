@@ -12,6 +12,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.test.ComposeTimeoutException
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import org.junit.Assert.assertEquals
@@ -20,6 +22,8 @@ import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 class NativeEditorViewportDeviceTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
@@ -31,6 +35,85 @@ class NativeEditorViewportDeviceTest {
         run = Color.Green, runText = Color.Black, terminalPrompt = Color.Green,
         divider = Color.Gray, error = Color.Red, warning = Color.Yellow, success = Color.Green, info = Color.Cyan,
     )
+
+    @Test fun nativeTypingBatchesSnapshotsAndAStaleBindCannotReplaceUnpublishedText() {
+        val original = "x".repeat(200_000)
+        val session = EditorSession(original)
+        val publications = AtomicInteger()
+        val latest = AtomicReference<TextFieldValue>()
+        lateinit var editor: LargeDocumentEditText
+        compose.setContent {
+            MaterialTheme {
+                AndroidView(
+                    modifier = Modifier.width(280.dp).height(220.dp),
+                    factory = { context -> LargeDocumentEditText(context).also { editor = it } },
+                    update = { view ->
+                        view.bindSession(session)
+                        view.bind(session.value, palette, { AnnotatedString(it) }) {
+                            session.value = it; latest.set(it); publications.incrementAndGet()
+                        }
+                    },
+                    onRelease = { it.dispose() },
+                )
+            }
+        }
+        compose.runOnIdle {
+            publications.set(0)
+            repeat(32) { editor.editableText.append('a') }
+            editor.setSelection(editor.length())
+            assertEquals("Typing must not copy and publish the entire document per character", 0, publications.get())
+            editor.bind(TextFieldValue(original, TextRange(original.length)), palette, { AnnotatedString(it) }) {
+                session.value = it; latest.set(it); publications.incrementAndGet()
+            }
+            assertEquals(original + "a".repeat(32), editor.text.toString())
+            assertEquals(original.length + 32, editor.selectionEnd)
+        }
+        compose.waitUntil(5_000) { publications.get() > 0 }
+        compose.runOnIdle {
+            assertEquals(1, publications.get())
+            assertEquals(original + "a".repeat(32), latest.get().text)
+            assertEquals(original.length + 32, latest.get().selection.end)
+        }
+    }
+
+    @Test fun ownerFlushAndDisposalPublishPendingTypingWithoutWaitingForTheDebounce() {
+        val registry = EditorSessionRegistry()
+        val session = registry.open("main.js", "original")
+        val publications = AtomicInteger()
+        var mounted by mutableStateOf(true)
+        lateinit var editor: LargeDocumentEditText
+        compose.setContent {
+            MaterialTheme {
+                if (mounted) AndroidView(
+                    modifier = Modifier.width(280.dp).height(220.dp),
+                    factory = { context -> LargeDocumentEditText(context).also { editor = it } },
+                    update = { view ->
+                        view.bindSession(session)
+                        view.bind(session.value, palette, { AnnotatedString(it) }) {
+                            session.value = it; publications.incrementAndGet()
+                        }
+                    },
+                    onRelease = { it.dispose() },
+                )
+            }
+        }
+        compose.runOnIdle {
+            publications.set(0)
+            editor.editableText.append(" first")
+            registry.flushPendingEdits()
+            assertEquals("original first", session.value.text)
+            assertEquals(1, publications.get())
+            editor.editableText.append(" second")
+            editor.dispose()
+            assertEquals("original first second", session.value.text)
+            assertEquals(2, publications.get())
+            registry.flushPendingEdits()
+            assertEquals("Released views must not stay registered", 2, publications.get())
+            mounted = false
+        }
+        compose.waitForIdle()
+        assertEquals(2, publications.get())
+    }
 
     @Test fun bindingFocusingAndRemountingPreserveTheSavedManualViewport() {
         val source = (1..1_000).joinToString("\n") { "const line$it = $it;" }

@@ -32,6 +32,10 @@ class LargeProjectPerformanceTest {
     @Test fun largeProjectLoadBuildAndServe() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val root = File(context.filesDir, "large-performance-fixture").apply { mkdirs() }
+        // Keep repeated benchmark inputs identical: the previous run leaves build outputs.
+        val generated = File(root, "dist").canonicalFile
+        check(generated.parentFile == root.canonicalFile)
+        if (generated.exists()) check(generated.deleteRecursively()) { "Could not reset generated benchmark output" }
         val modules = File(root, "src").apply { mkdirs() }
         val padding = "/*" + "module documentation ".repeat(95) + "*/\n"
         repeat(6_000) { index ->

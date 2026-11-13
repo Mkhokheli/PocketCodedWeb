@@ -1,0 +1,24 @@
+﻿--------- beginning of main
+I/PocketCodedPyStress(20425): immediate-run chars=236934 latest-snapshot=true
+I/PocketCodedPyStress(20425): burst-switch rounds=8 chars=237498 elapsed-ms=27322 exact-save=true
+I/PocketCodedPerf(20425): load run=0 ms=2946 chars=12179893
+I/PocketCodedPerf(20425): load run=1 ms=856 chars=12179893
+I/PocketCodedPerf(20425): load run=2 ms=855 chars=12179893
+I/PocketCodedPerf(20425): index ms=2943
+I/PocketCodedPerf(20425): BUILD_MS=403
+I/PocketCodedPerf(20425): server startup-ms=1552 api-p50-ms=3 api-p95-ms=11 bundle-transfer-ms=252
+I/PocketCodedPerf(20425): webview load-and-execute-ms=525 modules="6000"
+I/PocketCodedPerf(20425): editor initial-max-frame-ms=2040.105399
+I/PocketCodedPerf(20425): editor lines=12000 chars=505780 frames=170 p50-ms=15.089624 p95-ms=22.039622 over-32ms=4
+I/PocketCodedPerf(20425): explorer files=6003 frames=185 p95-ms=32.387208 max-ms=3009.177397
+I/PocketCodedStress(20425): semantic-index cold-ms=1031 warm-ms=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0] files=2506
+I/PocketCodedStress(20425): native-loop exit=124 timedOut=true stdout= stderr=Error: Script execution timed out after 750ms
+I/PocketCodedStress(20425):     at Script.runInContext (node:vm:133:12)
+I/PocketCodedStress(20425):     at Script.runInNewContext (node:vm:138:17)
+I/PocketCodedStress(20425):     at /data/data/com.m
+I/PocketCodedStress(20425): native-timeout=124 recovery=42
+I/PocketCodedStress(20425): fixture=BeginnerPortfolio load-and-diagnose-ms=51
+I/PocketCodedStress(20425): fixture=JuniorDashboard load-and-diagnose-ms=33
+I/PocketCodedStress(20425): fixture=EnterpriseConsole load-and-diagnose-ms=40
+I/PocketCodedStress(20425): fixture=BrokenLab load-and-diagnose-ms=29
+I/PocketCodedStress(20425): load-files=2508 elapsed-ms=919 heap-delta=-20009864

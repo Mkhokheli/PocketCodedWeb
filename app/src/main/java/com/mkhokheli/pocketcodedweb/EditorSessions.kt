@@ -24,9 +24,32 @@ internal class EditorSession(code: String) {
     var lastSourceJumpVersion: Long? = null
     var valid = true
         private set
+    private var nativeEditorOwner: Any? = null
+    private var nativeEditorFlush: (() -> Unit)? = null
+
+    /** Native editors batch immutable snapshots; the workspace flushes before taking a snapshot. */
+    fun attachNativeEditor(owner: Any, flush: () -> Unit) {
+        if (!valid) return
+        if (nativeEditorOwner !== owner) nativeEditorFlush?.invoke()
+        nativeEditorOwner = owner
+        nativeEditorFlush = flush
+    }
+
+    fun detachNativeEditor(owner: Any) {
+        if (nativeEditorOwner !== owner) return
+        nativeEditorOwner = null
+        nativeEditorFlush = null
+    }
+
+    /** Must be called on the UI thread, where the native Editable is owned. */
+    fun flushPendingEdits() {
+        if (valid) nativeEditorFlush?.invoke()
+    }
 
     fun invalidate() {
         valid = false
+        nativeEditorOwner = null
+        nativeEditorFlush = null
         history.clear()
     }
 
@@ -50,9 +73,21 @@ internal class EditorSessionRegistry(private val maxSessions: Int = 16) {
         val session = sessions.getOrPut(path) { EditorSession(code) }
         session.reconcile(code)
         while (sessions.size > maxSessions.coerceAtLeast(1)) {
-            sessions.remove(sessions.keys.first())
+            val oldest = sessions.keys.first()
+            sessions[oldest]?.flushPendingEdits()
+            sessions.remove(oldest)
         }
         return session
+    }
+
+    fun hasPendingDraft(path: String, content: String): Boolean = sessions[path]?.let {
+        it.valid && it.value.text == content && it.externalCode != content
+    } == true
+
+    /** Flush first, then read editor/session/file snapshots for run, save or layout changes. */
+    fun flushPendingEdits() {
+        // Publishing can recompose an editor or affect session access order.
+        sessions.values.toList().forEach(EditorSession::flushPendingEdits)
     }
 
     /** A replaced/deleted file must never inherit the previous file's draft or undo stack. */

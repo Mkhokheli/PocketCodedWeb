@@ -1,0 +1,25 @@
+﻿--------- beginning of main
+I/PocketCodedPyStress(18934): immediate-run chars=236934 latest-snapshot=true
+I/PocketCodedPyStress(18934): workspace files=66 active-tab-revealed=true resize-preserves-text=true compact-menu=true
+I/PocketCodedPyStress(18934): burst-switch rounds=8 chars=237498 elapsed-ms=32931 exact-save=true
+I/PocketCodedPerf(18934): load run=0 ms=5858 chars=12179893
+I/PocketCodedPerf(18934): load run=1 ms=897 chars=12179893
+I/PocketCodedPerf(18934): load run=2 ms=890 chars=12179893
+I/PocketCodedPerf(18934): index ms=2988
+I/PocketCodedPerf(18934): BUILD_MS=431
+I/PocketCodedPerf(18934): server startup-ms=1552 api-p50-ms=5 api-p95-ms=15 bundle-transfer-ms=264
+I/PocketCodedPerf(18934): webview load-and-execute-ms=838 modules="6000"
+I/PocketCodedPerf(18934): editor initial-max-frame-ms=2452.80631
+I/PocketCodedPerf(18934): editor lines=12000 chars=505780 frames=170 p50-ms=15.305935 p95-ms=23.684414 over-32ms=4
+I/PocketCodedPerf(18934): explorer files=6003 frames=206 p95-ms=26.194386 max-ms=207.307403
+I/PocketCodedStress(18934): semantic-index cold-ms=2675 warm-ms=[0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] files=2506
+I/PocketCodedStress(18934): native-loop exit=124 timedOut=true stdout= stderr=Error: Script execution timed out after 750ms
+I/PocketCodedStress(18934):     at Script.runInContext (node:vm:133:12)
+I/PocketCodedStress(18934):     at Script.runInNewContext (node:vm:138:17)
+I/PocketCodedStress(18934):     at /data/data/com.m
+I/PocketCodedStress(18934): native-timeout=124 recovery=42
+I/PocketCodedStress(18934): fixture=BeginnerPortfolio load-and-diagnose-ms=73
+I/PocketCodedStress(18934): fixture=JuniorDashboard load-and-diagnose-ms=44
+I/PocketCodedStress(18934): fixture=EnterpriseConsole load-and-diagnose-ms=52
+I/PocketCodedStress(18934): fixture=BrokenLab load-and-diagnose-ms=39
+I/PocketCodedStress(18934): load-files=2508 elapsed-ms=1113 heap-delta=982280

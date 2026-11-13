@@ -68,8 +68,8 @@ class PremiumTrialTest {
     }
 
     @Test
-    fun trialGateShowsAfterTrialExpiresForNonPremiumUsers() {
-        assertTrue(
+    fun expiredTrialFallsBackToFreeWithoutBlockingPaywall() {
+        assertFalse(
             shouldShowTrialGate(
                 now = trialMs,
                 trialStartedAt = 0L,

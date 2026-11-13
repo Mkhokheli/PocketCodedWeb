@@ -42,7 +42,8 @@ internal fun WebDevelopmentPanels(controller: WebDevelopmentController) {
     LaunchedEffect(controller, lifecycle) {
         lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
-                if (controller.panel in setOf("Debugger", "Tests", "Profiler")) {
+                if (controller.panel in setOf("Debugger", "Tests", "Profiler") ||
+                    controller.debugState.optString("state") in setOf("starting", "running", "paused")) {
                     val snapshots = withContext(Dispatchers.IO) {
                         Triple(NodeSessionRuntime.developmentState(controller.root, "debug"), NodeSessionRuntime.developmentState(controller.root, "tests"), NodeSessionRuntime.developmentState(controller.root, "profile"))
                     }

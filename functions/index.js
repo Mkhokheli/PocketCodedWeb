@@ -316,8 +316,8 @@ async function verifyAndStoreSubscription(uid, purchaseToken) {
     packageName: ANDROID_PACKAGE_NAME, token: purchaseToken,
   });
   const line = (purchase.lineItems || []).find(item =>
-    item.productId === MONTHLY_PRODUCT_ID && item.offerDetails?.basePlanId === "monthly");
-  if (!line) throw httpError(400, "This token does not contain the monthly Premium plan.");
+    item.productId === MONTHLY_PRODUCT_ID && ["monthly", "yearly"].includes(item.offerDetails?.basePlanId));
+  if (!line) throw httpError(400, "This token does not contain a supported Premium subscription plan.");
   const expiryMillis = Date.parse(line.expiryTime || "") || 0;
   const active = ["SUBSCRIPTION_STATE_ACTIVE", "SUBSCRIPTION_STATE_IN_GRACE_PERIOD",
     "SUBSCRIPTION_STATE_CANCELED"].includes(purchase.subscriptionState) && expiryMillis > Date.now();

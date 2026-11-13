@@ -1,0 +1,77 @@
+INSTRUMENTATION_STATUS: class=com.mkhokheli.pocketcodedweb.PyWorkspaceStressDeviceTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=3
+INSTRUMENTATION_STATUS: stream=
+com.mkhokheli.pocketcodedweb.PyWorkspaceStressDeviceTest:
+INSTRUMENTATION_STATUS: test=compactExplorerResizesWithoutLosingTextAndTabsRevealTheActiveFile
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.mkhokheli.pocketcodedweb.PyWorkspaceStressDeviceTest
+INSTRUMENTATION_STATUS: current=1
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=3
+INSTRUMENTATION_STATUS: stream=.
+INSTRUMENTATION_STATUS: test=compactExplorerResizesWithoutLosingTextAndTabsRevealTheActiveFile
+INSTRUMENTATION_STATUS_CODE: 0
+INSTRUMENTATION_STATUS: class=com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest
+INSTRUMENTATION_STATUS: current=2
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=3
+INSTRUMENTATION_STATUS: stream=
+com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest:
+INSTRUMENTATION_STATUS: test=largeProjectLoadBuildAndServe
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest
+INSTRUMENTATION_STATUS: current=2
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=3
+INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: expected:<6003> but was:<6004>
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.failNotEquals(Assert.java:835)
+	at org.junit.Assert.assertEquals(Assert.java:120)
+	at org.junit.Assert.assertEquals(Assert.java:146)
+	at com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest.largeProjectLoadBuildAndServe(LargeProjectPerformanceTest.kt:66)
+
+INSTRUMENTATION_STATUS: stream=
+Error in largeProjectLoadBuildAndServe(com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest):
+java.lang.AssertionError: expected:<6003> but was:<6004>
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.failNotEquals(Assert.java:835)
+	at org.junit.Assert.assertEquals(Assert.java:120)
+	at org.junit.Assert.assertEquals(Assert.java:146)
+	at com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest.largeProjectLoadBuildAndServe(LargeProjectPerformanceTest.kt:66)
+
+INSTRUMENTATION_STATUS: test=largeProjectLoadBuildAndServe
+INSTRUMENTATION_STATUS_CODE: -2
+INSTRUMENTATION_STATUS: class=com.mkhokheli.pocketcodedweb.DeviceCoreStressInstrumentedTest
+INSTRUMENTATION_STATUS: current=3
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=3
+INSTRUMENTATION_STATUS: stream=
+com.mkhokheli.pocketcodedweb.DeviceCoreStressInstrumentedTest:
+INSTRUMENTATION_STATUS: test=projectLoadPerformanceAndHeap
+INSTRUMENTATION_STATUS_CODE: 1
+INSTRUMENTATION_STATUS: class=com.mkhokheli.pocketcodedweb.DeviceCoreStressInstrumentedTest
+INSTRUMENTATION_STATUS: current=3
+INSTRUMENTATION_STATUS: id=AndroidJUnitRunner
+INSTRUMENTATION_STATUS: numtests=3
+INSTRUMENTATION_STATUS: stream=.
+INSTRUMENTATION_STATUS: test=projectLoadPerformanceAndHeap
+INSTRUMENTATION_STATUS_CODE: 0
+INSTRUMENTATION_RESULT: stream=
+
+Time: 38.263
+There was 1 failure:
+1) largeProjectLoadBuildAndServe(com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest)
+java.lang.AssertionError: expected:<6003> but was:<6004>
+	at org.junit.Assert.fail(Assert.java:89)
+	at org.junit.Assert.failNotEquals(Assert.java:835)
+	at org.junit.Assert.assertEquals(Assert.java:120)
+	at org.junit.Assert.assertEquals(Assert.java:146)
+	at com.mkhokheli.pocketcodedweb.LargeProjectPerformanceTest.largeProjectLoadBuildAndServe(LargeProjectPerformanceTest.kt:66)
+
+FAILURES!!!
+Tests run: 3,  Failures: 1
+
+
+INSTRUMENTATION_CODE: -1

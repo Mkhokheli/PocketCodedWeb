@@ -6,7 +6,11 @@
     "ignore": [
       "firebase.json",
       "**/.*",
-      "**/node_modules/**"
+      "**/node_modules/**",
+      "**/*.md",
+      "**/*.txt",
+      "examples/**",
+      "PocketCodedWeb_Actual_App_Screenshots.html"
     ]
   },
   "firestore": {

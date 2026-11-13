@@ -10,6 +10,27 @@ import org.junit.rules.TemporaryFolder
 class WebProjectSearchTest {
     @get:Rule val temporary = TemporaryFolder()
 
+    @Test fun longLinePreviewKeepsTheMatchAndCorrectColumnVisible() = runBlocking {
+        val root = temporary.newFolder()
+        File(root, "long.js").writeText("heading\n" + " ".repeat(800) + "needle" + "x".repeat(800))
+        val match = findWebMatches(root, root, WebSearchOptions("needle")).matches.single()
+        assertEquals(2, match.line)
+        assertEquals(801, match.column)
+        assertEquals("needle", match.preview.substring(match.previewStart, match.previewEnd))
+        assertTrue(match.preview.length <= 300)
+    }
+
+    @Test fun emptyAndMultilineMatchesHaveValidPreviewRanges() = runBlocking {
+        val root = temporary.newFolder()
+        File(root, "main.js").writeText("first\nsecond\n")
+        listOf("first\\nsecond", "(?m)^", "$", "\\n").forEach { expression ->
+            findWebMatches(root, root, WebSearchOptions(expression, regex = true)).matches.forEach { match ->
+                assertTrue(match.previewStart in 0..match.preview.length)
+                assertTrue(match.previewEnd in match.previewStart..match.preview.length)
+            }
+        }
+    }
+
     @Test fun scopesFiltersCaseAndLineNumbers() = runBlocking {
         val root = temporary.newFolder()
         val folder = File(root, "src").apply { mkdirs() }

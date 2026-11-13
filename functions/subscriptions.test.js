@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const crypto = require("node:crypto");
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 function harness({ state = "SUBSCRIPTION_STATE_ACTIVE", expired = false, lifetime = false,
-  owner = "user", existingOwner, newer = false } = {}) {
+  owner = "user", existingOwner, newer = false, basePlan = "monthly" } = {}) {
   const records = new Map();
   const token = "token";
   records.set("users/user", { isPremium: lifetime || newer, lifetimePremium: lifetime,
@@ -28,7 +28,7 @@ function harness({ state = "SUBSCRIPTION_STATE_ACTIVE", expired = false, lifetim
   const publisher = { purchases: { subscriptionsv2: { get: async () => ({ data: {
     subscriptionState: state, acknowledgementState: "ACKNOWLEDGEMENT_STATE_PENDING",
     externalAccountIdentifiers: { obfuscatedExternalAccountId: hash(owner) },
-    lineItems: [{ productId: "pocketcodedweb_premium_monthly", offerDetails: { basePlanId: "monthly" },
+    lineItems: [{ productId: "pocketcodedweb_premium_monthly", offerDetails: { basePlanId: basePlan },
       expiryTime: new Date(Date.now() + (expired ? -10000 : 100000)).toISOString() }],
   } }) }, subscriptions: { acknowledge: async () => { acknowledged = true; } } } };
   const context = { exports: {}, console, Buffer, process, require: name => {
@@ -88,4 +88,21 @@ test("lifetime refund revokes access when there is no monthly subscription", asy
   await h.revokeLifetime();
   assert.equal(h.user().isPremium, false);
   assert.equal(h.user().lifetimePremium, false);
+});
+
+for (const basePlan of ["monthly", "yearly"]) {
+  test(basePlan + " subscription grants verified access", async () => {
+    const h = harness({ basePlan });
+    assert.equal((await h.run()).active, true);
+    assert.equal(h.user().isPremium, true);
+    assert.equal(h.acknowledged(), true);
+  });
+  test(basePlan + " expiry falls back to free", async () => {
+    const h = harness({ basePlan, expired: true });
+    assert.equal((await h.run()).active, false);
+    assert.equal(h.user().isPremium, false);
+  });
+}
+test("unsupported base plan is rejected", async () => {
+  await assert.rejects(harness({ basePlan: "unknown" }).run());
 });

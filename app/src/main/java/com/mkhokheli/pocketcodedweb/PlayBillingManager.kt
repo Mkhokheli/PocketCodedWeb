@@ -28,6 +28,8 @@ import org.json.JSONObject
 internal const val LIFETIME_PRODUCT_ID = "pocketcodedweb_lifetime"
 internal const val MONTHLY_PRODUCT_ID = "pocketcodedweb_premium_monthly"
 internal const val MONTHLY_BASE_PLAN_ID = "monthly"
+internal const val YEARLY_BASE_PLAN_ID = "yearly"
+internal enum class PremiumPlan { Monthly, Yearly, Lifetime }
 private const val BILLING_PREFS_NAME = "play_billing"
 private const val PURCHASE_ACCOUNT_GRACE_MS = 24L * 60L * 60L * 1000L
 private const val BILLING_LOG_TAG = "PlayBilling"
@@ -45,6 +47,9 @@ internal data class BillingUiState(
     val formattedPrice: String = "",
     val monthlyPrice: String = "",
     val monthlyAvailable: Boolean = false,
+    val yearlyPrice: String = "",
+    val yearlyAvailable: Boolean = false,
+    val checkoutInProgress: Boolean = false,
     val message: String? = null,
 )
 
@@ -127,14 +132,16 @@ internal class PlayBillingManager(
         })
     }
 
-    fun launchPurchase(activity: Activity, monthly: Boolean = false) {
+    fun launchPurchase(activity: Activity, plan: PremiumPlan = PremiumPlan.Lifetime) {
+        if (state.checkoutInProgress || state.isPurchasePending || state.isPremium) return
+        val monthly = plan != PremiumPlan.Lifetime
         val details = if (monthly) monthlyDetails else productDetails
         if (!billingClient.isReady || details == null) {
             update(message = "The purchase is not ready yet. Check your connection and try again.")
             if (billingClient.isReady) queryProductDetails()
             return
         }
-        val offerToken = if (monthly) monthlyOffer(details)?.offerToken
+        val offerToken = if (monthly) subscriptionOffer(details, if (plan == PremiumPlan.Yearly) YEARLY_BASE_PLAN_ID else MONTHLY_BASE_PLAN_ID)?.offerToken
             else details.oneTimePurchaseOfferDetailsList?.firstOrNull()?.offerToken
         if (offerToken.isNullOrBlank()) {
             update(message = "This purchase is not available for your Google Play account or region.")
@@ -148,9 +155,10 @@ internal class PlayBillingManager(
             .setProductDetailsParamsList(listOf(productParams))
             .setObfuscatedAccountId(expectedObfuscatedAccountId)
             .build()
+        update(checkoutInProgress = true, message = null)
         val result = billingClient.launchBillingFlow(activity, flowParams)
         if (result.responseCode != BillingClient.BillingResponseCode.OK) {
-            update(message = billingMessage(result, "Could not open Google Play checkout."))
+            update(checkoutInProgress = false, message = billingMessage(result, "Could not open Google Play checkout."))
         }
     }
 
@@ -189,6 +197,7 @@ internal class PlayBillingManager(
 
     override fun onPurchasesUpdated(result: BillingResult, purchases: MutableList<Purchase>?) {
         if (isClosed) return
+        update(checkoutInProgress = false)
         when (result.responseCode) {
             BillingClient.BillingResponseCode.OK -> processPurchases(purchases.orEmpty(), restoring = false)
             BillingClient.BillingResponseCode.USER_CANCELED -> update(message = "Purchase cancelled. No charge was made.")
@@ -197,10 +206,14 @@ internal class PlayBillingManager(
         }
     }
 
-    private fun monthlyOffer(details: ProductDetails) = details.subscriptionOfferDetails?.firstOrNull {
-        it.basePlanId == MONTHLY_BASE_PLAN_ID && it.offerId == null &&
-            it.pricingPhases.pricingPhaseList.any { phase -> phase.billingPeriod == "P1M" }
+    private fun subscriptionOffer(details: ProductDetails, basePlan: String) = details.subscriptionOfferDetails?.firstOrNull {
+        it.basePlanId == basePlan && it.offerId == null &&
+            it.pricingPhases.pricingPhaseList.any { phase ->
+                phase.billingPeriod == if (basePlan == YEARLY_BASE_PLAN_ID) "P1Y" else "P1M"
+            }
     }
+
+    fun refreshPrices() { if (billingClient.isReady) queryProductDetails() else start() }
 
     private fun queryMonthlyDetails() {
         val product = QueryProductDetailsParams.Product.newBuilder()
@@ -211,9 +224,12 @@ internal class PlayBillingManager(
             if (isClosed) return@queryProductDetailsAsync
             monthlyDetails = if (result.responseCode == BillingClient.BillingResponseCode.OK)
                 response.productDetailsList.firstOrNull { it.productId == MONTHLY_PRODUCT_ID } else null
-            val offer = monthlyDetails?.let { monthlyOffer(it) }
+            val offer = monthlyDetails?.let { subscriptionOffer(it, MONTHLY_BASE_PLAN_ID) }
             val price = offer?.pricingPhases?.pricingPhaseList?.lastOrNull()?.formattedPrice.orEmpty()
-            update(monthlyPrice = price, monthlyAvailable = offer != null && price.isNotBlank())
+            val yearly = monthlyDetails?.let { subscriptionOffer(it, YEARLY_BASE_PLAN_ID) }
+            val yearlyPrice = yearly?.pricingPhases?.pricingPhaseList?.lastOrNull()?.formattedPrice.orEmpty()
+            update(monthlyPrice = price, monthlyAvailable = offer != null && price.isNotBlank(),
+                yearlyPrice = yearlyPrice, yearlyAvailable = yearly != null && yearlyPrice.isNotBlank())
         }
     }
 
@@ -331,6 +347,7 @@ internal class PlayBillingManager(
     private fun verifyPurchaseWithBackend(purchase: Purchase, restoring: Boolean) {
         if (purchaseTokenBeingVerified == purchase.purchaseToken) return
         purchaseTokenBeingVerified = purchase.purchaseToken
+        update(checkoutInProgress = true)
         update(
             purchasesLoaded = false,
             isPurchasePending = false,
@@ -380,6 +397,7 @@ internal class PlayBillingManager(
             mainHandler.post {
                 if (isClosed) return@post
                 purchaseTokenBeingVerified = null
+                update(checkoutInProgress = false)
                 verification.onSuccess { unlockPremium(purchase, restoring) }
                     .onFailure { error ->
                         val retainedServerPremium = serverEntitlementKnown && serverPremium
@@ -448,6 +466,9 @@ internal class PlayBillingManager(
         formattedPrice: String = state.formattedPrice,
         monthlyPrice: String = state.monthlyPrice,
         monthlyAvailable: Boolean = state.monthlyAvailable,
+        yearlyPrice: String = state.yearlyPrice,
+        yearlyAvailable: Boolean = state.yearlyAvailable,
+        checkoutInProgress: Boolean = state.checkoutInProgress,
         message: String? = state.message,
     ) {
         state = BillingUiState(
@@ -461,6 +482,9 @@ internal class PlayBillingManager(
             formattedPrice = formattedPrice,
             monthlyPrice = monthlyPrice,
             monthlyAvailable = monthlyAvailable,
+            yearlyPrice = yearlyPrice,
+            yearlyAvailable = yearlyAvailable,
+            checkoutInProgress = checkoutInProgress,
             message = message,
         )
         publish()

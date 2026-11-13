@@ -2,6 +2,7 @@ package com.mkhokheli.pocketcodedweb
 
 import com.mkhokheli.pocketcodedweb.ui.theme.spaceThemeColors
 import android.annotation.SuppressLint
+import androidx.compose.foundation.lazy.LazyRow
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
@@ -10,6 +11,10 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.ContentCopy
+import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
 import android.os.Bundle
@@ -139,6 +144,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -219,6 +225,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import org.eclipse.jgit.api.Git
 import org.json.JSONArray
 import org.json.JSONObject
@@ -489,6 +497,9 @@ private val aiModelOptions =
                 AiModelOption("local-model", "Custom / Ollama", "A local or remote OpenAI-compatible endpoint.", AiProvider.OpenAiCompatible),
         )
 
+
+private val LocalSquareExpandedEditor = androidx.compose.runtime.staticCompositionLocalOf { false }
+
 @Stable
 internal data class WebFile(
         val id: Long,
@@ -506,6 +517,8 @@ internal data class FolderTarget(
         val name: String,
         val path: String,
         val relativePath: String,
+        val childCount: Int = -1,
+        val isPackage: Boolean = false,
 )
 
 private sealed class ExplorerEntry {
@@ -657,6 +670,7 @@ internal data class CodeDiagnostic(
         val end: Int,
         val severity: String,
         val message: String,
+        val quickFix: WebQuickFix? = null,
 )
 
 private enum class WebEditorLanguage {
@@ -849,6 +863,11 @@ internal fun WebIdeApp(
         onBackToProjects: () -> Unit,
 ) {
     val context = LocalContext.current
+    val access = LocalFeatureAccess.current
+    val latestAccess by rememberUpdatedState(access)
+    fun requireFeature(feature: PremiumFeature) = latestAccess.require(feature)
+    fun canEditFile(path: String) = latestAccess.fullAccess ||
+        isEditableScratchpadFile(context.filesDir, projectDirectory, File(path))
     val palette = remember(ideTheme) { webIdePalette(ideTheme) }
     val coroutineScope = rememberCoroutineScope()
     val rootDirectory =
@@ -964,6 +983,7 @@ internal fun WebIdeApp(
     val dirtyFileIds = remember { mutableSetOf<Long>() }
     val pendingEditorTextByFileId =
             remember(rootDirectory.absolutePath) { mutableMapOf<Long, String>() }
+    val editorSaveStates = remember(rootDirectory.absolutePath) { androidx.compose.runtime.mutableStateMapOf<Long, String>() }
     val pendingFileEdits = remember(rootDirectory.absolutePath) { mutableMapOf<Long, PendingFileEdit>() }
     val pendingEditorSaveJobs = remember { mutableMapOf<Long, Job>() }
     val fileRefreshGeneration = remember(rootDirectory.absolutePath) { AtomicLong(0L) }
@@ -987,6 +1007,7 @@ internal fun WebIdeApp(
     }
 
     BackHandler(enabled = true) {
+        editorSessions.flushPendingEdits()
         if (fullScreenMode != null) {
             fullScreenMode = null
         } else {
@@ -1155,6 +1176,7 @@ internal fun WebIdeApp(
             val observer = LifecycleEventObserver { _, event ->
                 when (event) {
                     Lifecycle.Event.ON_STOP -> {
+                        editorSessions.flushPendingEdits()
                         val draftsToStage = pendingFileEdits.values.toList()
                         (context as? ComponentActivity)?.lifecycleScope?.launch(Dispatchers.IO) {
                             draftsToStage.forEach { fileStore.stageDraft(it) }
@@ -1191,7 +1213,14 @@ internal fun WebIdeApp(
                 }
             }
             lifecycle.addObserver(observer)
-            onDispose { lifecycle.removeObserver(observer) }
+            onDispose {
+                editorSessions.flushPendingEdits()
+                val finalEdits = pendingFileEdits.values.toList()
+                (context as? ComponentActivity)?.lifecycleScope?.launch(Dispatchers.IO) {
+                    finalEdits.forEach { fileStore.save(it) }
+                }
+                lifecycle.removeObserver(observer)
+            }
         }
     }
 
@@ -1303,6 +1332,7 @@ internal fun WebIdeApp(
         missingFileIds.forEach { fileId ->
             pendingEditorSaveJobs.remove(fileId)?.cancel()
             pendingEditorTextByFileId.remove(fileId)
+            editorSaveStates.remove(fileId)
             dirtyFileIds.remove(fileId)
         }
         val currentFilesById = files.associateBy(WebFile::id)
@@ -1355,7 +1385,7 @@ internal fun WebIdeApp(
 
     val openFileLauncher =
             rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-                uri?.let {
+                uri?.takeIf { requireFeature(PremiumFeature.ImportExport) }?.let {
                     coroutineScope.launch {
                         withContext(Dispatchers.IO) {
                             val name = getFileName(context, it) ?: "imported_file"
@@ -1369,7 +1399,7 @@ internal fun WebIdeApp(
 
     val openFolderLauncher =
             rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-                uri?.let {
+                uri?.takeIf { requireFeature(PremiumFeature.ImportExport) }?.let {
                     coroutineScope.launch {
                         withContext(Dispatchers.IO) {
                             val docFile = DocumentFile.fromTreeUri(context, it)
@@ -1382,7 +1412,7 @@ internal fun WebIdeApp(
 
     val exportFolderLauncher =
             rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-                uri?.let {
+                uri?.takeIf { requireFeature(PremiumFeature.ImportExport) }?.let {
                     coroutineScope.launch {
                         withContext(Dispatchers.IO) {
                             val docFile = DocumentFile.fromTreeUri(context, it)
@@ -1393,6 +1423,7 @@ internal fun WebIdeApp(
             }
 
     fun selectFile(fileId: Long) {
+        editorSessions.flushPendingEdits()
         val file = files.firstOrNull { it.id == fileId } ?: return
         activeFileId = file.id
         workingDirectoryPath = file.parentDirectoryPath(rootDirectory)
@@ -1408,6 +1439,7 @@ internal fun WebIdeApp(
         pendingFileEdits.remove(fileId)
         files.firstOrNull { it.id == fileId }?.let { fileStore.invalidatePendingEdit(it.filePath) }
         pendingEditorTextByFileId.remove(fileId)
+        editorSaveStates.remove(fileId)
         dirtyFileIds.remove(fileId)
     }
 
@@ -1444,8 +1476,10 @@ internal fun WebIdeApp(
 
     fun updateActiveContent(newCode: String) {
         val fileToSync = activeFile ?: return
+        if (!canEditFile(fileToSync.filePath) && !editorSessions.hasPendingDraft(fileToSync.filePath, newCode)) return
         development.relocateBreakpoints(fileToSync.filePath, pendingEditorTextByFileId[fileToSync.id] ?: fileToSync.content, newCode)
         val pendingEdit = fileStore.prepareEdit(fileToSync.filePath, newCode)
+        editorSaveStates[fileToSync.id] = "Saving…"
         pendingFileEdits[fileToSync.id] = pendingEdit
         pendingEditorTextByFileId[fileToSync.id] = newCode
         dirtyFileIds += fileToSync.id
@@ -1453,10 +1487,14 @@ internal fun WebIdeApp(
         pendingEditorSaveJobs[fileToSync.id] =
                 coroutineScope.launch {
                     delay(150)
-                    withContext(Dispatchers.IO) { fileStore.stageDraft(pendingEdit) }
+                    val staged = withContext(Dispatchers.IO) { fileStore.stageDraft(pendingEdit) }
+                    if (staged.isFailure && pendingFileEdits[fileToSync.id] == pendingEdit) {
+                        editorSaveStates[fileToSync.id] = "Recovery copy failed: ${staged.exceptionOrNull()?.message}"
+                    }
                     delay(EDITOR_SAVE_DEBOUNCE_MS - 150)
                     if (files.none { it.id == fileToSync.id }) {
                         pendingEditorTextByFileId.remove(fileToSync.id)
+                        editorSaveStates.remove(fileToSync.id)
                         pendingFileEdits.remove(fileToSync.id)
                         dirtyFileIds.remove(fileToSync.id)
                         pendingEditorSaveJobs.remove(fileToSync.id)
@@ -1473,6 +1511,9 @@ internal fun WebIdeApp(
                         }
                     }
                     if (saved.isFailure) {
+                        if (pendingFileEdits[fileToSync.id] == pendingEdit) {
+                            editorSaveStates[fileToSync.id] = "Save failed: ${saved.exceptionOrNull()?.message}"
+                        }
                         terminalText = appendTerminalOutput(terminalText, "Save failed: ${saved.exceptionOrNull()?.message}")
                         return@launch
                     }
@@ -1486,6 +1527,7 @@ internal fun WebIdeApp(
                     }
                     if (pendingEditorTextByFileId[fileToSync.id] == newCode) {
                         pendingEditorTextByFileId.remove(fileToSync.id)
+                        editorSaveStates.remove(fileToSync.id)
                         pendingFileEdits.remove(fileToSync.id)
                         dirtyFileIds.remove(fileToSync.id)
                         pendingEditorSaveJobs.remove(fileToSync.id)
@@ -1494,6 +1536,7 @@ internal fun WebIdeApp(
     }
 
     fun createFile(rawName: String): String? {
+        if (!requireFeature(PremiumFeature.Projects)) return "Premium is required for file management."
         val cleanName = normalizeWebFileName(rawName) ?: return "Use a simple Web file name."
         val target = File(workingDirectory, cleanName).canonicalFile
         if (!isSameOrInside(rootDirectory, target)) return "File must stay inside this project."
@@ -1509,6 +1552,7 @@ internal fun WebIdeApp(
     }
 
     fun createFolder(rawName: String): String? {
+        if (!requireFeature(PremiumFeature.Projects)) return "Premium is required for file management."
         val cleanName = normalizeFolderName(rawName) ?: return "Use a simple folder name."
         val target = File(workingDirectory, cleanName).canonicalFile
         if (!isSameOrInside(rootDirectory, target)) return "Folder must stay inside this project."
@@ -1520,6 +1564,7 @@ internal fun WebIdeApp(
     }
 
     fun renameFile(file: WebFile, newName: String): String? {
+        if (!requireFeature(PremiumFeature.Projects)) return "Premium is required for file management."
         val cleanName = normalizeWebFileName(newName) ?: return "Use a simple Web file name."
         val source = File(file.filePath).canonicalFile
         val target = File(source.parentFile ?: rootDirectory, cleanName).canonicalFile
@@ -1538,6 +1583,7 @@ internal fun WebIdeApp(
     }
 
     fun renameFolder(folder: FolderTarget, newName: String): String? {
+        if (!requireFeature(PremiumFeature.Projects)) return "Premium is required for file management."
         val cleanName = normalizeFolderName(newName) ?: return "Use a simple folder name."
         val source = File(folder.path).canonicalFile
         val target = File(source.parentFile ?: rootDirectory, cleanName).canonicalFile
@@ -1558,12 +1604,14 @@ internal fun WebIdeApp(
     }
 
     fun deleteFile(file: WebFile) {
+        if (!requireFeature(PremiumFeature.Projects)) return
         discardEditorState(file.id)
         File(file.filePath).takeIf { isSameOrInside(rootDirectory, it) }?.delete()
         refreshFiles(workingPath = workingDirectory.absolutePath)
     }
 
     fun deleteFolder(folder: FolderTarget) {
+        if (!requireFeature(PremiumFeature.Projects)) return
         val directory = File(folder.path)
         if (samePath(directory.absolutePath, rootDirectory.absolutePath)) return
         if (isSameOrInside(rootDirectory, directory)) {
@@ -1589,6 +1637,7 @@ internal fun WebIdeApp(
             dirtyFileIds.remove(fileId)
         }
         pendingEditorTextByFileId.clear()
+        editorSaveStates.clear()
     }
 
     fun launchLivePreview(
@@ -1680,6 +1729,8 @@ internal fun WebIdeApp(
     }
 
     fun runWebPreview(destination: WebPreviewDestination) {
+        if (activeFile?.let { canEditFile(it.filePath) } != true) { requireFeature(PremiumFeature.Projects); return }
+        editorSessions.flushPendingEdits()
         if (previewLaunchBusy) return
         val previewActiveFile = activeFile
         val pendingFiles =
@@ -1760,6 +1811,8 @@ internal fun WebIdeApp(
     }
 
     fun runActiveScriptFile(scriptFile: WebFile) {
+        if (!canEditFile(scriptFile.filePath)) { requireFeature(PremiumFeature.Projects); return }
+        editorSessions.flushPendingEdits()
         val runnableFile = scriptFile.withPendingEditorText(pendingEditorTextByFileId)
         commitPendingEditorStateForPreview()
         val committedFile = files.firstOrNull { it.id == runnableFile.id } ?: runnableFile
@@ -1769,13 +1822,15 @@ internal fun WebIdeApp(
         terminalJsToRun = terminalRunnableJavaScript(committedFile, rootDirectory)
         when (fullScreenMode) {
             WebFullScreenMode.Editor, WebFullScreenMode.Ai, WebFullScreenMode.Explorer ->
-                    fullScreenMode = WebFullScreenMode.Terminal
+                    fullScreenMode = if (latestAccess.fullAccess) WebFullScreenMode.Terminal else null
             WebFullScreenMode.Terminal -> Unit
             null -> terminalRevealRequest += 1L
         }
     }
 
     fun runActiveFile() {
+        if (activeFile?.let { canEditFile(it.filePath) } != true) { requireFeature(PremiumFeature.Projects); return }
+        editorSessions.flushPendingEdits()
         val fileToRun = activeFile
         if (fileToRun != null && isDatabaseFileName(fileToRun.name)) {
             fullScreenMode = WebFullScreenMode.Editor
@@ -1813,6 +1868,8 @@ internal fun WebIdeApp(
     }
 
     fun submitTerminalCommand(commandOverride: String? = null) {
+        if (!requireFeature(PremiumFeature.Shell)) return
+        editorSessions.flushPendingEdits()
         val command = commandOverride ?: terminalInput.trim()
         commandHistory.record(command)
         if (command.isBlank()) return
@@ -1859,15 +1916,21 @@ internal fun WebIdeApp(
     }
 
     suspend fun flushPendingEditorEdits() {
+        editorSessions.flushPendingEdits()
         val edits = pendingFileEdits.toMap()
         val jobs = edits.keys.mapNotNull { pendingEditorSaveJobs.remove(it) }
         jobs.forEach { it.cancel() }
         jobs.forEach { it.join() }
         for ((id, edit) in edits) {
-            withContext(Dispatchers.IO) { fileStore.save(edit).getOrThrow() }
+            val result = withContext(Dispatchers.IO) { fileStore.save(edit) }
+            if (result.isFailure && pendingFileEdits[id] == edit) {
+                editorSaveStates[id] = "Save failed: ${result.exceptionOrNull()?.message}"
+            }
+            result.getOrThrow()
             if (pendingFileEdits[id] == edit) {
                 pendingFileEdits.remove(id)
                 pendingEditorTextByFileId.remove(id)
+                editorSaveStates.remove(id)
                 dirtyFileIds.remove(id)
                 files.replaceFile(id) { withContent(content = edit.content, modifiedAt = File(edit.filePath).lastModified()) }
             }
@@ -1875,8 +1938,10 @@ internal fun WebIdeApp(
     }
 
 
-    fun submitAiMessage() {
-        val promptText = aiInput.trim()
+    fun submitAiMessage(promptOverride: String? = null, contextOverride: WebFile? = null) {
+        if (!requireFeature(PremiumFeature.Ai)) return
+        editorSessions.flushPendingEdits()
+        val promptText = (promptOverride ?: aiInput).trim()
         if (promptText.isBlank() || aiBusy) return
         val apiKey = userAiApiKey.trim()
         val requestModel = selectedAiModel.copy(id = aiModelOverride ?: selectedAiModel.id,
@@ -1887,7 +1952,7 @@ internal fun WebIdeApp(
         val endpointCheck = runCatching { validatedAiEndpoint(requestModel.endpoint, requestModel.provider == AiProvider.AzureOpenAi) }
         if (endpointCheck.isFailure) { aiError = endpointCheck.exceptionOrNull()?.message; return }
         val contextFiles = files.withPendingEditorTexts(pendingEditorTextByFileId)
-        val contextActive = activeFile?.withPendingEditorText(pendingEditorTextByFileId)
+        val contextActive = (contextOverride ?: activeFile)?.withPendingEditorText(pendingEditorTextByFileId)
         val terminalSnapshot = terminalText
         val conversation = aiMessages.takeLast(12).joinToString("\n\n") { "${it.role}: ${it.text.take(4000)}" }
         aiActionTargetPath = contextActive?.filePath
@@ -1931,6 +1996,8 @@ internal fun WebIdeApp(
     }
 
     fun applyAiAction(action: AiSuggestedAction) {
+        if (!requireFeature(PremiumFeature.Ai)) return
+        editorSessions.flushPendingEdits()
         if (aiBusy) return
         aiVerificationMessage = null
         if (action is AiSuggestedAction.RunTerminalCommand) {
@@ -1981,6 +2048,7 @@ internal fun WebIdeApp(
     }
 
     fun undoAiChanges() {
+        if (!requireFeature(PremiumFeature.Ai)) return
         val change = aiUndoChange ?: return
         if (aiBusy) return
         aiBusy = true
@@ -2019,6 +2087,15 @@ internal fun WebIdeApp(
         saveCurrentWebIdeSession(persistTerminalText = browserPreviewReturnPending)
     }
 
+    LaunchedEffect(access.fullAccess) {
+        if (!access.fullAccess) {
+            editorSessions.flushPendingEdits()
+            if (fullScreenMode != WebFullScreenMode.Editor) fullScreenMode = null
+            apiTester.open = false; development.panel = null
+            fileActionsDialogOpen = false; newFileDialogOpen = false; newFolderDialogOpen = false
+        }
+    }
+
     PocketCodedWebTheme(darkTheme = ideTheme.isDark, themeName = ideTheme.name, dynamicColor = false) {
     androidx.compose.runtime.CompositionLocalProvider(LocalEditorSessions provides editorSessions,
         LocalApiTester provides apiTester,
@@ -2032,6 +2109,7 @@ internal fun WebIdeApp(
             fileStore = fileStore,
             development = development,
             source = { path, line ->
+                editorSessions.flushPendingEdits()
                 val target = runCatching { File(path).canonicalFile }.getOrNull()
                 if (target == null || !isSameOrInside(rootDirectory, target) || !target.isFile || target == rootDirectory) {
                     development.error = "Source is outside this project or unavailable."
@@ -2043,7 +2121,9 @@ internal fun WebIdeApp(
                     fullScreenMode = WebFullScreenMode.Editor
                 }
             },
-            startDevelopment = { mode, path, testPaths ->
+            startDevelopment = developmentStart@{ mode, path, testPaths ->
+                if (!requireFeature(PremiumFeature.Tools)) return@developmentStart
+                editorSessions.flushPendingEdits()
                 development.panel = when (mode) { "debug" -> "Debugger"; "profile" -> "Profiler"; else -> "Tests" }
                 if (!development.starting) {
                     development.starting = true
@@ -2076,6 +2156,7 @@ internal fun WebIdeApp(
                         files.firstOrNull { samePath(it.filePath, path) }?.let { file ->
                             pendingFileEdits.remove(file.id)
                             pendingEditorTextByFileId.remove(file.id)
+                            editorSaveStates.remove(file.id)
                             dirtyFileIds.remove(file.id)
                         }
                         editorSessions.invalidate(path)
@@ -2096,6 +2177,7 @@ internal fun WebIdeApp(
                     } }
                     if (result.isSuccess && file != null && pending != null && pendingEditorTextByFileId[file.id] == pending) {
                         pendingEditorTextByFileId.remove(file.id)
+                        editorSaveStates.remove(file.id)
                         pendingFileEdits.remove(file.id)
                         dirtyFileIds.remove(file.id)
                         files.replaceFile(file.id) { withContent(content = pending, modifiedAt = System.currentTimeMillis()) }
@@ -2111,7 +2193,9 @@ internal fun WebIdeApp(
                 val scripts = JSONObject(File(rootDirectory, "package.json").readText()).optJSONObject("scripts")
                 scripts?.keys()?.asSequence()?.toList().orEmpty()
             }.getOrDefault(emptyList()) },
-            command = { command ->
+            command = developmentCommand@{ command ->
+                if (!requireFeature(PremiumFeature.Shell)) return@developmentCommand
+                editorSessions.flushPendingEdits()
                 val snapshot = pendingFileEdits.values.toList()
                 fullScreenMode = WebFullScreenMode.Terminal
                 coroutineScope.launch {
@@ -2127,6 +2211,14 @@ internal fun WebIdeApp(
                 runActiveFile()
             },
             prepareSearch = { withContext(kotlinx.coroutines.NonCancellable) { flushPendingEditorEdits() } },
+            saveStatus = { id -> editorSaveStates[id] ?: "Saved" },
+            retrySave = {
+                coroutineScope.launch {
+                    runCatching { flushPendingEditorEdits() }.onFailure {
+                        terminalText = appendTerminalOutput(terminalText, "Save failed: ${it.message}")
+                    }
+                }
+            },
             filesChanged = { changed ->
                 changed.forEach { file ->
                     ProjectFileCache.invalidate(file)
@@ -2134,9 +2226,27 @@ internal fun WebIdeApp(
                 }
                 if (changed.isNotEmpty()) refreshFiles(workingPath = workingDirectoryPath)
             },
+            fileEdited = { changed, content ->
+                ProjectFileCache.invalidate(changed)
+                ProjectSemanticIndexer.invalidate()
+                files.firstOrNull { samePath(it.filePath, changed.path) }?.let { edited ->
+                    files.replaceFile(edited.id) { withContent(content, changed.lastModified()) }
+                }
+            },
+            canExplainDiagnostic = !aiBusy,
+            explainDiagnostic = explain@{ path, diagnostic ->
+                if (!requireFeature(PremiumFeature.Ai)) return@explain
+                editorSessions.flushPendingEdits()
+                files.firstOrNull { samePath(it.filePath, path) }?.let { diagnosticFile ->
+                    val prompt = webDiagnosticPrompt(relativeWorkspacePath(rootDirectory, File(path)), diagnostic)
+                    aiInput = prompt
+                    fullScreenMode = WebFullScreenMode.Ai
+                    submitAiMessage(prompt, diagnosticFile)
+                }
+            },
             refreshHistory = { commandHistory.refresh() },
         )) {
-    WebDevelopmentPanels(development)
+    if (access.fullAccess) WebDevelopmentPanels(development)
     if (aiApplying) AlertDialog(
         onDismissRequest = {}, title = { Text("Updating project files") },
         text = { Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2169,9 +2279,9 @@ internal fun WebIdeApp(
                         else expandedFolderPaths.addUniquePath(folder.path)
                     },
                     onSelectFolder = ::selectFolder, onSelectFile = { selectFile(it); fullScreenMode = WebFullScreenMode.Editor },
-                    onNewFile = { newFileDialogOpen = true }, onNewFolder = { newFolderDialogOpen = true },
-                    onRenameFile = { renameFileTarget = it }, onRenameFolder = { renameFolderTarget = it },
-                    onDeleteFile = { deleteFileTarget = it }, onDeleteFolder = { deleteFolderTarget = it },
+                    onNewFile = { if (requireFeature(PremiumFeature.Projects)) newFileDialogOpen = true }, onNewFolder = { if (requireFeature(PremiumFeature.Projects)) newFolderDialogOpen = true },
+                    onRenameFile = { if (requireFeature(PremiumFeature.Projects)) renameFileTarget = it }, onRenameFolder = { if (requireFeature(PremiumFeature.Projects)) renameFolderTarget = it },
+                    onDeleteFile = { if (requireFeature(PremiumFeature.Projects)) deleteFileTarget = it }, onDeleteFolder = { if (requireFeature(PremiumFeature.Projects)) deleteFolderTarget = it },
                 )
             }
             WebFullScreenMode.Editor -> {
@@ -2181,11 +2291,11 @@ internal fun WebIdeApp(
                             files = tabFiles,
                             palette = palette,
                             onSelectFile = ::selectFile,
-                            onAddFile = { newFileDialogOpen = true },
+                            onAddFile = { if (requireFeature(PremiumFeature.Projects)) newFileDialogOpen = true },
                             onDeleteFile = { fileId ->
-                                files.firstOrNull { it.id == fileId }?.let { deleteFileTarget = it }
+                                files.firstOrNull { it.id == fileId }?.let { if (requireFeature(PremiumFeature.Projects)) deleteFileTarget = it }
                             },
-                            onBack = { fullScreenMode = null },
+                            onBack = { editorSessions.flushPendingEdits(); fullScreenMode = null },
                     )
                 } else {
                     WebEditorFullScreen(
@@ -2196,13 +2306,13 @@ internal fun WebIdeApp(
                             nextThemeName = ideTheme.next().displayName,
                             onToggleTheme = onToggleTheme,
                             onSelectFile = ::selectFile,
-                            onAddFile = { newFileDialogOpen = true },
+                            onAddFile = { if (requireFeature(PremiumFeature.Projects)) newFileDialogOpen = true },
                             onDeleteFile = { fileId ->
-                                files.firstOrNull { it.id == fileId }?.let { deleteFileTarget = it }
+                                files.firstOrNull { it.id == fileId }?.let { if (requireFeature(PremiumFeature.Projects)) deleteFileTarget = it }
                             },
                             onCodeChange = ::updateActiveContent,
                             onRunPreview = ::runActiveFile,
-                            onBack = { fullScreenMode = null },
+                            onBack = { editorSessions.flushPendingEdits(); fullScreenMode = null },
                     )
                 }
             }
@@ -2217,7 +2327,7 @@ internal fun WebIdeApp(
                             input = terminalInput,
                             onInputChange = { terminalInput = it },
                             onSend = { submitTerminalCommand() },
-                            onBack = { fullScreenMode = null },
+                            onBack = { editorSessions.flushPendingEdits(); fullScreenMode = null },
                     )
             WebFullScreenMode.Ai ->
                     AiChatFullScreen(
@@ -2240,17 +2350,17 @@ internal fun WebIdeApp(
                             error = aiError,
                             pendingAction = aiPendingAction,
                             verificationMessage = aiVerificationMessage,
-                            onSend = ::submitAiMessage,
+                            onSend = { submitAiMessage() },
                             onApplyAction = ::applyAiAction,
                             onDismissAction = { aiPendingAction = null },
-                            onBack = { fullScreenMode = null },
+                            onBack = { editorSessions.flushPendingEdits(); fullScreenMode = null },
                     )
             null ->
                     WebIdeHomeScreen(
                             files = files,
                             tabFiles = tabFiles,
                             activeFile = activeFile,
-                            projectName = rootDirectory.name,
+                            projectName = if (rootDirectory.name == "free_scratchpad") "Scratchpad" else rootDirectory.name,
                             rootDirectory = rootDirectory,
                             workingDirectory = workingDirectory,
                             terminalPromptText = terminalPromptText,
@@ -2264,8 +2374,8 @@ internal fun WebIdeApp(
                             terminalInput = terminalInput,
                             terminalRevealRequest = terminalRevealRequest,
                             onToggleTheme = onToggleTheme,
-                            onBackToProjects = onBackToProjects,
-                            onToggleExplorer = { explorerVisible = !explorerVisible },
+                            onBackToProjects = { editorSessions.flushPendingEdits(); onBackToProjects() },
+                            onToggleExplorer = { editorSessions.flushPendingEdits(); explorerVisible = !explorerVisible },
                             onFileSearchChange = { fileSearch = it },
                             onToggleFolder = { folder ->
                                 if (expandedFolderPaths.any { samePath(it, folder.path) }) {
@@ -2278,17 +2388,17 @@ internal fun WebIdeApp(
                             onSelectFile = ::selectFile,
                             onCodeChange = ::updateActiveContent,
                             onRunPreview = ::runActiveFile,
-                            onOpenAi = { fullScreenMode = WebFullScreenMode.Ai },
-                            onFileActions = { fileActionsDialogOpen = true },
-                            onNewFile = { newFileDialogOpen = true },
-                            onNewFolder = { newFolderDialogOpen = true },
-                            onRenameFile = { renameFileTarget = it },
-                            onRenameFolder = { renameFolderTarget = it },
-                            onDeleteFile = { deleteFileTarget = it },
-                            onDeleteFolder = { deleteFolderTarget = it },
+                            onOpenAi = { if (requireFeature(PremiumFeature.Ai)) { editorSessions.flushPendingEdits(); fullScreenMode = WebFullScreenMode.Ai } },
+                            onFileActions = { if (requireFeature(PremiumFeature.ImportExport)) fileActionsDialogOpen = true },
+                            onNewFile = { if (requireFeature(PremiumFeature.Projects)) newFileDialogOpen = true },
+                            onNewFolder = { if (requireFeature(PremiumFeature.Projects)) newFolderDialogOpen = true },
+                            onRenameFile = { if (requireFeature(PremiumFeature.Projects)) renameFileTarget = it },
+                            onRenameFolder = { if (requireFeature(PremiumFeature.Projects)) renameFolderTarget = it },
+                            onDeleteFile = { if (requireFeature(PremiumFeature.Projects)) deleteFileTarget = it },
+                            onDeleteFolder = { if (requireFeature(PremiumFeature.Projects)) deleteFolderTarget = it },
                             onTerminalInputChange = { terminalInput = it },
                             onTerminalCommandSubmit = { submitTerminalCommand() },
-                            onFullScreen = { fullScreenMode = it },
+                            onFullScreen = { if (it == WebFullScreenMode.Editor || requireFeature(PremiumFeature.ExpandedPanels)) { editorSessions.flushPendingEdits(); fullScreenMode = it } },
                             directoryVersion = directoryVersion,
                     )
         }
@@ -2344,16 +2454,22 @@ internal fun WebIdeApp(
                 palette = palette,
                 onDismiss = { fileActionsDialogOpen = false },
                 onOpenFile = {
-                    fileActionsDialogOpen = false
-                    openFileLauncher.launch(arrayOf("*/*"))
+                    if (requireFeature(PremiumFeature.ImportExport)) {
+                        fileActionsDialogOpen = false
+                        openFileLauncher.launch(arrayOf("*/*"))
+                    }
                 },
                 onOpenFolder = {
-                    fileActionsDialogOpen = false
-                    openFolderLauncher.launch(null)
+                    if (requireFeature(PremiumFeature.ImportExport)) {
+                        fileActionsDialogOpen = false
+                        openFolderLauncher.launch(null)
+                    }
                 },
                 onSaveCurrentFolder = {
-                    fileActionsDialogOpen = false
-                    exportFolderLauncher.launch(null)
+                    if (requireFeature(PremiumFeature.ImportExport)) {
+                        fileActionsDialogOpen = false
+                        exportFolderLauncher.launch(null)
+                    }
                 }
         )
     }
@@ -2917,8 +3033,7 @@ private fun WebIdeHomeScreen(
                     else -> 430.dp
                 }
         val terminalHeight = if (maxHeight < 740.dp) 190.dp else 220.dp
-        var explorerFraction by rememberSaveable { mutableFloatStateOf(0.50f) }
-        val layoutWidthPx = with(LocalDensity.current) { maxWidth.toPx() }.coerceAtLeast(1f)
+        val explorerFraction = rememberSaveable { mutableFloatStateOf(0.50f) }
 
         Column(
                 modifier = Modifier.fillMaxSize().verticalScroll(pageScroll),
@@ -2949,10 +3064,9 @@ private fun WebIdeHomeScreen(
             Spacer(Modifier.height(10.dp))
 
             if (showExplorer) {
-                Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                ) {
+                ResizableEditorWorkspace(
+                    palette = palette, height = editorHeight, fractionState = explorerFraction,
+                    explorer = { splitModifier ->
                     ExplorerPanel(
                             files = files,
                             activeFileId = activeFile?.id ?: -1L,
@@ -2961,7 +3075,7 @@ private fun WebIdeHomeScreen(
                             search = fileSearch,
                             expandedFolderPaths = expandedFolderPaths,
                             palette = palette,
-                            modifier = Modifier.weight(explorerFraction).height(editorHeight),
+                            modifier = splitModifier,
                             onSearchChange = onFileSearchChange,
                             onToggleFolder = onToggleFolder,
                             onSelectFolder = onSelectFolder,
@@ -2975,24 +3089,12 @@ private fun WebIdeHomeScreen(
                             directoryVersion = directoryVersion,
                             onFullScreen = { onFullScreen(WebFullScreenMode.Explorer) },
                     )
-                    ResizeHandle(
-                            palette = palette,
-                            height = editorHeight,
-                            onToggle = {
-                                explorerFraction = if (explorerFraction > 0.50f) 0.35f else 0.62f
-                            },
-                            onDrag = { dragAmount ->
-                                explorerFraction =
-                                        (explorerFraction + dragAmount / layoutWidthPx).coerceIn(
-                                                0.28f,
-                                                0.72f
-                                        )
-                            },
-                    )
+                    },
+                    editor = { splitModifier ->
                     if (activeFile == null) {
                         EmptyEditorPanel(
                                 palette = palette,
-                                modifier = Modifier.weight(1f - explorerFraction),
+                                modifier = splitModifier,
                                 height = editorHeight,
                                 onNewFile = onNewFile,
                         )
@@ -3000,7 +3102,7 @@ private fun WebIdeHomeScreen(
                         WebCodeEditorPanel(
                                 file = activeFile,
                                 palette = palette,
-                                modifier = Modifier.weight(1f - explorerFraction),
+                                modifier = splitModifier,
                                 height = editorHeight,
                                 compact = true,
                                 darkMode = darkMode, nextThemeName = nextThemeName, onToggleTheme = onToggleTheme,
@@ -3009,7 +3111,8 @@ private fun WebIdeHomeScreen(
                                 onFullScreen = { onFullScreen(WebFullScreenMode.Editor) },
                         )
                     }
-                }
+                    },
+                )
             } else {
                 if (activeFile == null) {
                     EmptyEditorPanel(
@@ -3060,81 +3163,79 @@ private fun WebIdeHomeScreen(
 
 @Composable
 private fun IdeTopBar(
-        projectName: String,
-        palette: WebPalette,
-        darkMode: Boolean,
-        nextThemeName: String,
-        onBackToProjects: () -> Unit,
-        onToggleTheme: () -> Unit,
-        onOpenAi: () -> Unit,
-        onFileActions: () -> Unit,
+    projectName: String,
+    palette: WebPalette,
+    darkMode: Boolean,
+    nextThemeName: String,
+    onToggleTheme: () -> Unit,
+    onFileActions: () -> Unit,
+    onOpenAi: () -> Unit,
+    onBackToProjects: () -> Unit,
 ) {
     Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
     ) {
         Box(
-                modifier =
-                        Modifier.size(40.dp)
-                                .clip(RoundedCornerShape(11.dp))
-                                .background(palette.elevatedPanel)
-                                .border(
-                                        BorderStroke(1.dp, palette.border),
-                                        RoundedCornerShape(11.dp)
-                                )
-                                .clickable(onClick = onBackToProjects),
-                contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(11.dp))
+                .background(palette.elevatedPanel)
+                .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(11.dp))
+                .clickable(onClick = onBackToProjects),
+            contentAlignment = Alignment.Center,
         ) {
             Icon(
-                    painter = painterResource(R.drawable.mit_folder),
-                    contentDescription = "Back to projects",
-                    tint = palette.accent,
-                    modifier = Modifier.size(20.dp),
+                painter = painterResource(R.drawable.mit_folder),
+                contentDescription = "Back to projects",
+                tint = palette.accent,
+                modifier = Modifier.size(20.dp)
             )
         }
         Spacer(Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                    text = "IDE",
-                    color = palette.text,
-                    fontSize = 22.sp,
-                    lineHeight = 23.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
+                text = "IDE",
+                color = palette.text,
+                fontSize = 22.sp,
+                lineHeight = 23.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
             )
             Text(
-                    text = projectName,
-                    color = palette.subtleText,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
+                text = projectName,
+                color = palette.subtleText,
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        Spacer(Modifier.width(6.dp))
-        HeaderActionButton(
-                Icons.Rounded.FolderOpen,
-                "Import or save files and folders",
-                palette.text,
-                palette,
-                onFileActions
-        )
-        Spacer(Modifier.width(6.dp))
-        HeaderActionButton(
-                Icons.Rounded.AutoAwesome,
-                "Open AI chat",
-                palette.accent,
-                palette,
-                onOpenAi
-        )
-        Spacer(Modifier.width(6.dp))
-        IdeThemeCycleButton(
+        Spacer(Modifier.width(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            HeaderActionButton(
+                icon = Icons.Rounded.UploadFile,
+                contentDescription = "Import or save files and folders",
+                tint = palette.text,
+                palette = palette,
+                onClick = onFileActions,
+            )
+            HeaderActionButton(
+                icon = Icons.Rounded.AutoAwesome,
+                contentDescription = "Open AI chat",
+                tint = palette.accent,
+                palette = palette,
+                onClick = onOpenAi,
+            )
+            IdeThemeCycleButton(
                 darkMode = darkMode,
                 nextThemeName = nextThemeName,
                 buttonColor = palette.elevatedPanel,
                 borderColor = palette.border,
                 contentColor = palette.text,
                 onClick = onToggleTheme,
-        )
+                modifier = Modifier.size(40.dp),
+            )
+        }
     }
 }
 
@@ -3167,29 +3268,106 @@ private fun IdeThemeCycleButton(
 }
 
 @Composable
-private fun ResizeHandle(
-        palette: WebPalette,
-        height: Dp,
-        onToggle: () -> Unit,
-        onDrag: (Float) -> Unit,
+private fun ResizableEditorWorkspace(
+    palette: WebPalette,
+    height: Dp,
+    fractionState: androidx.compose.runtime.MutableFloatState,
+    explorer: @Composable (Modifier) -> Unit,
+    editor: @Composable (Modifier) -> Unit,
 ) {
+    BoxWithConstraints(Modifier.fillMaxWidth().height(height)) {
+        // Keep the divider easy to grab while leaving most of the horizontal
+        // space to the two panes. The previous wider grip made the editor feel
+        // constrained, especially on phones.
+        val handleWidth = 14.dp
+        val availableWidth = (maxWidth - handleWidth).coerceAtLeast(1.dp)
+        // Allow the user to give either pane more room; only clamp enough to
+        // keep both panes usable instead of forcing a near-even split.
+        val explorerMinimum = minOf(88.dp, availableWidth * 0.30f)
+        val editorMinimum = minOf(112.dp, (availableWidth - explorerMinimum).coerceAtLeast(1.dp))
+        val minimumFraction = (explorerMinimum / availableWidth).coerceIn(0.12f, 0.42f)
+        val maximumFraction = (1f - editorMinimum / availableWidth).coerceIn(0.58f, 0.88f)
+            .coerceAtLeast(minimumFraction)
+        val availableWidthPx = with(LocalDensity.current) { availableWidth.toPx().coerceAtLeast(1f) }
+        val midpoint = (minimumFraction + maximumFraction) / 2f
+
+        androidx.compose.ui.layout.Layout(
+            modifier = Modifier.fillMaxSize(),
+            content = {
+                Box { explorer(Modifier.fillMaxSize()) }
+                ResizeHandle(
+                    palette = palette,
+                    height = height,
+                    onToggle = {
+                        fractionState.floatValue = if (fractionState.floatValue > midpoint) minimumFraction else maximumFraction
+                    },
+                    onDrag = { amount ->
+                        fractionState.floatValue = (fractionState.floatValue + amount / availableWidthPx)
+                            .coerceIn(minimumFraction, maximumFraction)
+                    },
+                )
+                Box { editor(Modifier.fillMaxSize()) }
+            },
+        ) { children, constraints ->
+            val handlePx = handleWidth.roundToPx().coerceAtMost(constraints.maxWidth)
+            val available = (constraints.maxWidth - handlePx).coerceAtLeast(0)
+            val explorerWidth = (available * fractionState.floatValue.coerceIn(minimumFraction, maximumFraction))
+                .toInt().coerceIn(0, available)
+            fun pane(width: Int) = constraints.copy(minWidth = width, maxWidth = width)
+            val tree = children[0].measure(pane(explorerWidth))
+            val handle = children[1].measure(pane(handlePx))
+            val code = children[2].measure(pane(available - explorerWidth))
+            layout(constraints.maxWidth, constraints.maxHeight) {
+                tree.placeRelative(0, 0)
+                handle.placeRelative(explorerWidth, 0)
+                code.placeRelative(explorerWidth + handlePx, 0)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ResizeHandle(
+    palette: WebPalette,
+    height: Dp,
+    onToggle: () -> Unit,
+    onDrag: (Float) -> Unit,
+) {
+    val latestOnDrag by rememberUpdatedState(onDrag)
+    val latestOnToggle by rememberUpdatedState(onToggle)
+    var isDragging by remember { mutableStateOf(false) }
     Box(
-            modifier =
-                    Modifier.width(16.dp)
-                            .height(height)
-                            .pointerInput(Unit) {
-                                detectHorizontalDragGestures { _, dragAmount -> onDrag(dragAmount) }
-                            }
-                            .clickable(onClick = onToggle),
-            contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .testTag("explorer-resize-handle")
+            .width(14.dp)
+            .height(height)
+            .pointerInput(Unit) {
+                detectHorizontalDragGestures(
+                    onDragStart = { isDragging = true },
+                    onDragEnd = { isDragging = false },
+                    onDragCancel = { isDragging = false },
+                    onHorizontalDrag = { _, dragAmount ->
+                        latestOnDrag(dragAmount)
+                    },
+                )
+            }
+            .clickable(onClick = { latestOnToggle() })
+            .semantics { contentDescription = "Resize explorer and code editor" },
+        contentAlignment = Alignment.Center
     ) {
-        Text(
-                text = "||",
-                color = palette.mutedText,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
+        Box(
+            modifier = Modifier
+                .width(if (isDragging) 7.dp else 4.dp)
+                .height(if (isDragging) 40.dp else 28.dp)
+                .clip(CircleShape)
+                .background(if (isDragging) palette.accent else palette.border),
         )
     }
+}
+
+private enum class ExplorerViewMode {
+    Files,
+    SearchAndReplace,
 }
 
 @Composable
@@ -3216,6 +3394,7 @@ internal fun ExplorerPanel(
         expanded: Boolean = false,
         onFullScreen: (() -> Unit)? = null,
 ) {
+    val access = LocalFeatureAccess.current
     var addMenuOpen by remember { mutableStateOf(false) }
     var searchAndReplace by rememberSaveable { mutableStateOf(false) }
 
@@ -3223,84 +3402,58 @@ internal fun ExplorerPanel(
             palette = palette,
             modifier = modifier,
     ) panelContent@{
-        Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(
-                    text = "EXPLORER",
-                    color = palette.text,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.weight(1f),
-            )
-            Text(
-                    text = relativeDirectoryLabel(rootDirectory, workingDirectory),
-                    color = palette.subtleText,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-            )
-            Box {
-                IconButton(
-                        onClick = { addMenuOpen = true },
-                        modifier = Modifier.size(32.dp),
-                ) {
-                    Icon(
-                            imageVector = Icons.Rounded.Add,
-                            contentDescription = "New item",
-                            tint = palette.text,
-                    )
+        BoxWithConstraints(Modifier.fillMaxWidth()) {
+            val compactHeader = maxWidth < 200.dp
+            val showDirectoryPath = maxWidth >= 260.dp
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(if (compactHeader) "Files" else "EXPLORER", color = palette.text,
+                    fontSize = if (compactHeader) 12.sp else 13.sp, fontWeight = FontWeight.Medium,
+                    maxLines = 1, modifier = Modifier.weight(1f))
+                if (showDirectoryPath) Text(relativeDirectoryLabel(rootDirectory, workingDirectory),
+                    color = palette.subtleText, fontSize = 10.sp, maxLines = 1,
+                    overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                if (!compactHeader) onFullScreen?.let { toggle ->
+                    IconButton(onClick = toggle, modifier = Modifier.size(34.dp)) {
+                        Icon(if (expanded) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
+                            if (expanded) "Minimize explorer" else "Fullscreen explorer", tint = palette.text)
+                    }
                 }
-                DropdownMenu(
-                        expanded = addMenuOpen,
-                        onDismissRequest = { addMenuOpen = false },
-                        containerColor = palette.elevatedPanel,
-                ) {
-                    DropdownMenuItem(colors = readableMenuItemColors(),
-                            text = { Text("Create file", color = palette.text) },
-                            leadingIcon = {
-                                Icon(Icons.Rounded.Description, null, tint = palette.accent)
-                            },
-                            onClick = {
-                                addMenuOpen = false
-                                onNewFile()
-                            },
-                    )
-                    DropdownMenuItem(colors = readableMenuItemColors(),
-                            text = { Text("Create folder", color = palette.text) },
-                            leadingIcon = {
-                                Icon(
-                                        painterResource(R.drawable.mit_folder),
-                                        null,
-                                        tint = palette.accent
-                                )
-                            },
-                            onClick = {
-                                addMenuOpen = false
-                                onNewFolder()
-                            },
-                    )
-                }
-            }
-            onFullScreen?.let { toggle ->
-                IconButton(onClick = toggle, modifier = Modifier.size(34.dp)) {
-                    Icon(if (expanded) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen,
-                        contentDescription = if (expanded) "Minimize explorer" else "Fullscreen explorer",
-                        tint = palette.text, modifier = Modifier.size(22.dp))
+                Box {
+                    IconButton(onClick = { addMenuOpen = true }, modifier = Modifier.size(if (compactHeader) 34.dp else 32.dp)) {
+                        Icon(if (compactHeader) Icons.Rounded.MoreHoriz else Icons.Rounded.Add,
+                            if (compactHeader) "Explorer actions" else "New item", tint = palette.text)
+                    }
+                    DropdownMenu(expanded = addMenuOpen, onDismissRequest = { addMenuOpen = false }, containerColor = palette.elevatedPanel) {
+                        DropdownMenuItem(colors = readableMenuItemColors(), text = { Text("Create file") },
+                            leadingIcon = { Icon(Icons.Rounded.Description, null, tint = palette.accent) },
+                            onClick = { addMenuOpen = false; onNewFile() })
+                        DropdownMenuItem(colors = readableMenuItemColors(), text = { Text("Create folder") },
+                            leadingIcon = { Icon(painterResource(R.drawable.mit_folder), null, tint = palette.accent) },
+                            onClick = { addMenuOpen = false; onNewFolder() })
+                        if (compactHeader) onFullScreen?.let { toggle ->
+                            DropdownMenuItem(colors = readableMenuItemColors(),
+                                text = { Text(if (expanded) "Minimize explorer" else "Fullscreen explorer") },
+                                leadingIcon = { Icon(if (expanded) Icons.Rounded.FullscreenExit else Icons.Rounded.Fullscreen, null) },
+                                onClick = { addMenuOpen = false; toggle() })
+                        }
+                    }
                 }
             }
         }
         if (expanded) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                TextButton(onClick = { searchAndReplace = false }, modifier = Modifier.weight(1f), colors = readableTextButtonColors()) {
-                    Text("Files", color = if (!searchAndReplace) palette.accent else palette.mutedText)
-                }
-                TextButton(onClick = { searchAndReplace = true }, modifier = Modifier.weight(1f), colors = readableTextButtonColors()) {
-                    Text("Search & Replace", color = if (searchAndReplace) palette.accent else palette.mutedText)
+                listOf(false to "Files", true to "Search & Replace").forEach { (searchTab, label) ->
+                    val selected = searchAndReplace == searchTab
+                    Box(Modifier.weight(1f).height(28.dp).clip(RoundedCornerShape(6.dp))
+                        .background(if (selected) palette.selectedTab else palette.tab)
+                        .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(6.dp))
+                        .clickable { if (!searchTab || access.require(PremiumFeature.Tools)) searchAndReplace = searchTab }, contentAlignment = Alignment.Center) {
+                        Text(label, color = if (selected) palette.text else palette.mutedText,
+                            fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
+            Spacer(Modifier.height(8.dp))
             if (searchAndReplace) {
                 WebProjectSearchReplace(rootDirectory, workingDirectory,
                     files.firstOrNull { it.id == activeFileId }?.let { File(it.filePath) },
@@ -3317,7 +3470,12 @@ internal fun ExplorerPanel(
         Spacer(Modifier.height(10.dp))
 
         // Only tree metadata invalidates the scan; typing in a file does not.
-        val treeFiles = files.map { WebFile(it.id, it.name, "", it.filePath, 0L) }
+        val fileStructure by remember(files) {
+            androidx.compose.runtime.derivedStateOf { files.map { it.id to it.filePath } }
+        }
+        val treeFiles = remember(fileStructure) {
+            fileStructure.map { (id, path) -> WebFile(id, File(path).name, "", path, 0L) }
+        }
         val expandedPaths = expandedFolderPaths.toList()
         val entries by
                 produceState<List<ExplorerEntry>>(
@@ -3340,17 +3498,35 @@ internal fun ExplorerPanel(
                             }
                 }
         val currentFiles = remember(files.toList()) { files.associateBy { it.id } }
-        val measurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 512)
         val labelStyle = androidx.compose.material3.LocalTextStyle.current.merge(TextStyle(fontSize = 13.sp))
         val density = LocalDensity.current
-        val treeWidth = remember(entries, measurer, labelStyle, density) {
-            entries.maxOfOrNull { entry ->
-                val (name, fixed) = when (entry) {
-                    is ExplorerEntry.Directory -> entry.target.name to (87 + entry.depth * 14).dp
-                    is ExplorerEntry.SourceFile -> entry.file.name to (84 + entry.depth * 14).dp
+        val treeWidth by produceState(0.dp, entries, labelStyle, density) {
+            // Measuring thousands of Compose paragraphs here blocked the opening frame.
+            // A worker-owned Paint measures the default UI font without sharing UI caches.
+            value = withContext(Dispatchers.Default) {
+                val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    textSize = with(density) { 13.sp.toPx() }
+                    typeface = android.graphics.Typeface.create(android.graphics.Typeface.DEFAULT,
+                        if ((labelStyle.fontWeight?.weight ?: 400) >= 600) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL)
                 }
-                fixed + with(density) { measurer.measure(name, labelStyle, softWrap = false, maxLines = 1).size.width.toDp() }
-            } ?: 0.dp
+                val spacing = with(density) {
+                    if (labelStyle.letterSpacing.isSp) labelStyle.letterSpacing.toPx() else 0f
+                }
+                var widest = 0f
+                for (entry in entries) {
+                    currentCoroutineContext().ensureActive()
+                    val (name, fixed) = when (entry) {
+                        is ExplorerEntry.Directory -> entry.target.name to (87 + entry.depth * 14 +
+                            if (entry.target.childCount == 0) 32 else if (entry.target.isPackage) 23 else 0)
+                        is ExplorerEntry.SourceFile -> entry.file.name to (84 + entry.depth * 14)
+                    }
+                    val glyphs = name.codePointCount(0, name.length)
+                    val textWidth = paint.measureText(name) + (glyphs - 1).coerceAtLeast(0) * spacing
+                    // A small rounding allowance also protects fallback-font glyph edges.
+                    widest = maxOf(widest, fixed + textWidth / density.density + 2f)
+                }
+                widest.dp
+            }
         }
         BoxWithConstraints(Modifier.fillMaxWidth().weight(1f)) {
             val contentWidth = maxOf(maxWidth, treeWidth)
@@ -3490,6 +3666,7 @@ private fun ExplorerFolderRow(
                             .height(36.dp)
                             .clip(RoundedCornerShape(9.dp))
                             .background(if (selected) palette.selectedTab else Color.Transparent)
+                            .explorerIndentGuides(depth, palette.subtleText.copy(alpha = 0.28f))
                             .clickable {
                                 onSelect()
                                 onToggle()
@@ -3531,6 +3708,10 @@ private fun ExplorerFolderRow(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
         )
+        if (folder.childCount == 0 || folder.isPackage) Text(
+            if (folder.childCount == 0) "empty" else "pkg",
+            color = if (folder.childCount == 0) palette.subtleText else palette.info,
+            fontSize = 9.sp, modifier = Modifier.padding(horizontal = 3.dp))
         Box {
             IconButton(
                     onClick = { menuOpen = true },
@@ -3607,10 +3788,11 @@ private fun ExplorerFileRow(
 
     Row(
             modifier =
-                    Modifier.fillMaxWidth()
+                    Modifier.testTag("explorer-file:${file.filePath}").fillMaxWidth()
                             .height(38.dp)
                             .clip(RoundedCornerShape(9.dp))
                             .background(if (selected) palette.selectedTab else Color.Transparent)
+                            .explorerIndentGuides(depth, palette.subtleText.copy(alpha = 0.28f))
                             .clickable(onClick = onSelect)
                             .padding(start = (20 + depth * 14).dp, end = 3.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -3674,6 +3856,7 @@ private fun WebCodeEditorPanel(
         onRunPreview: () -> Unit,
         onFullScreen: () -> Unit,
         showKeyboardAccessory: Boolean = false,
+        edgeToEdge: Boolean = false,
         darkMode: Boolean? = null,
         nextThemeName: String = "",
         onToggleTheme: (() -> Unit)? = null,
@@ -3681,7 +3864,7 @@ private fun WebCodeEditorPanel(
     val apiTester = LocalApiTester.current
     if (apiTester?.open == true) {
         Panel(palette, modifier.then(if (height == Dp.Unspecified) Modifier else Modifier.height(height)),
-            backgroundColor = palette.editorBackground) {
+            backgroundColor = palette.editorBackground, edgeToEdge = edgeToEdge) {
             ApiTesterContent(apiTester, Modifier.fillMaxSize(), expanded = height == Dp.Unspecified, onExpand = onFullScreen)
         }
         return
@@ -3694,7 +3877,7 @@ private fun WebCodeEditorPanel(
             }
 
     if (isDatabaseFileName(file.name)) {
-        Panel(palette, panelModifier, backgroundColor = palette.editorBackground) {
+        Panel(palette, panelModifier, backgroundColor = palette.editorBackground, edgeToEdge = edgeToEdge) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Database", color = palette.text, modifier = Modifier.weight(1f))
                 IconButton(onClick = onFullScreen) {
@@ -3710,6 +3893,7 @@ private fun WebCodeEditorPanel(
             palette = palette,
             modifier = panelModifier,
             backgroundColor = palette.editorBackground,
+            edgeToEdge = edgeToEdge,
     ) {
         SmartCodeEditor(
                 file = file,
@@ -3741,7 +3925,7 @@ private fun WebCodeEditorPanel(
                             )
                         }
                     }
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Row(Modifier.fillMaxWidth().then(if (edgeToEdge) Modifier.padding(horizontal = 10.dp) else Modifier), verticalAlignment = Alignment.CenterVertically) {
                         WebFileIcon(file.name, palette, Modifier.size(18.dp))
                         Spacer(Modifier.width(7.dp))
                         Text(
@@ -3757,9 +3941,17 @@ private fun WebCodeEditorPanel(
                     }
                     if (compact) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically) { editorActions() }
-                    Spacer(Modifier.height(8.dp))
+                    val saveActions = LocalWebDevelopmentActions.current
+                    val saveStatus = saveActions?.saveStatus?.invoke(file.id) ?: "Saved"
+                    if (saveStatus.contains("failed", true)) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Text(saveStatus, color = if (saveStatus.contains("failed")) palette.error else palette.mutedText,
+                            fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        if (saveStatus.contains("failed")) TextButton(onClick = { saveActions?.retrySave?.invoke() },
+                            colors = readableTextButtonColors()) { Text("Retry save") }
+                    }
+                    Spacer(Modifier.height(if (edgeToEdge) 4.dp else 8.dp))
                     HorizontalRule(palette)
-                    Spacer(Modifier.height(7.dp))
+                    Spacer(Modifier.height(if (edgeToEdge) 4.dp else 7.dp))
                 },
                 onCodeChange = onCodeChange,
         )
@@ -3856,7 +4048,8 @@ internal fun SmartCodeEditor(
         header: @Composable (tools: @Composable () -> Unit) -> Unit = { tools -> tools() },
         onCodeChange: (String) -> Unit,
 ) {
-    val usePlatformEditor = remember(file.id) { file.content.length > 100_000 }
+    val featureAccess = LocalFeatureAccess.current
+    val usePlatformEditor = remember(file.id) { file.content.length > 50_000 || file.content.count { it == '\n' } > 1_500 }
     val sessions = LocalEditorSessions.current
     val sessionGeneration = sessions?.generation
     val session = remember(file.filePath, sessions, sessionGeneration) {
@@ -3876,7 +4069,12 @@ internal fun SmartCodeEditor(
     val development = developmentActions?.development
     val developmentScope = rememberCoroutineScope()
     val fileBreakpoints = development?.breakpoints?.get(file.filePath).orEmpty()
+    val pausedFrame = development?.debugState?.takeIf { it.optString("state") == "paused" }
+        ?.optJSONArray("stack")?.optJSONObject(0)
+    val pausedLine = pausedFrame?.takeIf { samePath(it.optString("file"), file.filePath) }
+        ?.optInt("line")?.takeIf { it > 0 }
     fun toggleBreakpoint(line: Int) {
+        if (!featureAccess.require(PremiumFeature.Tools)) return
         development?.toggleBreakpoint(file.filePath, line)
         developmentScope.launch(Dispatchers.IO) {
             if (development != null && NodeSessionRuntime.isRunningFor(development.root)) {
@@ -3890,6 +4088,8 @@ internal fun SmartCodeEditor(
     var completionsVisible by remember(file.id) { mutableStateOf(false) }
     var suppressCompletionsForText by remember(file.id) { mutableStateOf<String?>(null) }
     var diagnostics by remember(file.id) { mutableStateOf<List<CodeDiagnostic>>(emptyList()) }
+    var showProjectDiagnostics by remember(file.filePath) { mutableStateOf(false) }
+    var diagnosticActionError by remember(file.filePath) { mutableStateOf<String?>(null) }
     var completionResult by remember(file.id) { mutableStateOf(EditorCompletionResult()) }
     var textMetrics by
             remember(file.id) { mutableStateOf(editorTextMetrics(file.content, cap = 1_600)) }
@@ -3904,7 +4104,8 @@ internal fun SmartCodeEditor(
             completionsVisible = false
         }
     }
-    LaunchedEffect(file.filePath, file.name, editorValue.text, editorValue.selection) {
+    LaunchedEffect(file.filePath, file.name, editorValue.text, editorValue.selection, featureAccess.fullAccess) {
+        if (!featureAccess.fullAccess) { completionResult = EditorCompletionResult(); completionsVisible = false; return@LaunchedEffect }
         val snapshot = editorValue.text
         val cursor = editorValue.selection.start
         val fileName = file.name
@@ -3932,7 +4133,8 @@ internal fun SmartCodeEditor(
                     suppressCompletionsForText != editorValue.text
         }
     }
-    LaunchedEffect(file.filePath, file.name, editorValue.text) {
+    LaunchedEffect(file.filePath, file.name, editorValue.text, featureAccess.fullAccess) {
+        if (!featureAccess.fullAccess) { diagnostics = emptyList(); return@LaunchedEffect }
         val snapshot = editorValue.text
         delay(
                 when {
@@ -4093,6 +4295,7 @@ internal fun SmartCodeEditor(
                 )
             }
     fun selectCompletion(item: CompletionItem) {
+        session.flushPendingEdits()
         val context = completionResult.context ?: return
         if (completionResult.source != editorValue.text ||
                         completionResult.cursor != editorValue.selection.start
@@ -4128,6 +4331,7 @@ internal fun SmartCodeEditor(
         if (updatedValue.text !== previousValue.text) onCodeChange(updatedValue.text)
     }
     fun restoreEdit(redo: Boolean) {
+        session.flushPendingEdits()
         val restored = (if (redo) history.redo(editorValue) else history.undo(editorValue)) ?: return
         editorValue = restored
         session.value = restored
@@ -4148,6 +4352,7 @@ internal fun SmartCodeEditor(
     }) {
         header {
             WebDevelopmentMenu(file, editorValue.text, palette) { restored ->
+                session.flushPendingEdits()
                 val updated = TextFieldValue(restored, TextRange(minOf(editorValue.selection.end, restored.length)))
                 history.record(editorValue, updated)
                 editorValue = updated
@@ -4167,6 +4372,7 @@ internal fun SmartCodeEditor(
                 modifier = Modifier.weight(1f).fillMaxWidth(),
                 highlight = { highlightWebSource(file.name, it, palette) },
                 breakpoints = fileBreakpoints,
+                pausedLine = pausedLine,
                 onBreakpoint = ::toggleBreakpoint,
                 sourceJump = sourceJump?.takeIf { samePath(it.file, file.filePath) },
                 onValueChange = ::updateEditorValue,
@@ -4196,6 +4402,14 @@ internal fun SmartCodeEditor(
                 Canvas(Modifier.fillMaxSize()) {
                     val layout = editorLayout?.takeIf { it.layoutInput.text.text == editorValue.text }
                             ?: return@Canvas
+                    pausedLine?.let { line ->
+                        val index = line - 1
+                        if (index in 0 until layout.lineCount) {
+                            drawRect(palette.accent.copy(alpha = 0.3f),
+                                topLeft = Offset(0f, layout.getLineTop(index) - editorVerticalScroll.value),
+                                size = androidx.compose.ui.geometry.Size(size.width, layout.getLineBottom(index) - layout.getLineTop(index)))
+                        }
+                    }
                     for (line in fileBreakpoints) {
                         val index = line - 1
                         if (index !in 0 until layout.lineCount) continue
@@ -4252,6 +4466,22 @@ internal fun SmartCodeEditor(
                             visualTransformation = editorVisualTransformation,
                             modifier =
                                     Modifier.fillMaxSize()
+                                            .drawWithContent {
+                                                val layout = editorLayout?.takeIf { it.layoutInput.text.text == editorValue.text }
+                                                if (layout != null && layout.lineCount > 0) {
+                                                    val top = editorVerticalScroll.value.toFloat()
+                                                    val first = (layout.getLineForVerticalPosition(top) - 1).coerceAtLeast(0)
+                                                    val last = (layout.getLineForVerticalPosition(top + editorVerticalScroll.viewportSize) + 1).coerceAtMost(layout.lineCount - 1)
+                                                    val depths = (first..last).map { line -> indentationDepth(editorValue.text, layout.getLineStart(line), layout.getLineEnd(line)) }
+                                                    for (segment in indentationGuideSegments(depths)) {
+                                                        val x = (segment.level - 0.5f) * measuredCharacterWidth * 4f
+                                                        drawLine(palette.subtleText.copy(alpha = 0.24f),
+                                                            Offset(x, layout.getLineTop(first + segment.firstLine)),
+                                                            Offset(x, layout.getLineBottom(first + segment.endLine - 1)), 1.dp.toPx())
+                                                    }
+                                                }
+                                                drawContent()
+                                            }
                                             .onFocusChanged {
                                                 editorFocused = it.isFocused
                                             }
@@ -4331,6 +4561,7 @@ internal fun SmartCodeEditor(
                     canRedo = history.canRedo,
                     onUndo = { restoreEdit(false) },
                     onRedo = { restoreEdit(true) },
+                    currentValue = { session.flushPendingEdits(); editorValue },
                     onEditorValueChange = { updated ->
                         history.record(editorValue, updated)
                         editorValue = updated
@@ -4345,13 +4576,32 @@ internal fun SmartCodeEditor(
         }
         if (diagnostics.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
-            InspectionStrip(
-                    diagnostics = diagnostics,
-                    palette = palette,
-                    modifier = Modifier.fillMaxWidth(),
+            WebInspectionStrip(
+                    diagnostics = diagnostics, palette = palette, modifier = Modifier.fillMaxWidth(),
+                    onOpenProject = { session.flushPendingEdits(); if (featureAccess.require(PremiumFeature.Tools)) showProjectDiagnostics = true },
+                    onNavigate = { diagnostic ->
+                        session.flushPendingEdits()
+                        updateEditorValue(editorValue.copy(selection = TextRange(diagnostic.start.coerceIn(0, editorValue.text.length))))
+                    },
+                    onQuickFix = { diagnostic ->
+                        session.flushPendingEdits()
+                        diagnostic.quickFix?.let { fix ->
+                            applyWebQuickFix(editorValue.text, fix).onSuccess { updated ->
+                                diagnosticActionError = null
+                                updateEditorValue(TextFieldValue(updated, TextRange((fix.start + fix.replacement.length).coerceIn(0, updated.length))))
+                            }.onFailure { diagnosticActionError = it.message }
+                        }
+                    },
             )
+            diagnosticActionError?.let { Text(it, color = palette.error, fontSize = 11.sp) }
         }
     }
+    if (showProjectDiagnostics) WebProjectDiagnosticsDialog(file, editorValue.text, palette, developmentActions,
+        onDismiss = { showProjectDiagnostics = false },
+        onRestoreActive = { updated ->
+            session.flushPendingEdits()
+            updateEditorValue(TextFieldValue(updated, TextRange(editorValue.selection.end.coerceAtMost(updated.length))))
+        })
 }
 
 @Composable
@@ -4574,64 +4824,6 @@ private fun CompletionDetailsDialog(
 }
 
 @Composable
-private fun InspectionStrip(
-        diagnostics: List<CodeDiagnostic>,
-        palette: WebPalette,
-        modifier: Modifier = Modifier,
-) {
-    val sortedDiagnostics =
-            remember(diagnostics) {
-                diagnostics.sortedWith(
-                        compareBy<CodeDiagnostic> { diagnosticSeverityRank(it.severity) }
-                                .thenBy { it.line }
-                                .thenBy { it.column }
-                )
-            }
-    val highestSeverity = sortedDiagnostics.firstOrNull()?.severity ?: "hint"
-
-    Column(
-            modifier =
-                    modifier.clip(RoundedCornerShape(8.dp))
-                            .background(palette.elevatedPanel)
-                            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(8.dp))
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-    ) {
-        Column(
-                verticalArrangement = Arrangement.spacedBy(3.dp),
-                modifier = Modifier.heightIn(max = 42.dp).verticalScroll(rememberScrollState()),
-        ) {
-            sortedDiagnostics.forEach { diagnostic ->
-                Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.height(18.dp),
-                ) {
-                    Box(
-                            modifier =
-                                    Modifier.size(7.dp)
-                                            .clip(CircleShape)
-                                            .background(
-                                                    diagnosticColor(diagnostic.severity, palette)
-                                            ),
-                    )
-                    Spacer(Modifier.width(7.dp))
-                    Text(
-                            text = "L${diagnostic.line}: ${diagnostic.message}",
-                            color =
-                                    if (diagnostic.severity == highestSeverity) palette.text
-                                    else palette.mutedText,
-                            fontFamily = FontFamily.Monospace,
-                            fontSize = 11.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
 internal fun EditorQuickKeys(
         palette: WebPalette,
         editorValue: TextFieldValue,
@@ -4641,6 +4833,7 @@ internal fun EditorQuickKeys(
         onUndo: () -> Unit = {},
         onRedo: () -> Unit = {},
         modifier: Modifier = Modifier,
+        currentValue: () -> TextFieldValue = { editorValue },
         onEditorValueChange: (TextFieldValue) -> Unit,
 ) {
     val language = remember(fileName) { webLanguageForFile(fileName) }
@@ -4649,76 +4842,76 @@ internal fun EditorQuickKeys(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = modifier.horizontalScroll(rememberScrollState()),
     ) {
-        QuickKey("Tab", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "    ")) }
+        QuickKey("Tab", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), "    ")) }
         QuickKeyIcon(Icons.AutoMirrored.Rounded.Undo, "Undo", palette, canUndo, onUndo)
         QuickKeyIcon(Icons.AutoMirrored.Rounded.Redo, "Redo", palette, canRedo, onRedo)
 
         when (language) {
             WebEditorLanguage.Html -> {
                 QuickKey("<>", palette) {
-                    onEditorValueChange(wrapOrInsertPair(editorValue, "<", ">"))
+                    onEditorValueChange(wrapOrInsertPair(currentValue(), "<", ">"))
                 }
-                QuickKey("</>", palette) { onEditorValueChange(insertClosingHtmlTag(editorValue)) }
+                QuickKey("</>", palette) { onEditorValueChange(insertClosingHtmlTag(currentValue())) }
             }
             WebEditorLanguage.Css -> {
                 QuickKey(":", palette) {
-                    onEditorValueChange(insertCodeAtSelection(editorValue, ":"))
+                    onEditorValueChange(insertCodeAtSelection(currentValue(), ":"))
                 }
                 QuickKey(";", palette) {
-                    onEditorValueChange(insertCodeAtSelection(editorValue, ";"))
+                    onEditorValueChange(insertCodeAtSelection(currentValue(), ";"))
                 }
                 QuickKey("#", palette) {
-                    onEditorValueChange(insertCodeAtSelection(editorValue, "#"))
+                    onEditorValueChange(insertCodeAtSelection(currentValue(), "#"))
                 }
                 QuickKey("()", palette) {
-                    onEditorValueChange(wrapOrInsertPair(editorValue, "(", ")"))
+                    onEditorValueChange(wrapOrInsertPair(currentValue(), "(", ")"))
                 }
             }
             WebEditorLanguage.JavaScript -> {
                 QuickKey("()", palette) {
-                    onEditorValueChange(wrapOrInsertPair(editorValue, "(", ")"))
+                    onEditorValueChange(wrapOrInsertPair(currentValue(), "(", ")"))
                 }
                 QuickKey("{}", palette) {
-                    onEditorValueChange(wrapOrInsertPair(editorValue, "{", "}"))
+                    onEditorValueChange(wrapOrInsertPair(currentValue(), "{", "}"))
                 }
                 QuickKey("[]", palette) {
-                    onEditorValueChange(wrapOrInsertPair(editorValue, "[", "]"))
+                    onEditorValueChange(wrapOrInsertPair(currentValue(), "[", "]"))
                 }
                 QuickKey("=>", palette) {
-                    onEditorValueChange(insertCodeAtSelection(editorValue, "=> "))
+                    onEditorValueChange(insertCodeAtSelection(currentValue(), "=> "))
                 }
                 QuickKey(";", palette) {
-                    onEditorValueChange(insertCodeAtSelection(editorValue, ";"))
+                    onEditorValueChange(insertCodeAtSelection(currentValue(), ";"))
                 }
             }
             else -> {}
         }
 
         if (language != WebEditorLanguage.Html && language != WebEditorLanguage.JavaScript) {
-            QuickKey("{}", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "{", "}")) }
+            QuickKey("{}", palette) { onEditorValueChange(wrapOrInsertPair(currentValue(), "{", "}")) }
         }
 
-        QuickKey("\"\"", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "\"", "\"")) }
-        QuickKey("''", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "'", "'")) }
-        QuickKey("=", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "=")) }
-        QuickKey(".", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ".")) }
+        QuickKey("\"\"", palette) { onEditorValueChange(wrapOrInsertPair(currentValue(), "\"", "\"")) }
+        QuickKey("''", palette) { onEditorValueChange(wrapOrInsertPair(currentValue(), "'", "'")) }
+        QuickKey("=", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), "=")) }
+        QuickKey(".", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), ".")) }
         if (language !in setOf(WebEditorLanguage.Css, WebEditorLanguage.JavaScript)) {
-            QuickKey("()", palette) { onEditorValueChange(wrapOrInsertPair(editorValue, "(", ")")) }
-            QuickKey(";", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ";")) }
+            QuickKey("()", palette) { onEditorValueChange(wrapOrInsertPair(currentValue(), "(", ")")) }
+            QuickKey(";", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), ";")) }
         }
         if (language != WebEditorLanguage.Css) {
-            QuickKey(":", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, ":")) }
-            QuickKey("#", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "#")) }
+            QuickKey(":", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), ":")) }
+            QuickKey("#", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), "#")) }
         }
         listOf("_", "+", "-", "*", "\\").forEach { symbol ->
-            QuickKey(symbol, palette) { onEditorValueChange(insertCodeAtSelection(editorValue, symbol)) }
+            QuickKey(symbol, palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), symbol)) }
         }
-        QuickKey("/", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "/")) }
+        QuickKey("/", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), "/")) }
 
         if (language == WebEditorLanguage.JavaScript) {
-            QuickKey("!", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "!")) }
-            QuickKey("&", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "&")) }
-            QuickKey("|", palette) { onEditorValueChange(insertCodeAtSelection(editorValue, "|")) }
+            QuickKey("!", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), "!")) }
+            QuickKey("&", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), "&")) }
+            QuickKey("|", palette) { onEditorValueChange(insertCodeAtSelection(currentValue(), "|")) }
         }
     }
 }
@@ -4828,14 +5021,9 @@ private fun WebEditorFullScreen(
     val density = LocalDensity.current
     val keyboardVisible = WindowInsets.ime.getBottom(density) > 0
 
-    Column(
-            modifier =
-                    Modifier.fillMaxSize()
-                            .imePadding()
-                            .padding(horizontal = 14.dp)
-                            .padding(bottom = 10.dp),
-    ) {
-        Spacer(Modifier.height(4.dp))
+    androidx.compose.runtime.CompositionLocalProvider(LocalSquareExpandedEditor provides true) {
+    Column(modifier = Modifier.fillMaxSize().imePadding()) {
+        Spacer(Modifier.height(2.dp))
         FileTabsOnlyBar(
                 files = files,
                 activeFileId = activeFile.id,
@@ -4844,7 +5032,7 @@ private fun WebEditorFullScreen(
                 onAddFile = onAddFile,
                 onDeleteFile = onDeleteFile,
         )
-        Spacer(Modifier.height(10.dp))
+        Spacer(Modifier.height(4.dp))
         WebCodeEditorPanel(
                 file = activeFile,
                 palette = palette,
@@ -4853,12 +5041,13 @@ private fun WebEditorFullScreen(
                 onRunPreview = onRunPreview,
                 onFullScreen = onBack,
                 showKeyboardAccessory = true,
+                edgeToEdge = true,
                 darkMode = darkMode,
                 nextThemeName = nextThemeName,
                 onToggleTheme = onToggleTheme,
         )
         if (!keyboardVisible && !isDatabaseFileName(activeFile.name)) {
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(6.dp))
             RunPreviewButton(
                     palette = palette,
                     label = runButtonLabelFor(activeFile),
@@ -4867,6 +5056,7 @@ private fun WebEditorFullScreen(
             )
         }
     }
+}
 }
 
 @Composable
@@ -4888,7 +5078,7 @@ private fun RunPreviewButton(
                             disabledContainerColor = palette.tab,
                             disabledContentColor = palette.mutedText,
                     ),
-            shape = RoundedCornerShape(14.dp),
+            shape = if (LocalSquareExpandedEditor.current) androidx.compose.ui.graphics.RectangleShape else RoundedCornerShape(14.dp),
             modifier = Modifier.fillMaxWidth().height(54.dp),
     ) {
         Icon(
@@ -4982,14 +5172,15 @@ private fun WebTerminalPanel(
                     verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                        text = if (sessionRunning) "Terminal · Running" else "Terminal Output",
+                        text = "Terminal Output",
                         color = palette.text,
                         fontSize = 17.sp,
                         modifier = Modifier.weight(1f),
                 )
                 WebTerminalMenu(output = text, palette = palette)
                 if (sessionRunning) {
-                    TextButton(
+                    IconButton(
+                            modifier = Modifier.size(34.dp),
                             onClick = {
                                 val force = stoppingSession
                                 stoppingSession = true
@@ -5009,15 +5200,9 @@ private fun WebTerminalPanel(
                                     }
                                 }
                             },
-                            colors =
-                                    ButtonDefaults.textButtonColors(
-                                            contentColor = palette.error
-                                    )
                     ) {
-                        Text(
-                                if (stoppingSession) "■ Kill" else "■ Stop",
-                                fontWeight = FontWeight.Bold
-                        )
+                        Icon(Icons.Rounded.Stop, if (stoppingSession) "Kill terminal process" else "Stop terminal process",
+                            tint = palette.error, modifier = Modifier.size(22.dp))
                     }
                 }
                 if (darkMode != null && onToggleTheme != null) {
@@ -5028,8 +5213,8 @@ private fun WebTerminalPanel(
                             borderColor = palette.border,
                             contentColor = palette.text,
                             onClick = onToggleTheme,
-                            modifier = Modifier.size(30.dp),
-                            iconSize = 18.dp,
+                            modifier = Modifier.size(28.dp),
+                            iconSize = 17.dp,
                     )
                     Spacer(Modifier.width(4.dp))
                 }
@@ -5048,6 +5233,10 @@ private fun WebTerminalPanel(
             Spacer(Modifier.height(7.dp))
             HorizontalRule(palette)
             Spacer(Modifier.height(7.dp))
+        }
+        val terminalAccess = LocalFeatureAccess.current
+        if (!terminalAccess.fullAccess && !isAwaitingInput) TextButton(onClick = { terminalAccess.require(PremiumFeature.Shell) }, colors = readableTextButtonColors()) {
+            Text("Shell commands - Premium", color = palette.accent, fontSize = 12.sp)
         }
         TerminalBody(
                 terminalText = text,
@@ -5102,7 +5291,8 @@ internal fun TerminalBody(
         }
     }
     val imeBottom = WindowInsets.ime.getBottom(density)
-    val showInputRow = !isRunning || isAwaitingInput || keepInputVisibleWhileRunning
+    val access = LocalFeatureAccess.current
+    val showInputRow = isAwaitingInput || (access.fullAccess && (!isRunning || keepInputVisibleWhileRunning))
     val activeInputLineStart =
             remember(terminalText, isAwaitingInput) {
                 if (isAwaitingInput) terminalText.lastIndexOf('\n') else -1
@@ -7429,59 +7619,84 @@ private fun terminalRunnableJavaScript(file: WebFile, rootDirectory: File): Stri
 
 @Composable
 private fun FileTabsBar(
-        files: List<WebFile>,
-        activeFileId: Long,
-        palette: WebPalette,
-        onSelectFile: (Long) -> Unit,
-        onAddFile: () -> Unit = {},
-        onDeleteFile: (Long) -> Unit = {},
-        onToggleExplorer: () -> Unit = {},
+    files: List<WebFile>,
+    activeFileId: Long,
+    palette: WebPalette,
+    onSelectFile: (Long) -> Unit,
+    onAddFile: () -> Unit,
+    onDeleteFile: (Long) -> Unit,
+    onToggleExplorer: () -> Unit,
 ) {
     Row(
-            modifier =
-                    Modifier.fillMaxWidth()
-                            .height(50.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(palette.elevatedPanel)
-                            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(12.dp))
-                            .padding(horizontal = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(50.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(palette.elevatedPanel)
+            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(12.dp))
+            .padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
-                modifier = Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            files.forEach { file ->
-                FileTab(
-                        file = file,
-                        selected = file.id == activeFileId,
-                        palette = palette,
-                        onSelect = { onSelectFile(file.id) },
-                        onClose = { onDeleteFile(file.id) },
-                )
-            }
-        }
+        FileTabsList(files, activeFileId, palette, onSelectFile, onDeleteFile, Modifier.weight(1f))
         Spacer(Modifier.width(6.dp))
-        AddFileButton(palette = palette, onAddFile = onAddFile)
+        AddFileButton(
+            palette = palette,
+            onAddFile = onAddFile
+        )
         Spacer(Modifier.width(6.dp))
         Box(
-                modifier =
-                        Modifier.size(40.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(palette.tab)
-                                .border(
-                                        BorderStroke(1.dp, palette.border),
-                                        RoundedCornerShape(10.dp)
-                                )
-                                .clickable(onClick = onToggleExplorer),
-                contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(palette.tab)
+                .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(10.dp))
+                .clickable(onClick = onToggleExplorer),
+            contentAlignment = Alignment.Center,
         ) {
             Icon(
-                    imageVector = Icons.Rounded.Menu,
-                    contentDescription = "Explorer",
-                    tint = palette.text,
-                    modifier = Modifier.size(22.dp),
+                imageVector = Icons.Rounded.Menu,
+                contentDescription = "Explorer",
+                tint = palette.text,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun FileTabsList(
+    files: List<WebFile>,
+    activeFileId: Long,
+    palette: WebPalette,
+    onSelectFile: (Long) -> Unit,
+    onDeleteFile: (Long) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val listState = rememberLazyListState()
+    val selectedIndex = files.indexOfFirst { it.id == activeFileId }
+    LaunchedEffect(activeFileId, selectedIndex) {
+        if (selectedIndex >= 0) {
+            val layout = listState.layoutInfo
+            val selected = layout.visibleItemsInfo.firstOrNull { it.index == selectedIndex }
+            if (selected == null || selected.offset < layout.viewportStartOffset ||
+                selected.offset + selected.size > layout.viewportEndOffset) {
+                listState.animateScrollToItem(selectedIndex)
+            }
+        }
+    }
+    LazyRow(
+        state = listState,
+        modifier = modifier.testTag("file-tabs"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(files, key = { it.id }, contentType = { "file-tab" }) { file ->
+            FileTab(
+                file = file,
+                selected = file.id == activeFileId,
+                palette = palette,
+                onSelect = { onSelectFile(file.id) },
+                onClose = { onDeleteFile(file.id) },
             )
         }
     }
@@ -7497,7 +7712,7 @@ private fun FileTab(
 ) {
     Row(
             modifier =
-                    Modifier.height(38.dp)
+                    Modifier.testTag("file-tab:${file.name}").height(38.dp)
                             .width(126.dp)
                             .clip(RoundedCornerShape(10.dp))
                             .background(if (selected) palette.selectedTab else palette.tab)
@@ -7559,38 +7774,29 @@ private fun AddFileButton(
 
 @Composable
 private fun FileTabsOnlyBar(
-        files: List<WebFile>,
-        activeFileId: Long,
-        palette: WebPalette,
-        onSelectFile: (Long) -> Unit,
-        onAddFile: () -> Unit,
-        onDeleteFile: (Long) -> Unit,
+    files: List<WebFile>,
+    activeFileId: Long,
+    palette: WebPalette,
+    onSelectFile: (Long) -> Unit,
+    onAddFile: () -> Unit,
+    onDeleteFile: (Long) -> Unit,
 ) {
-    Row(
-            modifier =
-                    Modifier.fillMaxWidth()
-                            .height(58.dp)
-                            .clip(RoundedCornerShape(15.dp))
-                            .background(palette.panel)
-                            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(15.dp))
-                            .horizontalScroll(rememberScrollState())
-                            .padding(horizontal = 8.dp),
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(58.dp)
+            .background(palette.panel)
+    ) {
+        HorizontalRule(palette)
+        Row(
+            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        files.forEach { file ->
-            FileTab(
-                    file = file,
-                    selected = file.id == activeFileId,
-                    palette = palette,
-                    onSelect = { onSelectFile(file.id) },
-                    onClose = { onDeleteFile(file.id) },
-            )
+        ) {
+            FileTabsList(files, activeFileId, palette, onSelectFile, onDeleteFile, Modifier.weight(1f))
+            AddFileButton(palette = palette, onAddFile = onAddFile)
         }
-        AddFileButton(
-                palette = palette,
-                onAddFile = onAddFile,
-        )
+        HorizontalRule(palette)
     }
 }
 
@@ -7716,14 +7922,14 @@ private fun Panel(
         palette: WebPalette,
         modifier: Modifier = Modifier,
         backgroundColor: Color = palette.panel,
+        edgeToEdge: Boolean = false,
         content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
             modifier =
-                    modifier.clip(RoundedCornerShape(14.dp))
-                            .background(backgroundColor)
-                            .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(14.dp))
-                            .padding(10.dp),
+                    modifier.then(if (edgeToEdge) Modifier.background(backgroundColor)
+                else Modifier.clip(RoundedCornerShape(14.dp)).background(backgroundColor)
+                    .border(BorderStroke(1.dp, palette.border), RoundedCornerShape(14.dp)).padding(10.dp)),
             content = content,
     )
 }
@@ -11070,7 +11276,7 @@ internal fun inspectWebSource(fileName: String, source: String): List<CodeDiagno
                         allowLineComments = fileExtension(fileName) in setOf("php", "phtml"),
                 )
         else -> emptyList()
-    }.take(30)
+    }.take(30).let { withWebQuickFixes(fileName, source, it) }
 }
 
 private fun inspectHtmlSource(source: String): List<CodeDiagnostic> {
@@ -17115,10 +17321,14 @@ private fun relativeWorkspacePath(rootDirectory: File, file: File): String {
 
 private fun File.toFolderTarget(rootDirectory: File): FolderTarget {
     val relative = relativeWorkspacePath(rootDirectory, this).takeUnless { it == "." }.orEmpty()
+    // Called by the background tree scan, never while drawing an explorer row.
+    val children = listFiles()?.filterNot { isProjectIgnoredDirectory(it) }
     return FolderTarget(
             name = if (relative.isBlank()) rootDirectory.name else name,
             path = absolutePath,
             relativePath = relative,
+            childCount = children?.size ?: -1,
+            isPackage = children?.any { it.name in setOf("package.json", "__init__.py") && it.isFile } == true,
     )
 }
 

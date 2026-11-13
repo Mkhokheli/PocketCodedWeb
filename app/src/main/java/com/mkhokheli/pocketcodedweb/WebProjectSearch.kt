@@ -25,6 +25,9 @@ internal data class WebSearchMatch(
     val start: Int,
     val end: Int,
     val original: String,
+    val column: Int = 1,
+    val previewStart: Int = 0,
+    val previewEnd: Int = 0,
 )
 
 internal data class WebSearchResults(val matches: List<WebSearchMatch>, val truncated: Boolean)
@@ -119,9 +122,12 @@ internal suspend fun findWebMatches(projectRoot: File, searchRoot: File, options
             while (scanned < match.range.first) { if (text[scanned++] == '\n') line++ }
             val lineStart = text.lastIndexOf('\n', (match.range.first - 1).coerceAtLeast(-1)) + 1
             val lineEnd = text.indexOf('\n', match.range.first).takeIf { it >= 0 } ?: text.length
+            val previewOffset = maxOf(lineStart, match.range.first - 80)
+            val previewEnd = minOf(lineEnd, previewOffset + 300)
             result += WebSearchMatch(file, file.relativeTo(project).invariantSeparatorsPath, line,
-                text.substring(lineStart, lineEnd).trim().take(300), match.range.first,
-                match.range.last + 1, text)
+                text.substring(previewOffset, previewEnd), match.range.first,
+                match.range.last + 1, text, match.range.first - lineStart + 1,
+                match.range.first - previewOffset, minOf(match.range.last + 1, previewEnd) - previewOffset)
         }
     }
     WebSearchResults(result, false)
@@ -155,7 +161,10 @@ internal suspend fun replaceWebMatches(matches: List<WebSearchMatch>, options: W
                 changed += file
             }
             count += replacements
-        }.onFailure { errors += "${file.name}: ${it.message}" }
+        }.onFailure {
+            if (it is kotlinx.coroutines.CancellationException) throw it
+            errors += "${file.name}: ${it.message}"
+        }
     }
     WebReplaceResult(count, changed, errors)
 }

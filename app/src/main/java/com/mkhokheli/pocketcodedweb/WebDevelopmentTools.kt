@@ -17,7 +17,6 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -38,6 +37,11 @@ internal data class WebDevelopmentActions(
     val refreshHistory: () -> Unit = {},
     val prepareSearch: suspend () -> Unit = {},
     val filesChanged: (List<File>) -> Unit = {},
+    val saveStatus: (Long) -> String = { "Saved" },
+    val retrySave: () -> Unit = {},
+    val fileEdited: (File, String) -> Unit = { _, _ -> },
+    val explainDiagnostic: (String, CodeDiagnostic) -> Unit = { _, _ -> },
+    val canExplainDiagnostic: Boolean = false,
 )
 internal val LocalApiTester = staticCompositionLocalOf<ApiTesterState?> { null }
 
@@ -45,7 +49,7 @@ internal val LocalWebDevelopmentActions = staticCompositionLocalOf<WebDevelopmen
 
 @Composable
 private fun WebToolsMenuButton(description: String, palette: WebPalette, onClick: () -> Unit) {
-    IconButton(onClick = onClick, modifier = Modifier.size(36.dp)) {
+    IconButton(onClick = onClick, modifier = Modifier.size(34.dp)) {
         Icon(Icons.Rounded.MoreVert, contentDescription = description, tint = palette.text,
             modifier = Modifier.size(22.dp))
     }
@@ -53,6 +57,7 @@ private fun WebToolsMenuButton(description: String, palette: WebPalette, onClick
 
 @Composable
 internal fun WebTerminalMenu(output: String, palette: WebPalette) {
+    val access = LocalFeatureAccess.current
     val actions = LocalWebDevelopmentActions.current
     val clipboard = LocalClipboardManager.current
     var expanded by remember { mutableStateOf(false) }
@@ -94,7 +99,7 @@ internal fun WebTerminalMenu(output: String, palette: WebPalette) {
                             fontFamily = FontFamily.Monospace, maxLines = 1,
                             overflow = TextOverflow.Ellipsis) },
                         colors = itemColors, modifier = Modifier.height(rowHeight),
-                        onClick = { actions?.recall?.invoke(command); expanded = false })
+                        onClick = { if (access.require(PremiumFeature.Shell)) actions?.recall?.invoke(command); expanded = false })
                 }
             }
         }
@@ -108,34 +113,23 @@ internal fun WebDevelopmentMenu(
     palette: WebPalette,
     onRestore: (String) -> Unit,
 ) {
+    val access = LocalFeatureAccess.current
     val actions = LocalWebDevelopmentActions.current
     val apiTester = LocalApiTester.current
-    val scope = rememberCoroutineScope()
+    val editorSessions = LocalEditorSessions.current
     val context = androidx.compose.ui.platform.LocalContext.current
     val configurationStore = remember(actions?.fileStore?.projectDirectory) {
         WebRunConfigurationStore(context, actions?.fileStore?.projectDirectory?.path.orEmpty())
     }
     var configurations by remember(configurationStore) { mutableStateOf(configurationStore.load()) }
-    var configurationName by remember { mutableStateOf("") }
-    var configurationCommand by remember { mutableStateOf("") }
-    var revisions by remember(file.filePath) { mutableStateOf<List<FileRevision>>(emptyList()) }
-    var error by remember(file.filePath) { mutableStateOf<String?>(null) }
-    var busy by remember { mutableStateOf(false) }
+    var configurationName by remember(configurationStore) { mutableStateOf("") }
+    var configurationCommand by remember(configurationStore) { mutableStateOf("") }
+    var editingConfiguration by remember(configurationStore) { mutableStateOf<String?>(null) }
+    var configurationError by remember(configurationStore) { mutableStateOf<String?>(null) }
     var expanded by remember { mutableStateOf(false) }
     var dialog by remember { mutableStateOf<String?>(null) }
     var problems by remember { mutableStateOf<List<CodeDiagnostic>>(emptyList()) }
-    LaunchedEffect(dialog, file.filePath) {
-        if (dialog == "Local history") {
-            busy = true
-            val result = withContext(Dispatchers.IO) { runCatching {
-                val store = actions!!.fileStore
-                store.save(file.filePath, source).getOrThrow()
-                store.history(file.filePath)
-            } }
-            result.onSuccess { revisions = it }.onFailure { error = it.message }
-            busy = false
-        }
-    }
+    LaunchedEffect(access.fullAccess) { if (!access.fullAccess) { expanded = false; dialog = null } }
     LaunchedEffect(dialog, if (dialog == "Problems") source else null) {
         if (dialog == "Problems") problems = withContext(Dispatchers.Default) {
             webDevelopmentDiagnostics(File(file.filePath), file.name, source)
@@ -143,9 +137,11 @@ internal fun WebDevelopmentMenu(
     }
     val itemColors = MenuDefaults.itemColors(textColor = palette.text, disabledTextColor = palette.subtleText)
     Box {
-        WebToolsMenuButton("Editor tools", palette) { expanded = true }
+        WebToolsMenuButton(if (access.fullAccess) "Editor tools" else "Editor tools - Premium", palette) {
+            if (access.require(PremiumFeature.Tools)) { editorSessions?.flushPendingEdits(); expanded = true }
+        }
         DropdownMenu(expanded, onDismissRequest = { expanded = false },
-            containerColor = palette.elevatedPanel, shape = RoundedCornerShape(12.dp),
+            containerColor = palette.elevatedPanel, shape = IdeToolControlShape, tonalElevation = 0.dp,
             border = BorderStroke(1.dp, palette.border)) {
             DropdownMenuItem(text = { Text("API tester") }, colors = itemColors, enabled = apiTester != null,
                 onClick = { expanded = false; apiTester?.open = true })
@@ -165,7 +161,11 @@ internal fun WebDevelopmentMenu(
             DropdownMenuItem(text = { Text("Run configurations") }, colors = itemColors, enabled = actions != null,
                 onClick = { expanded = false; dialog = "Run configurations" })
             DropdownMenuItem(text = { Text("Local history") }, colors = itemColors, enabled = actions != null,
-                onClick = { expanded = false; error = null; dialog = "Local history" })
+                onClick = { expanded = false; dialog = "Local history" })
+            HorizontalDivider(color = palette.border.copy(alpha = 0.6f))
+            DropdownMenuItem(text = { Text("Save now • ${actions?.saveStatus?.invoke(file.id) ?: "Saved"}") },
+                colors = itemColors, enabled = actions != null,
+                onClick = { expanded = false; actions?.retrySave?.invoke() })
             DropdownMenuItem(text = { Text("Inspect problems") }, colors = itemColors, onClick = { expanded = false; dialog = "Problems" })
             DropdownMenuItem(text = { Text("Tests and project scripts") }, colors = itemColors, enabled = actions != null,
                 onClick = { expanded = false; dialog = "Tests and project scripts" })
@@ -174,53 +174,72 @@ internal fun WebDevelopmentMenu(
         }
     }
     dialog?.let { title ->
-        AlertDialog(onDismissRequest = { dialog = null }, title = { Text(title) }, text = {
+        if (title == "Problems") {
+            WebProjectDiagnosticsDialog(file, source, palette, actions,
+                onDismiss = { dialog = null }, onRestoreActive = onRestore)
+            return@let
+        }
+        if (title == "Local history" && actions != null) {
+            key(file.filePath) {
+                WebFileHistoryDialog(file.filePath, actions, onDismiss = { dialog = null }, onRestore = onRestore)
+            }
+            return@let
+        }
+        IdeToolDialog(onDismissRequest = { dialog = null }, title = { Text(title) }, text = {
             Column(Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                 when (title) {
                     "Run configurations" -> {
                         Text("Save terminal commands for this project.")
                         configurations.forEach { configuration ->
+                            Column {
+                            Text(configuration.name, style = MaterialTheme.typography.titleSmall)
+                            Text(redactTerminalCommandForDisplay(configuration.command), fontFamily = FontFamily.Monospace,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis, color = palette.mutedText)
                             Row {
                                 TextButton(modifier = Modifier.weight(1f), onClick = {
                                     dialog = null
                                     actions?.command(configuration.command)
-                                }, colors = readableTextButtonColors()) { Text("Run ${configuration.name}") }
+                                }, colors = readableTextButtonColors()) { Text("Run ${configuration.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                                TextButton(onClick = {
+                                    editingConfiguration = configuration.name
+                                    configurationName = configuration.name
+                                    configurationCommand = configuration.command
+                                    configurationError = null
+                                }, colors = readableTextButtonColors()) { Text("Edit") }
                                 TextButton(onClick = {
                                     configurations = configurations.filterNot { it.name == configuration.name }
                                     configurationStore.save(configurations)
+                                    if (editingConfiguration == configuration.name) {
+                                        editingConfiguration = null
+                                        configurationName = ""
+                                        configurationCommand = ""
+                                    }
                                 }, colors = readableTextButtonColors()) { Text("Delete") }
+                            }
+                            HorizontalDivider(color = palette.border)
                             }
                         }
                         OutlinedTextField(value = configurationName, onValueChange = { configurationName = it },
                             label = { Text("Name") }, singleLine = true, colors = readableFieldColors())
                         OutlinedTextField(value = configurationCommand, onValueChange = { configurationCommand = it },
                             label = { Text("Command, e.g. npm test") }, singleLine = true, colors = readableFieldColors())
-                        TextButton(enabled = configurationName.isNotBlank() && configurationCommand.isNotBlank() && configurations.size < 40,
+                        configurationError?.let { Text(it, color = palette.error) }
+                        TextButton(enabled = configurationName.isNotBlank() && configurationCommand.isNotBlank() && (editingConfiguration != null || configurations.size < 40),
                             onClick = {
                                 val configuration = WebRunConfiguration(configurationName.trim(), configurationCommand.trim())
-                                configurations = configurations.filterNot { it.name == configuration.name } + configuration
-                                configurationStore.save(configurations)
-                                configurationName = ""
-                                configurationCommand = ""
-                            }, colors = readableTextButtonColors()) { Text("Save configuration") }
-                    }
-                    "Local history" -> {
-                        if (busy) Text("Loading saved versions...")
-                        error?.let { Text(it) }
-                        if (!busy && revisions.isEmpty()) Text("No earlier saved versions yet.")
-                        revisions.forEach { revision ->
-                            TextButton(enabled = !busy, onClick = {
-                                busy = true
-                                scope.launch {
-                                    val result = withContext(Dispatchers.IO) {
-                                        actions!!.fileStore.readRevision(file.filePath, revision.id)
-                                    }
-                                    result.onSuccess { onRestore(it); dialog = null }
-                                        .onFailure { error = it.message }
-                                    busy = false
-                                }
-                            }, colors = readableTextButtonColors()) { Text("Restore " + java.text.DateFormat.getDateTimeInstance().format(java.util.Date(revision.savedAt)) + " (${revision.sizeBytes} bytes)") }
-                        }
+                                runCatching { updateWebRunConfigurations(configurations, editingConfiguration, configuration) }
+                                    .onSuccess {
+                                        configurationStore.save(it)
+                                        configurations = it
+                                        configurationName = ""
+                                        configurationCommand = ""
+                                        editingConfiguration = null
+                                        configurationError = null
+                                    }.onFailure { configurationError = it.message }
+                            }, colors = readableTextButtonColors()) { Text(if (editingConfiguration == null) "Save configuration" else "Update configuration") }
+                        if (editingConfiguration != null) TextButton(onClick = {
+                            editingConfiguration = null; configurationName = ""; configurationCommand = ""; configurationError = null
+                        }, colors = readableTextButtonColors()) { Text("Cancel edit") }
                     }
                     "Problems" -> {
                         if (problems.isEmpty()) Text("No problems reported by the language service.")
